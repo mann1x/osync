@@ -74,6 +74,9 @@
 
 ## Changelog
 
+v1.0.3
+- Added -bt switch to throttle the bandwidth in B, KB, MB, GB per second, eg. for 75MB/s use `-bt 75MB`
+
 v1.0.2
 - Fixed build with single portable file for Linux/MacOS
 
