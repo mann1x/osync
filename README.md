@@ -74,9 +74,12 @@
 
 ## Changelog
 
+v1.0.2
+- Fixed build with single portable file for Linux/MacOS
+
 v1.0.1
 - Fixed bug with stdErr redirect
-- Remove linux and macos colored output
+- Remove Linux and MacOS colored output
 
 v1.0.0
 - Initial release
