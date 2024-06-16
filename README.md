@@ -54,7 +54,11 @@
 
 ### Installation
 
-> **[Clone the repo]**
+> **[Download latest binary release]**
+
+> **[Build from sources]**
+
+> Clone the repo
 
 > Compile with Visual Studio 2022
 
@@ -63,6 +67,15 @@
 > Simple: `osync modelname http://192.168.100.100:11434`
 
 > `-h` for help
+
+## Known Issues
+
+> Garbled colored output on Linux
+
+## Changelog
+
+v1.0.0
+- Initial release
 
 ## Roadmap
 
