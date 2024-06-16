@@ -481,7 +481,7 @@ namespace osync
             {
             }
 
-            string Version = "1.0.1";
+            string Version = "1.0.2";
             Console.WriteLine($"osync v{Version}");
             Args.InvokeMain<OsyncProgram>(args);
         }
