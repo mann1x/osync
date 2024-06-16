@@ -1,3 +1,7 @@
+![GitHub all releases](https://img.shields.io/github/downloads/mann1x/osync/total)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/mann1x/osync)
+![GitHub contributors](https://img.shields.io/github/contributors/mann1x/osync)
+![GitHub Repo stars](https://img.shields.io/github/stars/mann1x/osync?style=social)
 
 <div align="center">
   <h1>osync</h1>
