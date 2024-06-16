@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <StartupObject>osync.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="PowerArgs" Version="4.0.3" />
+    <PackageReference Include="TqdmSharp" Version="1.3.3" />
+    <PackageReference Include="UrlCombine" Version="2.0.0" />
+  </ItemGroup>
+
+</Project>
