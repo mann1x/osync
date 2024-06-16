@@ -15,24 +15,86 @@ using System.Net.Http.Json;
 using System.IO;
 using System.Xml.Linq;
 using System.Reflection;
+using Born2Code.Net;
 using Console = PrettyConsole.Console;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 
 namespace osync
 {
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class OsyncProgram
     {
+        static string version = "1.0.3";
         static HttpClient client = new HttpClient();
+
+        public static string GetVersion()
+        {
+            return version;
+        }
 
         [HelpHook, ArgShortcut("-?"), ArgShortcut("-h"), ArgDescription("Shows this help")]
         public bool Help { get; set; }
 
-        [ArgRequired, ArgDescription("Source local model to copy eg. mistral:latest"), ArgPosition(0)]
+        [ArgRequired, ArgDescription("Source local model to copy eg: mistral:latest"), ArgPosition(0)]
         public string LocalModel { get; set; }
 
-        [ArgRequired, ArgDescription("Remote ollama server eg. http://192.168.0.100:11434"), ArgPosition(1)]
+        [ArgShortcut("-bt"), ArgDescription("Bandwidth throttling (B, KB, MB, GB)"), ArgExample("-bt 10MB", "Throttle bandwidth to 10MB"), ArgDefaultValue(0)]
+        public string BandwidthThrottling { get; set; }
+
+        [ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgPosition(1)]
         public string RemoteServer { get; set; }
 
+        public long ParseBandwidthThrottling(string value)
+        {
+        try
+            {
+                if (long.TryParse(value, out long result))
+                {
+                    return result;
+                }
+                if (value.EndsWith("B", StringComparison.OrdinalIgnoreCase) && Tools.IsNumeric(value.Substring(value.Length-1, 1)))
+                {
+                    return long.Parse(value.Substring(0, value.Length - 1));
+                }
+
+                if (value.EndsWith("KB", StringComparison.OrdinalIgnoreCase)
+                    || value.EndsWith("MB", StringComparison.OrdinalIgnoreCase)
+                    || value.EndsWith("GB", StringComparison.OrdinalIgnoreCase))
+                {
+
+                    string numericPart = value.Substring(0, value.Length - 2);
+                    long numericValue = long.Parse(numericPart);
+
+                    char unit = value[value.Length - 2];
+                    switch (char.ToLower(unit))
+                    {
+                        case 'k':
+                            return numericValue * 1024;
+                        case 'm':
+                            return numericValue * 1024 * 1024;
+                        case 'g':
+                            return numericValue * 1024 * 1024 * 1024;
+                        default:
+                            Console.WriteLine($"Error: invalid bandwidth throttling format (unit={unit}).");
+                            System.Environment.Exit(1);
+                            return 0;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Error: invalid bandwidth throttling format.");
+                    System.Environment.Exit(1);
+                    return 0;
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Exception, invalid bandwidth throttling format: {e.Message}");
+                System.Environment.Exit(1);
+                return 0;
+            }
+        }
         public static bool GetPlatformColor()
         {
             string thisOs = System.Environment.OSVersion.Platform.ToString();
@@ -123,7 +185,7 @@ namespace osync
                 $"api/blobs/{digest}");
             return response.StatusCode;
         }
-        static async Task RunBlobUpload(string digest, string blobfile)
+        static async Task RunBlobUpload(string digest, string blobfile, long btvalue)
         {
             try
             {
@@ -141,13 +203,15 @@ namespace osync
                     {
                         Stopwatch stopwatch = new Stopwatch();
 
+                        Stream originalFileStream = f;
+                        Stream destFileStream = new ThrottledStream(originalFileStream, btvalue);
 
                         int block_size = 1024;
                         int total_size = (int)(new FileInfo(blobfile).Length/block_size);
                         var arr = Enumerable.Range(0, 100).ToArray();
                         var bar = new Tqdm.ProgressBar(total: total_size, useColor: GetPlatformColor(), useExpMovingAvg: false);
                         bar.SetThemeAscii();
-                        var streamcontent = new ProgressableStreamContent(new StreamContent(f), (sent, total) => {
+                        var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
                             double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
                             double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
                             string speed;
@@ -334,6 +398,8 @@ namespace osync
             
             Debug.WriteLine("You entered model '{0}' and server '{1}'. OLLAMA_MODELS={2}", this.LocalModel, this.RemoteServer, ollama_models);
 
+            long btvalue = ParseBandwidthThrottling(this.BandwidthThrottling);
+
             if (!Directory.Exists(ollama_models))
             {
                 Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
@@ -429,7 +495,7 @@ namespace osync
                     var digest = layer.digest;
                     var hash = digest.Substring(7);
                     var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile).GetAwaiter().GetResult();
+                    RunBlobUpload(digest, blobfile, btvalue).GetAwaiter().GetResult();
                     Modelbuild.Insert(0, $"FROM @{digest}" + System.Environment.NewLine);
                 }
             }
@@ -442,6 +508,13 @@ namespace osync
 
         }
     }
+
+    public static class Tools
+    {
+        public static bool IsNumeric(this string text) { long _out; return long.TryParse(text, out _out); }
+    }
+
+
     public static class ManifestReader
     {
         public static T Read<T>(string filePath)
@@ -477,12 +550,7 @@ namespace osync
     {
         static void Main(string[] args)
         {
-            if (System.Environment.OSVersion.Platform.ToString() != "Win32NT")
-            {
-            }
-
-            string Version = "1.0.2";
-            Console.WriteLine($"osync v{Version}");
+            Console.WriteLine($"osync v{OsyncProgram.GetVersion()}");
             Args.InvokeMain<OsyncProgram>(args);
         }
     }
@@ -598,5 +666,6 @@ namespace osync
 
             base.Dispose(disposing);
         }
+
     }
 }
