@@ -70,10 +70,13 @@
 
 ## Known Issues
 
-> Garbled colored output on Linux
+> None
 
 ## Changelog
 
+v1.0.1
+- Fixed bug with stdErr redirect
+- Remove linux and macos colored output
 v1.0.0
 - Initial release
 

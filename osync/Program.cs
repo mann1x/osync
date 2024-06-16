@@ -13,6 +13,9 @@ using static PowerArgs.Ansi.Cursor;
 using static System.Net.WebRequestMethods;
 using System.Net.Http.Json;
 using System.IO;
+using System.Xml.Linq;
+using System.Reflection;
+using Console = PrettyConsole.Console;
 
 namespace osync
 {
@@ -40,11 +43,11 @@ namespace osync
             }
             else if (thisOs == "Unix" && System.Environment.OSVersion.VersionString.Contains("Darwin"))
             {
-                return false;
+                return true;
             }
             else
             {
-                return true;
+                return false;
             }
         }
         public bool ValidateServer(string RemoteServer)
@@ -66,7 +69,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Could not test url {0}: {1}", RemoteServer, ex);
+                Console.WriteLine($"Could not test url {RemoteServer}: {ex.Message}");
                 return false;
             }
             return true;
@@ -97,7 +100,7 @@ namespace osync
                 }
                 else
                 {
-                    Console.WriteLine("Error: the remote server has answered with HTTP status code: {0}", statusCode);
+                    Console.WriteLine($"Error: the remote server has answered with HTTP status code: {statusCode}");
                     System.Environment.Exit(1);
                 }
 
@@ -333,7 +336,7 @@ namespace osync
 
             if (!Directory.Exists(ollama_models))
             {
-                Console.WriteLine("Error: ollama models directory not found at: {0}", ollama_models);
+                Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
                 System.Environment.Exit(1);
             }
 
@@ -363,11 +366,11 @@ namespace osync
 
             if (!System.IO.File.Exists(modelDir))
             {
-                Console.WriteLine("Error: model '{0}' not found at: {1}", this.LocalModel, modelDir);
+                Console.WriteLine($"Error: model '{this.LocalModel}' not found at: {modelDir}");
                 System.Environment.Exit(1);
             }
 
-            Console.WriteLine("Copying model '{0}' to '{1}'...", this.LocalModel, this.RemoteServer);
+            Console.WriteLine($"Copying model '{this.LocalModel}' to '{this.RemoteServer}'...");
 
             var Modelbuild = new StringBuilder();
             var p = new Process();
@@ -376,7 +379,7 @@ namespace osync
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;
             p.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
-            p.StartInfo.RedirectStandardError = true;
+            p.StartInfo.RedirectStandardError = false;
             p.StartInfo.RedirectStandardOutput = true;
             p.StartInfo.RedirectStandardInput = false;
             p.OutputDataReceived += (a, b) => { 
@@ -394,30 +397,27 @@ namespace osync
             var stdOutput = new StringBuilder();
             p.OutputDataReceived += (sender, args) => stdOutput.AppendLine(args.Data);
 
-            string stdError = null;
-
             try
             {
                 p.Start();
-                stdError = p.StandardError.ReadToEnd();
                 p.BeginOutputReadLine();
                 p.WaitForExit();
             }
             catch (Exception e)
             {
-                Console.WriteLine("Exception: get Modelfile from ollama show failed: {0}", e.Message);
+                Console.WriteLine($"Exception: get Modelfile from ollama show failed: {e.Message}");
                 System.Environment.Exit(1);
             }
 
             if (p.ExitCode != 0)
             {
-                Console.WriteLine("Error: get Modelfile from ollama show failed: {0}", stdOutput.ToString());
+                Console.WriteLine($"Error: get Modelfile from ollama show failed: {stdOutput.ToString()}");
                 System.Environment.Exit(1);
             }
 
             stdOutput.Clear();
             stdOutput = null;
-            
+
             RootManifest manifest = ManifestReader.Read<RootManifest>(modelDir);
 
             foreach (Layer layer in manifest.layers)
@@ -477,8 +477,12 @@ namespace osync
     {
         static void Main(string[] args)
         {
-            string Version = "1.0.0";
-            Console.WriteLine("osync v{0}", Version);
+            if (System.Environment.OSVersion.Platform.ToString() != "Win32NT")
+            {
+            }
+
+            string Version = "1.0.1";
+            Console.WriteLine($"osync v{Version}");
             Args.InvokeMain<OsyncProgram>(args);
         }
     }
