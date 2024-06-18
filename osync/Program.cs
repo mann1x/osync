@@ -19,16 +19,17 @@ using Born2Code.Net;
 using Console = PrettyConsole.Console;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Globalization;
 
 namespace osync
 {
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class OsyncProgram
     {
-        static string version = "1.0.3";
+        static string version = "1.0.4";
         static HttpClient client = new HttpClient();
 
-        public static string GetVersion()
+        public static string GetAppVersion()
         {
             return version;
         }
@@ -148,21 +149,26 @@ namespace osync
         {
             try
             {
-                var statusCode = (int)await GetPs();
-                Debug.WriteLine($"CheckServer PS Status (HTTP Status = {(int)statusCode})");
-                
+                HttpResponseMessage response = await client.GetAsync(
+                    $"api/version");
+                var statusCode = (int)response.StatusCode;
+
                 if (statusCode >= 100 && statusCode < 400)
                 {
-                    Debug.WriteLine("The remote server is active");
+                    string versionjson = response.Content.ReadAsStringAsync().Result;
+                    RootVersion _version = VersionReader.Read<RootVersion>(versionjson);
+                    Console.WriteLine();
+
+                    Console.WriteLine($"The remote ollama server is active and running v{_version.version}");
                 }
                 else if (statusCode >= 500 && statusCode <= 510)
                 {
-                    Console.WriteLine("Error: the remote server has thrown an internal error. Ollama instance is not available");
+                    Console.WriteLine("Error: the remote server has thrown an internal error. ollama instance is not available");
                     System.Environment.Exit(1);
                 }
                 else
                 {
-                    Console.WriteLine($"Error: the remote server has answered with HTTP status code: {statusCode}");
+                    Console.WriteLine($"Error: the remote ollama server has answered with HTTP status code: {statusCode}");
                     System.Environment.Exit(1);
                 }
 
@@ -298,8 +304,8 @@ namespace osync
                     //Console.WriteLine($"{data}");
                     var postmessage = new HttpRequestMessage(HttpMethod.Post, $"api/create");
                     postmessage.Content = body;
-                    var response = client.SendAsync(postmessage, HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
-                    var stream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
+                    var response = await client.SendAsync(postmessage, HttpCompletionOption.ResponseHeadersRead);
+                    var stream = response.Content.ReadAsStreamAsync().Result;
                     using (var streamReader = new StreamReader(stream))
                     {
                         while (!streamReader.EndOfStream)
@@ -309,6 +315,7 @@ namespace osync
                             if (statusline != null)
                             {
                                 RootStatus status = StatusReader.Read<RootStatus>(statusline);
+                                Thread.Sleep(2000);
                                 Console.WriteLine(status.status);
                             }
                         }
@@ -508,6 +515,14 @@ namespace osync
 
         }
     }
+    internal class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.WriteLine($"osync v{OsyncProgram.GetAppVersion()}");
+            Args.InvokeMain<OsyncProgram>(args);
+        }
+    }
 
     public static class Tools
     {
@@ -546,12 +561,19 @@ namespace osync
             }
         }
     }
-    internal class Program
+    public static class VersionReader
     {
-        static void Main(string[] args)
+        public static T Read<T>(string versionline)
         {
-            Console.WriteLine($"osync v{OsyncProgram.GetVersion()}");
-            Args.InvokeMain<OsyncProgram>(args);
+            try
+            {
+                return JsonSerializer.Deserialize<T>(versionline);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error parsing the version: " + ex.Message);
+                return default;
+            }
         }
     }
 
@@ -581,6 +603,10 @@ namespace osync
     public class RootStatus
     {
         public string status { get; set; }
+    }
+    public class RootVersion
+    {
+        public string version { get; set; }
     }
 
     // From https://stackoverflow.com/a/41392145/4213397
