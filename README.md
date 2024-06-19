@@ -68,11 +68,22 @@
 
 > `-h` for help
 
+> Execute without arguments to get local models TabCompletion!
+
 ## Known Issues
 
 > None
 
 ## Changelog
+
+v1.0.5
+- Added local models TabCompletion with interactive prompt if called without arguments
+- Fixed 100 seconds timeout
+- Added arguments exception handling
+
+v1.0.4
+- Check remote ollama version and display its version
+- Fixed streaming output from create model
 
 v1.0.3
 - Added -bt switch to throttle the bandwidth in B, KB, MB, GB per second, eg. for 75MB/s use `-bt 75MB`

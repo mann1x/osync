@@ -20,15 +20,18 @@ using Console = PrettyConsole.Console;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Globalization;
+using System.Text.RegularExpressions;
+using Windows.Devices.Power;
+using Microsoft.VisualBasic;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace osync
 {
-    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.0.4";
+        static string version = "1.0.5";
         static HttpClient client = new HttpClient();
-
         public static string GetAppVersion()
         {
             return version;
@@ -40,11 +43,11 @@ namespace osync
         [ArgRequired, ArgDescription("Source local model to copy eg: mistral:latest"), ArgPosition(0)]
         public string LocalModel { get; set; }
 
+        [ArgRequired, ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgPosition(1)]
+        public string RemoteServer { get; set; }
+
         [ArgShortcut("-bt"), ArgDescription("Bandwidth throttling (B, KB, MB, GB)"), ArgExample("-bt 10MB", "Throttle bandwidth to 10MB"), ArgDefaultValue(0)]
         public string BandwidthThrottling { get; set; }
-
-        [ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgPosition(1)]
-        public string RemoteServer { get; set; }
 
         public long ParseBandwidthThrottling(string value)
         {
@@ -117,10 +120,12 @@ namespace osync
         {
             try
             {                
+                
                 Uri RemoteUri = new Uri(RemoteServer);
                 if ((RemoteUri.Scheme == "http" || RemoteUri.Scheme == "https") == false) { return false; };
                 
                 client.BaseAddress = new Uri(RemoteServer);
+                client.Timeout = TimeSpan.FromDays(24);
 
                 RunCheckServer().GetAwaiter().GetResult();
 
@@ -295,6 +300,8 @@ namespace osync
                     modelfile = Modelfile
                 };
                 string data = System.Text.Json.JsonSerializer.Serialize(modelCreate);
+                
+                System.Console.CursorVisible = false;
 
                 try
                 {
@@ -327,10 +334,12 @@ namespace osync
                     {
                         Console.WriteLine($"Error: could not create '{Modelname}' on the remote server (HTTP status {(int)response.StatusCode}): {response.ReasonPhrase}");
                     }
+                    System.Console.CursorVisible = true;
                 }
                 catch (HttpRequestException e)
                 {
                     Console.WriteLine($"HttpRequestException: could not create '{Modelname}' on the remote server: {e.Message}");
+                    System.Console.CursorVisible = true;
                 }
 
 
@@ -338,6 +347,7 @@ namespace osync
             catch (Exception e)
             {
                 Console.WriteLine($"Exception: could not create '{Modelname}' on the remote server: {e.Message}");
+                System.Console.CursorVisible = true;
             }
         }
         public static string GetPlatformPath(string inputPath, string separator)
@@ -511,6 +521,9 @@ namespace osync
             string Modelfile = Modelbuild.ToString();
             Debug.WriteLine("Modelfile:\n{0}", Modelfile);
 
+            Modelbuild.Clear();
+            Modelbuild = null;
+
             RunCreateModel(LocalModel, Modelfile).GetAwaiter().GetResult();
 
         }
@@ -519,8 +532,17 @@ namespace osync
     {
         static void Main(string[] args)
         {
-            Console.WriteLine($"osync v{OsyncProgram.GetAppVersion()}");
-            Args.InvokeMain<OsyncProgram>(args);
+            try
+            {
+                Console.WriteLine($"osync v{OsyncProgram.GetAppVersion()}");
+                Args.InvokeMain<OsyncProgram>(args);
+            }
+            catch (ArgException ex)
+            {
+                Console.WriteLine(ex.Message);
+                Console.WriteLine(ArgUsage.GenerateUsageFromTemplate<OsyncProgram>().ToString());
+                System.Environment.Exit(1);
+            }
         }
     }
 
@@ -529,6 +551,97 @@ namespace osync
         public static bool IsNumeric(this string text) { long _out; return long.TryParse(text, out _out); }
     }
 
+    public class LocalModelsTabCompletionSource : ITabCompletionSource
+    {
+        string[] models;
+        public LocalModelsTabCompletionSource()
+        {
+            string model_re = "^(?<modelname>\\S*).*";
+            var Modelsbuild = new StringBuilder();
+            var p = new Process();
+            p.StartInfo.FileName = "ollama";
+            p.StartInfo.Arguments = @" ls";
+            p.StartInfo.CreateNoWindow = true;
+            p.StartInfo.UseShellExecute = false;
+            p.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
+            p.StartInfo.RedirectStandardError = false;
+            p.StartInfo.RedirectStandardOutput = true;
+            p.StartInfo.RedirectStandardInput = false;
+            p.OutputDataReceived += (a, b) =>
+            {
+                if (b != null && b.Data != null)
+                {
+                    if (!b.Data.StartsWith("failed to get console mode") &&
+                        !b.Data.StartsWith("NAME"))
+                    {
+                        Match m = Regex.Match(b.Data, model_re, RegexOptions.IgnoreCase);
+                        if (m.Groups["modelname"].Success)
+                            Modelsbuild.AppendLine(m.Groups["modelname"].Value.ToString().Trim());
+                    }
+                }
+            };
+            try
+            {
+                p.Start();
+                p.BeginOutputReadLine();
+                p.WaitForExit();
+            }
+            catch (Exception e)
+            {
+                models = new string[] { "" };
+            }
+
+            models = Modelsbuild.ToString().Split('\n');
+            Modelsbuild.Clear();
+            Modelsbuild = null;
+        }
+
+        public bool TryComplete(TabCompletionContext context, out string? completion)
+        {
+            try
+            {
+                var match = from m in models where m.StartsWith(context.CompletionCandidate) select m;
+                if (match.Count() == 1)
+                {
+                    completion = match.Single().ToString().Trim();
+                    return true;
+                }
+                else if (match.Count() > 1)
+                {
+                    var minimumLength = match.Min(x => x.Length);
+                    int commonChars;
+                    for (commonChars = 0; commonChars < minimumLength; commonChars++)
+                    {
+                        if (match.Select(x => x[commonChars]).Distinct().Count() > 1)
+                        {
+                            break;
+                        }
+                    }
+
+                    if (match != null && match.Any())
+                    {
+                        completion = match.First().ToString().Trim().Substring(0, commonChars);
+                        return true;
+                    }
+                    else
+                    {
+                        completion = null;
+                        return false;
+                    }
+                }
+                else
+                {
+                    completion = null;
+                    return false;
+                }
+            }
+            catch(Exception e)
+            {
+                completion = null;
+                return false;
+            }
+        }
+    }
 
     public static class ManifestReader
     {
