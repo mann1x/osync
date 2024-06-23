@@ -64,9 +64,19 @@
 
 ## Usage
 
-> Simple: `osync modelname http://192.168.100.100:11434`
+> Simple: `osync cp modelname http://192.168.100.100:11434`
 
-> `-h` for help
+> available action commands:
+
+- `copy` (available as alias `cp`)
+
+    - `source` (local ollama)
+    
+    - `destination` (remote ollama)
+
+> Command line arguments:
+
+- `-h` for help
 
 > Execute without arguments to get local models TabCompletion!
 
@@ -75,6 +85,11 @@
 > None
 
 ## Changelog
+
+v1.0.6
+- Changed syntax to support multiple actions: now copying a model needs `copy` (alias `cp`)
+- Fixed upload progress bar updates
+- Handles automatically `latest` tag if none specified
 
 v1.0.5
 - Added local models TabCompletion with interactive prompt if called without arguments

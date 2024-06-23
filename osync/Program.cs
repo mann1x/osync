@@ -16,6 +16,7 @@ using System.IO;
 using System.Xml.Linq;
 using System.Reflection;
 using Born2Code.Net;
+using static PrettyConsole.Console;
 using Console = PrettyConsole.Console;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -24,14 +25,29 @@ using System.Text.RegularExpressions;
 using Windows.Devices.Power;
 using Microsoft.VisualBasic;
 using static System.Runtime.InteropServices.JavaScript.JSType;
+using System.Drawing;
+using Spectre.Console;
+using ByteSizeLib;
 
 namespace osync
 {
+    public class CopyArgs
+    {
+        [ArgRequired, ArgDescription("Source model to copy eg: mistral:latest"), ArgPosition(1)]
+        public string Source { get; set; }
+        [ArgRequired, ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgPosition(2)]
+        public string Destination { get; set; }
+    }
+
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.0.5";
+        static string version = "1.0.6";
         static HttpClient client = new HttpClient();
+        string ollama_models = "";
+        long btvalue = 0;
+        string separator = Path.DirectorySeparatorChar.ToString();
+
         public static string GetAppVersion()
         {
             return version;
@@ -40,11 +56,11 @@ namespace osync
         [HelpHook, ArgShortcut("-?"), ArgShortcut("-h"), ArgDescription("Shows this help")]
         public bool Help { get; set; }
 
-        [ArgRequired, ArgDescription("Source local model to copy eg: mistral:latest"), ArgPosition(0)]
-        public string LocalModel { get; set; }
-
-        [ArgRequired, ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgPosition(1)]
-        public string RemoteServer { get; set; }
+        [ArgActionMethod, ArgDescription("Copy a model from source to destination (alias: cp)"), ArgShortcut("cp")]
+        public void Copy(CopyArgs args)
+        {
+            ActionCopy(args.Source, args.Destination);
+        }
 
         [ArgShortcut("-bt"), ArgDescription("Bandwidth throttling (B, KB, MB, GB)"), ArgExample("-bt 10MB", "Throttle bandwidth to 10MB"), ArgDefaultValue(0)]
         public string BandwidthThrottling { get; set; }
@@ -214,49 +230,57 @@ namespace osync
                     {
                         Stopwatch stopwatch = new Stopwatch();
 
-                        Stream originalFileStream = f;
-                        Stream destFileStream = new ThrottledStream(originalFileStream, btvalue);
-
-                        int block_size = 1024;
-                        int total_size = (int)(new FileInfo(blobfile).Length/block_size);
-                        var arr = Enumerable.Range(0, 100).ToArray();
-                        var bar = new Tqdm.ProgressBar(total: total_size, useColor: GetPlatformColor(), useExpMovingAvg: false);
-                        bar.SetThemeAscii();
-                        var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
-                            double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
-                            double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
-                            string speed;
-                            if (speedInBytesPerSecond < 1024)
-                            {
-                                speed = $"{(int)(speedInBytesPerSecond)} B/s";
-                            }
-                            else if (speedInBytesPerSecond < 1024 * 1024)
-                            {
-                                speed = $"{(int)(speedInBytesPerSecond / 1024)} KB/s";
-                            }
-                            else if (speedInBytesPerSecond < 1024 * 1024 * 1024)
-                            {
-                                speed = $"{(int)(speedInBytesPerSecond / (1024 * 1024))} MB/s";
-                            }
-                            else
-                            {
-                                speed = $"{(int)(speedInBytesPerSecond / (1024 * 1024 * 1024))} GB/s";
-                            }
-                            bar.SetLabel($"uploading at {speed}");
-                            bar.Progress((int)(sent / block_size));
-                        });
-
                         try
                         {
+                            System.Console.CursorVisible = false;
+
+                            Stream originalFileStream = f;
+                            Stream destFileStream = new ThrottledStream(originalFileStream, btvalue);
+
+                            int block_size = 1024;
+                            int total_size = (int)(new FileInfo(blobfile).Length/block_size);
+                            var blob_size = ByteSize.FromKibiBytes(total_size);                            
+                            var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
+                            bool finished = false;
+                            int tick = 0;
+                            var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
+                                tick++;
+                                if (tick < 40) { return; }
+                                tick = 0;
+                                double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
+                                double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
+                                try
+                                {
+                                    int percentage = (int)((sent * 100.0) / total);
+                                    var sent_size = ByteSize.FromKibiBytes(sent / block_size);
+                                    percentage = (int)sent_size.MebiBytes;
+                                    bar.SetLabel($"({ByteSize.FromKibiBytes(sent / block_size).ToString("#")} / {ByteSize.FromKibiBytes(total / block_size).ToString("#")}) uploading at {ByteSize.FromKibiBytes(speedInBytesPerSecond / block_size).ToString("#")}/s");
+                                    if (!finished)
+                                    {
+                                        bar.Progress(percentage);
+                                    }
+                                    else
+                                    {
+                                        bar.Progress((int)blob_size.MebiBytes);
+                                    }
+                                }
+                                catch (Exception e)
+                                {
+                                    Console.WriteError($"Error: {e.Message}");
+                                }
+
+                            });
+
                             stopwatch.Start();
                             var response = await client.PostAsync($"api/blobs/{digest}", streamcontent);
-                            bar.Progress(total_size);
-                            bar.Finish();
-                            stopwatch.Stop();
+                            finished = true;
+
+                            System.Console.CursorVisible = true;
 
                             if (response.IsSuccessStatusCode)
                             {
-                                Console.WriteLine("Success uploading layer.");
+                                bar.Finish();
+                                Console.WriteLine("success uploading layer");
                             }
                             else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                             {
@@ -268,11 +292,18 @@ namespace osync
                                 Console.WriteLine($"Error: upload failed: {response.ReasonPhrase}");
                                 System.Environment.Exit(1);
                             }
+
+                            streamcontent.Dispose();
                         }
                         catch (Exception e)
                         {
                             Console.WriteLine($"Error: {e.Message}");
+                            System.Console.CursorVisible = true;
                             System.Environment.Exit(1);
+                        }
+                        finally
+                        {
+                            stopwatch.Stop();
                         }
                     }
 
@@ -292,6 +323,7 @@ namespace osync
 
         static async Task RunCreateModel(string Modelname, string Modelfile)
         {
+            int exitcode = 0;
             try
             {
                 var modelCreate = new
@@ -313,40 +345,41 @@ namespace osync
                     postmessage.Content = body;
                     var response = await client.SendAsync(postmessage, HttpCompletionOption.ResponseHeadersRead);
                     var stream = response.Content.ReadAsStreamAsync().Result;
+                    string laststatus = "";
                     using (var streamReader = new StreamReader(stream))
                     {
                         while (!streamReader.EndOfStream)
                         {
-                            //Console.WriteLine(streamReader.ReadLine());
                             string? statusline = streamReader.ReadLine();
                             if (statusline != null)
                             {
                                 RootStatus status = StatusReader.Read<RootStatus>(statusline);
-                                Thread.Sleep(2000);
+                                laststatus = status.status;
                                 Console.WriteLine(status.status);
                             }
                         }
-                    }
-                    
-                    response.EnsureSuccessStatusCode();
+                    }                    
 
                     if (!response.IsSuccessStatusCode)
                     {
                         Console.WriteLine($"Error: could not create '{Modelname}' on the remote server (HTTP status {(int)response.StatusCode}): {response.ReasonPhrase}");
                     }
-                    System.Console.CursorVisible = true;
+                    if (laststatus != "success") {  exitcode = 1; }
                 }
                 catch (HttpRequestException e)
                 {
                     Console.WriteLine($"HttpRequestException: could not create '{Modelname}' on the remote server: {e.Message}");
-                    System.Console.CursorVisible = true;
+                    exitcode = 1;
                 }
-
-
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Exception: could not create '{Modelname}' on the remote server: {e.Message}");
+                exitcode = 1;
+            }
+            finally
+            {
+                System.Environment.Exit(exitcode);
                 System.Console.CursorVisible = true;
             }
         }
@@ -389,33 +422,12 @@ namespace osync
             }
         }
 
-        public void Main()
+        public void ActionCopy(string Source, string Destination) 
         {
-            string ollama_models = "";
-            string separator = Path.DirectorySeparatorChar.ToString();
 
-            var env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS");
-            if (env_models != null && env_models.Length > 0)
-            {
-                ollama_models = env_models;
-            }
-            if (env_models == null || env_models.Length < 1)
-            {
-                env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
-                if (env_models != null && env_models.Length > 0)
-                {
-                    ollama_models = env_models;
-                }
-            }
-            if (ollama_models.Length < 1)
-            {
-                ollama_models = "*";
-            }
-            ollama_models = GetPlatformPath(ollama_models, separator);
-            
-            Debug.WriteLine("You entered model '{0}' and server '{1}'. OLLAMA_MODELS={2}", this.LocalModel, this.RemoteServer, ollama_models);
+            Init();
 
-            long btvalue = ParseBandwidthThrottling(this.BandwidthThrottling);
+            Debug.WriteLine("Copy: you entered model '{0}' and server '{1}'. OLLAMA_MODELS={2}", Source, Destination, ollama_models);
 
             if (!Directory.Exists(ollama_models))
             {
@@ -423,16 +435,24 @@ namespace osync
                 System.Environment.Exit(1);
             }
 
-            if (!ValidateServer(this.RemoteServer))
+            if (!ValidateServer(Destination))
             {
                 System.Environment.Exit(1);
             }
 
-            string modelBase = ModelBase(this.LocalModel);
+            string modelBase = ModelBase(Source);
 
             string modelDir;
             string blobDir = $"{ollama_models}{separator}blobs";
-            string manifest_file = this.LocalModel.Replace(":", separator);
+            string manifest_file = Source;
+            if (!Source.Contains(":"))
+            {
+                manifest_file = $"{manifest_file}{separator}latest";
+            }
+            else
+            {
+                manifest_file = Source.Replace(":", separator);
+            }
 
             if (modelBase == "hub")
             {
@@ -449,24 +469,24 @@ namespace osync
 
             if (!System.IO.File.Exists(modelDir))
             {
-                Console.WriteLine($"Error: model '{this.LocalModel}' not found at: {modelDir}");
+                Console.WriteLine($"Error: model '{Source}' not found at: {modelDir}");
                 System.Environment.Exit(1);
             }
 
-            Console.WriteLine($"Copying model '{this.LocalModel}' to '{this.RemoteServer}'...");
+            Console.WriteLine($"Copying model '{Source}' to '{Destination}'...");
 
             var Modelbuild = new StringBuilder();
             var p = new Process();
             p.StartInfo.FileName = "ollama";
-            p.StartInfo.Arguments = @" show " + this.LocalModel + " --modelfile";
+            p.StartInfo.Arguments = @" show " + Source + " --modelfile";
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;
             p.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
             p.StartInfo.RedirectStandardError = false;
             p.StartInfo.RedirectStandardOutput = true;
             p.StartInfo.RedirectStandardInput = false;
-            p.OutputDataReceived += (a, b) => { 
-                if(b != null && b.Data != null)
+            p.OutputDataReceived += (a, b) => {
+                if (b != null && b.Data != null)
                 {
                     if (!b.Data.StartsWith("failed to get console mode") &&
                         !b.Data.StartsWith("#") &&
@@ -524,7 +544,32 @@ namespace osync
             Modelbuild.Clear();
             Modelbuild = null;
 
-            RunCreateModel(LocalModel, Modelfile).GetAwaiter().GetResult();
+            RunCreateModel(Source, Modelfile).GetAwaiter().GetResult();
+
+        }
+        public void Init()
+        {
+
+            var env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS");
+            if (env_models != null && env_models.Length > 0)
+            {
+                ollama_models = env_models;
+            }
+            if (env_models == null || env_models.Length < 1)
+            {
+                env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
+                if (env_models != null && env_models.Length > 0)
+                {
+                    ollama_models = env_models;
+                }
+            }
+            if (ollama_models.Length < 1)
+            {
+                ollama_models = "*";
+            }
+            ollama_models = GetPlatformPath(ollama_models, separator);
+
+            btvalue = ParseBandwidthThrottling(this.BandwidthThrottling);
 
         }
     }
@@ -535,7 +580,8 @@ namespace osync
             try
             {
                 Console.WriteLine($"osync v{OsyncProgram.GetAppVersion()}");
-                Args.InvokeMain<OsyncProgram>(args);
+                Console.ResetColors();
+                Args.InvokeAction<OsyncProgram>(args);
             }
             catch (ArgException ex)
             {
