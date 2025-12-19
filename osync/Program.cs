@@ -33,10 +33,12 @@ namespace osync
 {
     public class CopyArgs
     {
-        [ArgRequired, ArgDescription("Source model to copy eg: mistral:latest"), ArgPosition(1)]
+        [ArgRequired, ArgDescription("Source: local model name (e.g., mistral:latest) or remote server URL with model (e.g., http://192.168.0.100:11434/mistral:latest)"), ArgPosition(1)]
         public string Source { get; set; }
-        [ArgRequired, ArgDescription("Destination: local model name (e.g., my-model:v1) or remote server URL (e.g., http://192.168.0.100:11434)"), ArgExample("my-backup-model", "local model name"), ArgExample("http://192.168.0.100:11434", "remote server"), ArgPosition(2)]
+        [ArgRequired, ArgDescription("Destination: local model name (e.g., my-model:v1) or remote server URL with model (e.g., http://192.168.0.100:11434/my-model:v1). Note: Remote-to-remote copy only works for models originally from the Ollama registry. Locally created models cannot be copied between remote servers."), ArgExample("my-backup-model", "local model name"), ArgExample("http://192.168.0.100:11434/mistral:latest", "remote server with model"), ArgPosition(2)]
         public string Destination { get; set; }
+        [ArgDescription("Buffer size for remote-to-remote copy (e.g., 256MB, 1GB). Default: 512MB")]
+        public string BufferSize { get; set; }
     }
 
     public class ListArgs
@@ -80,9 +82,243 @@ namespace osync
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
+    // Progress wrapper stream that displays transfer progress
+    public class ProgressStream : Stream
+    {
+        private readonly Stream _baseStream;
+        private readonly long _totalBytes;
+        private readonly ByteSize _totalSize;
+        private long _bytesTransferred;
+
+        public ProgressStream(Stream baseStream, long totalBytes, ByteSize totalSize)
+        {
+            _baseStream = baseStream;
+            _totalBytes = totalBytes;
+            _totalSize = totalSize;
+            _bytesTransferred = 0;
+        }
+
+        public override bool CanRead => _baseStream.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _totalBytes;
+        public override long Position
+        {
+            get => _bytesTransferred;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int bytesRead = _baseStream.Read(buffer, offset, count);
+            _bytesTransferred += bytesRead;
+
+            // Show progress
+            int percentage = _totalBytes > 0 ? (int)((_bytesTransferred * 100) / _totalBytes) : 0;
+            var transferred = ByteSize.FromBytes(_bytesTransferred);
+            Console.Write($"\r  Progress: {percentage}% ({transferred.ToString("#.##")} / {_totalSize.ToString("#.##")})");
+
+            return bytesRead;
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            int bytesRead = await _baseStream.ReadAsync(buffer, offset, count, cancellationToken);
+            _bytesTransferred += bytesRead;
+
+            // Show progress
+            int percentage = _totalBytes > 0 ? (int)((_bytesTransferred * 100) / _totalBytes) : 0;
+            var transferred = ByteSize.FromBytes(_bytesTransferred);
+            Console.Write($"\r  Progress: {percentage}% ({transferred.ToString("#.##")} / {_totalSize.ToString("#.##")})");
+
+            return bytesRead;
+        }
+
+        public override void Flush() => _baseStream.Flush();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _baseStream?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    // Bounded buffer stream for simultaneous download/upload with backpressure
+    public class BufferedPipeStream : Stream
+    {
+        private readonly SemaphoreSlim _writeSemaphore;
+        private readonly SemaphoreSlim _readSemaphore;
+        private readonly Queue<byte[]> _bufferQueue;
+        private readonly object _lock = new object();
+        private readonly long _maxBufferSize;
+        private long _currentBufferSize;
+        private bool _writeCompleted;
+        private Exception _exception;
+
+        public BufferedPipeStream(long maxBufferSize)
+        {
+            _maxBufferSize = maxBufferSize;
+            _bufferQueue = new Queue<byte[]>();
+            _writeSemaphore = new SemaphoreSlim(1, 1);
+            _readSemaphore = new SemaphoreSlim(0);
+            _currentBufferSize = 0;
+            _writeCompleted = false;
+        }
+
+        public void CompleteWriting()
+        {
+            lock (_lock)
+            {
+                _writeCompleted = true;
+                _readSemaphore.Release();
+            }
+        }
+
+        public void SetException(Exception ex)
+        {
+            lock (_lock)
+            {
+                _exception = ex;
+                _readSemaphore.Release();
+            }
+        }
+
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            if (_exception != null)
+                throw _exception;
+
+            // Create a copy of the data to write
+            byte[] data = new byte[count];
+            Array.Copy(buffer, offset, data, 0, count);
+
+            // Wait if buffer is full (backpressure)
+            while (true)
+            {
+                lock (_lock)
+                {
+                    if (_currentBufferSize + count <= _maxBufferSize)
+                    {
+                        _bufferQueue.Enqueue(data);
+                        _currentBufferSize += count;
+                        _readSemaphore.Release();
+                        return;
+                    }
+                }
+
+                // Buffer is full, wait a bit before retrying (backpressure)
+                await Task.Delay(10, cancellationToken);
+            }
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                if (_exception != null)
+                    throw _exception;
+
+                lock (_lock)
+                {
+                    if (_bufferQueue.Count > 0)
+                    {
+                        byte[] data = _bufferQueue.Dequeue();
+                        int bytesToCopy = Math.Min(data.Length, count);
+                        Array.Copy(data, 0, buffer, offset, bytesToCopy);
+                        _currentBufferSize -= data.Length;
+
+                        // If we didn't copy all data, put the rest back
+                        if (bytesToCopy < data.Length)
+                        {
+                            byte[] remaining = new byte[data.Length - bytesToCopy];
+                            Array.Copy(data, bytesToCopy, remaining, 0, remaining.Length);
+                            var tempQueue = new Queue<byte[]>();
+                            tempQueue.Enqueue(remaining);
+                            while (_bufferQueue.Count > 0)
+                                tempQueue.Enqueue(_bufferQueue.Dequeue());
+                            _bufferQueue.Clear();
+                            while (tempQueue.Count > 0)
+                                _bufferQueue.Enqueue(tempQueue.Dequeue());
+                            _currentBufferSize += remaining.Length;
+                        }
+
+                        return bytesToCopy;
+                    }
+                    else if (_writeCompleted)
+                    {
+                        return 0; // End of stream
+                    }
+                }
+
+                // Wait for data to be available
+                await _readSemaphore.WaitAsync(cancellationToken);
+            }
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer, offset, count).GetAwaiter().GetResult();
+    }
+
+    // Stream wrapper for tracking upload progress
+    public class ProgressTrackingStream : Stream
+    {
+        private readonly Stream _baseStream;
+        private readonly long _totalBytes;
+        private long _bytesRead;
+        private readonly Action<long> _progressCallback;
+
+        public ProgressTrackingStream(Stream baseStream, long totalBytes, Action<long> progressCallback)
+        {
+            _baseStream = baseStream;
+            _totalBytes = totalBytes;
+            _progressCallback = progressCallback;
+            _bytesRead = 0;
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            int bytesRead = await _baseStream.ReadAsync(buffer, offset, count, cancellationToken);
+            _bytesRead += bytesRead;
+            _progressCallback?.Invoke(_bytesRead);
+            return bytesRead;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int bytesRead = _baseStream.Read(buffer, offset, count);
+            _bytesRead += bytesRead;
+            _progressCallback?.Invoke(_bytesRead);
+            return bytesRead;
+        }
+
+        public override bool CanRead => _baseStream.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _totalBytes;
+        public override long Position { get => _bytesRead; set => throw new NotSupportedException(); }
+        public override void Flush() => _baseStream.Flush();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     public class OsyncProgram
     {
-        static string version = "1.0.9";
+        static string version = "1.1.0";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         string ollama_models = "";
         long btvalue = 0;
@@ -99,7 +335,7 @@ namespace osync
         [ArgActionMethod, ArgDescription("Copy a model locally or to a remote server (alias: cp)"), ArgShortcut("cp")]
         public void Copy(CopyArgs args)
         {
-            ActionCopy(args.Source, args.Destination);
+            ActionCopy(args.Source, args.Destination, args.BufferSize);
         }
 
         [ArgActionMethod, ArgDescription("List the models on a local or remote ollama server (alias: ls)"), ArgShortcut("ls")]
@@ -238,6 +474,55 @@ namespace osync
                 return false;
             }
             return true;
+        }
+
+        private bool ValidateServerUrl(string serverUrl, bool silent = false)
+        {
+            try
+            {
+                Uri serverUri = new Uri(serverUrl);
+                if (serverUri.Scheme != "http" && serverUri.Scheme != "https")
+                {
+                    return false;
+                }
+
+                // Create a temporary client for validation to avoid modifying global client state
+                using (var tempClient = new HttpClient() { Timeout = TimeSpan.FromSeconds(10) })
+                {
+                    tempClient.BaseAddress = new Uri(serverUrl);
+                    var response = tempClient.GetAsync("api/version").GetAwaiter().GetResult();
+                    var statusCode = (int)response.StatusCode;
+
+                    if (statusCode >= 100 && statusCode < 400)
+                    {
+                        return true;
+                    }
+                    else if (statusCode >= 500 && statusCode <= 510)
+                    {
+                        if (!silent)
+                            Console.WriteLine($"Error: the server {serverUrl} has thrown an internal error. ollama instance is not available");
+                        return false;
+                    }
+                    else
+                    {
+                        if (!silent)
+                            Console.WriteLine($"Error: the server {serverUrl} answered with HTTP status code: {statusCode}");
+                        return false;
+                    }
+                }
+            }
+            catch (UriFormatException)
+            {
+                if (!silent)
+                    Console.WriteLine($"Error: server URL is not valid: {serverUrl}");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                if (!silent)
+                    Console.WriteLine($"Could not connect to server {serverUrl}: {ex.Message}");
+                return false;
+            }
         }
 
         static async Task<HttpStatusCode> GetPs()
@@ -528,34 +813,79 @@ namespace osync
             }
         }
 
-        public void ActionCopy(string Source, string Destination)
+        private (string serverUrl, string modelName) ParseRemoteSource(string source)
+        {
+            // Format: http://server:port/modelname:tag or http://server:port/namespace/modelname:tag
+            try
+            {
+                Uri uri = new Uri(source);
+                string serverUrl = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
+                string modelName = uri.AbsolutePath.TrimStart('/');
+
+                if (string.IsNullOrEmpty(modelName))
+                {
+                    Console.WriteLine("Error: model name must be specified in the URL (e.g., http://server:port/modelname:tag)");
+                    System.Environment.Exit(1);
+                }
+
+                return (serverUrl, modelName);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error parsing remote URL: {ex.Message}");
+                System.Environment.Exit(1);
+                return (null, null);
+            }
+        }
+
+        public void ActionCopy(string Source, string Destination, string BufferSize = null)
         {
             Init();
 
-            Debug.WriteLine("Copy: you entered model '{0}' and server '{1}'. OLLAMA_MODELS={2}", Source, Destination, ollama_models);
+            Debug.WriteLine("Copy: you entered model '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Source, Destination, ollama_models);
 
-            // Check if destination is a URL or a local model name
-            bool isRemoteCopy = Destination.StartsWith("http://") || Destination.StartsWith("https://");
+            // Detect if source and destination are remote or local
+            bool isSourceRemote = Source.StartsWith("http://") || Source.StartsWith("https://");
+            bool isDestinationRemote = Destination.StartsWith("http://") || Destination.StartsWith("https://");
 
-            if (isRemoteCopy)
+            if (isSourceRemote && isDestinationRemote)
             {
-                // Remote copy
+                // Remote to Remote copy - use streaming buffer
+                var (sourceServer, sourceModel) = ParseRemoteSource(Source);
+                var (destServer, destModel) = ParseRemoteSource(Destination);
+
+                Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}...");
+                ActionCopyRemoteToRemoteStreaming(sourceServer, sourceModel, destServer, destModel, BufferSize).GetAwaiter().GetResult();
+            }
+            else if (isSourceRemote && !isDestinationRemote)
+            {
+                // Remote to Local copy
+                var (sourceServer, sourceModel) = ParseRemoteSource(Source);
+
+                Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to local '{Destination}'...");
+                ActionCopyRemoteToLocal(sourceServer, sourceModel, Destination);
+            }
+            else if (!isSourceRemote && isDestinationRemote)
+            {
+                // Local to Remote copy
+                var (destServer, destModel) = ParseRemoteSource(Destination);
+
                 if (!Directory.Exists(ollama_models))
                 {
                     Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
 
-                if (!ValidateServer(Destination))
+                if (!ValidateServerUrl(destServer))
                 {
                     System.Environment.Exit(1);
                 }
 
-                ActionCopyRemote(Source, Destination);
+                ActionCopyLocalToRemote(Source, destServer, destModel);
             }
             else
             {
-                // Local copy (destination is a model name)
+                // Local to Local copy
                 ActionCopyLocal(Source, Destination);
             }
         }
@@ -635,7 +965,7 @@ namespace osync
             }
         }
 
-        private void ActionCopyRemote(string Source, string Destination)
+        private void ActionCopyLocalToRemote(string Source, string destServer, string destModel)
         {
             if (!Directory.Exists(ollama_models))
             {
@@ -643,10 +973,13 @@ namespace osync
                 System.Environment.Exit(1);
             }
 
-            if (!ValidateServer(Destination))
+            if (!ValidateServerUrl(destServer))
             {
                 System.Environment.Exit(1);
             }
+
+            // Set the global client's BaseAddress for subsequent RunBlobUpload and RunCreateModel calls
+            client.BaseAddress = new Uri(destServer);
 
             string modelBase = ModelBase(Source);
 
@@ -717,7 +1050,7 @@ namespace osync
                 }
             }
 
-            Console.WriteLine($"Copying model '{Source}' to '{Destination}'...");
+            Console.WriteLine($"Copying model '{Source}' to '{destModel}' on {destServer}...");
 
             // Parse modelfile to extract template, system, and parameters
             var templateBuilder = new StringBuilder();
@@ -862,8 +1195,974 @@ namespace osync
 
             Debug.WriteLine($"Creating model with files: {string.Join(", ", files.Keys)}");
 
-            RunCreateModel(Source, files, template, system, parameters).GetAwaiter().GetResult();
+            RunCreateModel(destModel, files, template, system, parameters).GetAwaiter().GetResult();
         }
+
+        private async Task ActionCopyRemoteToRemoteStreaming(string sourceServer, string sourceModel, string destServer, string destModel, string bufferSizeStr)
+        {
+            try
+            {
+                // Validate both servers without modifying global client state
+                if (!ValidateServerUrl(sourceServer))
+                {
+                    Console.WriteLine($"Error: cannot connect to source server {sourceServer}");
+                    System.Environment.Exit(1);
+                }
+
+                if (!ValidateServerUrl(destServer))
+                {
+                    Console.WriteLine($"Error: cannot connect to destination server {destServer}");
+                    System.Environment.Exit(1);
+                }
+
+                // Parse buffer size (default 512MB)
+                long bufferSize = 512 * 1024 * 1024; // 512MB default
+                if (!string.IsNullOrEmpty(bufferSizeStr))
+                {
+                    bufferSize = ParseSize(bufferSizeStr);
+                }
+                Console.WriteLine($"Using buffer size: {ByteSize.FromBytes(bufferSize).ToString("#.##")}");
+
+                // Create dedicated client for source server
+                var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                sourceClient.BaseAddress = new Uri(sourceServer);
+
+                Console.WriteLine($"Fetching model information from source server...");
+
+                // Get modelfile string
+                var (modelfile, modelfileErr) = await GetRemoteModelfileStringWithClient(sourceClient, sourceModel);
+
+                if (modelfile == null)
+                {
+                    Console.WriteLine($"Error: Could not retrieve model from source server");
+                    if (modelfileErr != null)
+                    {
+                        Console.WriteLine($"Details: {modelfileErr}");
+                    }
+                    System.Environment.Exit(1);
+                }
+
+                // Extract blob digests from modelfile
+                var blobDigests = ExtractBlobDigestsFromModelfile(modelfile);
+
+                if (blobDigests.Count == 0)
+                {
+                    Console.WriteLine($"Error: No blob references found in modelfile");
+                    System.Environment.Exit(1);
+                }
+
+                Console.WriteLine($"Found {blobDigests.Count} blob(s) to transfer");
+
+                // Get modelfile information for creating model on destination
+                var (template, system, parameters) = await GetRemoteModelfileWithClient(sourceClient, sourceModel);
+
+                // Stream each blob from source to destination through memory buffer
+                var files = new Dictionary<string, string>();
+                int modelIndex = 0;
+                int adapterIndex = 0;
+
+                foreach (var digest in blobDigests)
+                {
+                    Console.WriteLine($"\nTransferring blob {digest.Substring(0, 19)}...");
+
+                    await StreamBlobSourceToDestination(
+                        sourceServer,
+                        destServer,
+                        sourceModel,
+                        digest,
+                        bufferSize
+                    );
+
+                    // Track files for model creation
+                    string filename = modelIndex == 0 ? "model.gguf" : $"model_{modelIndex}.gguf";
+                    files[filename] = digest;
+                    modelIndex++;
+                }
+
+                // Create model on destination server
+                Console.WriteLine($"\nCreating model '{destModel}' on destination server...");
+                var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                destClient.BaseAddress = new Uri(destServer);
+
+                await RunCreateModelWithClient(destClient, destModel, files, template, system, parameters);
+
+                Console.WriteLine($"\nSuccessfully copied '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}");
+
+                sourceClient.Dispose();
+                destClient.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\nError during copy: {ex.Message}");
+                throw;
+            }
+        }
+
+        private void ActionCopyRemoteToLocal(string sourceServer, string sourceModel, string destModel)
+        {
+            // Validate source server
+            if (!ValidateServerUrl(sourceServer))
+            {
+                Console.WriteLine($"Error: cannot connect to source server {sourceServer}");
+                System.Environment.Exit(1);
+            }
+
+            var originalBaseAddress = client.BaseAddress;
+
+            try
+            {
+                // Get model from source using ollama pull API
+                client.BaseAddress = new Uri(sourceServer);
+                Console.WriteLine($"Pulling model '{sourceModel}' from source server...");
+
+                // Use ollama pull to download from remote and then copy locally
+                var pullProcess = new Process();
+                pullProcess.StartInfo.FileName = "ollama";
+                pullProcess.StartInfo.Arguments = $"pull {sourceModel}";
+                pullProcess.StartInfo.CreateNoWindow = true;
+                pullProcess.StartInfo.UseShellExecute = false;
+                pullProcess.StartInfo.RedirectStandardOutput = true;
+                pullProcess.StartInfo.RedirectStandardError = true;
+                pullProcess.StartInfo.EnvironmentVariables["OLLAMA_HOST"] = sourceServer;
+
+                try
+                {
+                    pullProcess.Start();
+                    string output = pullProcess.StandardOutput.ReadToEnd();
+                    string error = pullProcess.StandardError.ReadToEnd();
+                    pullProcess.WaitForExit();
+
+                    if (pullProcess.ExitCode != 0)
+                    {
+                        Console.WriteLine($"Error: failed to pull model from source server: {error}");
+                        System.Environment.Exit(1);
+                    }
+
+                    Console.WriteLine(output);
+                    Console.WriteLine($"Successfully pulled '{sourceModel}' from source server");
+
+                    // Now copy locally if destination name is different
+                    if (sourceModel != destModel)
+                    {
+                        Console.WriteLine($"Copying to '{destModel}'...");
+                        ActionCopyLocal(sourceModel, destModel);
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Exception: failed to pull model: {e.Message}");
+                    System.Environment.Exit(1);
+                }
+            }
+            finally
+            {
+                client.BaseAddress = originalBaseAddress;
+            }
+        }
+
+        private async Task<RootManifest> GetRemoteModelManifest(string modelName)
+        {
+            try
+            {
+                var showRequest = new { name = modelName, verbose = true };
+                string showJson = JsonSerializer.Serialize(showRequest);
+                var content = new StringContent(showJson, Encoding.UTF8, "application/json");
+
+                var response = await client.PostAsync("api/show", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                string json = await response.Content.ReadAsStringAsync();
+
+                // Try to parse the response to see what we get
+                try
+                {
+                    var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+
+                    // Check if there's a model_info section with layers
+                    if (showResponse.RootElement.TryGetProperty("model_info", out var modelInfo))
+                    {
+                        // Try to construct a manifest from model_info
+                        var manifest = new RootManifest
+                        {
+                            schemaVersion = 2,
+                            mediaType = "application/vnd.docker.distribution.manifest.v2+json",
+                            layers = new List<Layer>()
+                        };
+
+                        // Extract layers if available
+                        if (modelInfo.TryGetProperty("layers", out var layersElement))
+                        {
+                            foreach (var layer in layersElement.EnumerateArray())
+                            {
+                                var layerObj = new Layer
+                                {
+                                    mediaType = layer.TryGetProperty("media_type", out var mt) ? mt.GetString() : "application/vnd.ollama.image.model",
+                                    digest = layer.TryGetProperty("digest", out var d) ? d.GetString() : "",
+                                    size = layer.TryGetProperty("size", out var s) ? s.GetInt64() : 0
+                                };
+                                manifest.layers.Add(layerObj);
+                            }
+                        }
+
+                        if (manifest.layers.Count > 0)
+                        {
+                            return manifest;
+                        }
+                    }
+                }
+                catch (Exception parseEx)
+                {
+                    Console.WriteLine($"Error parsing show response: {parseEx.Message}");
+                    Console.WriteLine($"Response: {json.Substring(0, Math.Min(500, json.Length))}...");
+                }
+
+                return null;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Error getting model manifest: {e.Message}");
+                return null;
+            }
+        }
+
+        private async Task<(string template, string system, List<string> parameters)> GetRemoteModelfile(string modelName)
+        {
+            try
+            {
+                var showRequest = new { name = modelName };
+                string showJson = JsonSerializer.Serialize(showRequest);
+                var content = new StringContent(showJson, Encoding.UTF8, "application/json");
+
+                var response = await client.PostAsync("api/show", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (null, null, null);
+                }
+
+                string json = await response.Content.ReadAsStringAsync();
+                var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+
+                string template = null;
+                string system = null;
+                List<string> parameters = new List<string>();
+
+                if (showResponse.RootElement.TryGetProperty("template", out var templateElement))
+                {
+                    template = templateElement.GetString();
+                }
+
+                if (showResponse.RootElement.TryGetProperty("system", out var systemElement))
+                {
+                    system = systemElement.GetString();
+                }
+
+                if (showResponse.RootElement.TryGetProperty("parameters", out var parametersElement))
+                {
+                    // Parameters can be either a string or an object
+                    if (parametersElement.ValueKind == JsonValueKind.String)
+                    {
+                        // It's a string, parse it line by line
+                        var paramStr = parametersElement.GetString();
+                        if (!string.IsNullOrEmpty(paramStr))
+                        {
+                            var lines = paramStr.Split('\n');
+                            foreach (var line in lines)
+                            {
+                                if (!string.IsNullOrWhiteSpace(line))
+                                {
+                                    parameters.Add(line.Trim());
+                                }
+                            }
+                        }
+                    }
+                    else if (parametersElement.ValueKind == JsonValueKind.Object)
+                    {
+                        // It's an object, enumerate properties
+                        foreach (var param in parametersElement.EnumerateObject())
+                        {
+                            parameters.Add($"{param.Name} {param.Value.GetRawText()}");
+                        }
+                    }
+                }
+
+                return (template, system, parameters);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Error getting modelfile: {e.Message}");
+                return (null, null, null);
+            }
+        }
+
+        private async Task<(string modelfile, string error)> GetRemoteModelfileString(string modelName)
+        {
+            return await GetRemoteModelfileStringWithClient(client, modelName);
+        }
+
+        private async Task<(string modelfile, string error)> GetRemoteModelfileStringWithClient(HttpClient httpClient, string modelName)
+        {
+            try
+            {
+                var showRequest = new { name = modelName };
+                string showJson = JsonSerializer.Serialize(showRequest);
+                var content = new StringContent(showJson, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync("api/show", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    string error = await response.Content.ReadAsStringAsync();
+                    return (null, error);
+                }
+
+                string json = await response.Content.ReadAsStringAsync();
+                var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+
+                // Get the modelfile string
+                if (showResponse.RootElement.TryGetProperty("modelfile", out var modelfileElement))
+                {
+                    return (modelfileElement.GetString(), null);
+                }
+
+                return (null, "No modelfile found in response");
+            }
+            catch (Exception e)
+            {
+                return (null, e.Message);
+            }
+        }
+
+        private async Task<(string template, string system, List<string> parameters)> GetRemoteModelfileWithClient(HttpClient httpClient, string modelName)
+        {
+            try
+            {
+                var showRequest = new { name = modelName };
+                string showJson = JsonSerializer.Serialize(showRequest);
+                var content = new StringContent(showJson, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync("api/show", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (null, null, null);
+                }
+
+                string json = await response.Content.ReadAsStringAsync();
+                var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+
+                string template = null;
+                string system = null;
+                List<string> parameters = new List<string>();
+
+                if (showResponse.RootElement.TryGetProperty("template", out var templateElement))
+                {
+                    template = templateElement.GetString();
+                }
+
+                if (showResponse.RootElement.TryGetProperty("system", out var systemElement))
+                {
+                    system = systemElement.GetString();
+                }
+
+                if (showResponse.RootElement.TryGetProperty("parameters", out var parametersElement))
+                {
+                    // Parameters can be either a string or an object
+                    if (parametersElement.ValueKind == JsonValueKind.String)
+                    {
+                        // It's a string, parse it line by line
+                        var paramStr = parametersElement.GetString();
+                        if (!string.IsNullOrEmpty(paramStr))
+                        {
+                            var lines = paramStr.Split('\n');
+                            foreach (var line in lines)
+                            {
+                                if (!string.IsNullOrWhiteSpace(line))
+                                {
+                                    parameters.Add(line.Trim());
+                                }
+                            }
+                        }
+                    }
+                    else if (parametersElement.ValueKind == JsonValueKind.Object)
+                    {
+                        // It's an object, enumerate properties
+                        foreach (var param in parametersElement.EnumerateObject())
+                        {
+                            parameters.Add($"{param.Name} {param.Value.GetRawText()}");
+                        }
+                    }
+                }
+
+                return (template, system, parameters);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Error getting modelfile: {e.Message}");
+                return (null, null, null);
+            }
+        }
+
+        private async Task RunCreateModelWithClient(HttpClient httpClient, string Modelname, Dictionary<string, string> files, string template = null, string system = null, List<string> parameters = null)
+        {
+            try
+            {
+                var modelCreate = new Dictionary<string, object>
+                {
+                    { "model", Modelname },
+                    { "files", files }
+                };
+
+                if (!string.IsNullOrEmpty(template))
+                    modelCreate["template"] = template;
+                if (!string.IsNullOrEmpty(system))
+                    modelCreate["system"] = system;
+                if (parameters != null && parameters.Count > 0)
+                {
+                    var paramDict = new Dictionary<string, string>();
+                    foreach (var param in parameters)
+                    {
+                        var parts = param.Split(new[] { ' ' }, 2);
+                        if (parts.Length == 2)
+                            paramDict[parts[0]] = parts[1];
+                    }
+                    if (paramDict.Count > 0)
+                        modelCreate["parameters"] = paramDict;
+                }
+
+                string data = System.Text.Json.JsonSerializer.Serialize(modelCreate);
+
+                var body = new StringContent(data, Encoding.UTF8, "application/json");
+                var postmessage = new HttpRequestMessage(HttpMethod.Post, $"api/create");
+                postmessage.Content = body;
+                var response = await httpClient.SendAsync(postmessage, HttpCompletionOption.ResponseHeadersRead);
+                var stream = await response.Content.ReadAsStreamAsync();
+                string laststatus = "";
+                using (var streamReader = new StreamReader(stream))
+                {
+                    while (!streamReader.EndOfStream)
+                    {
+                        string? statusline = await streamReader.ReadLineAsync();
+                        if (statusline != null)
+                        {
+                            RootStatus status = StatusReader.Read<RootStatus>(statusline);
+                            if (status?.status != null)
+                            {
+                                laststatus = status.status;
+                                Console.WriteLine(status.status);
+                            }
+                        }
+                    }
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new Exception($"Could not create '{Modelname}' on the remote server (HTTP status {(int)response.StatusCode}): {response.ReasonPhrase}");
+                }
+                else if (laststatus != "success")
+                {
+                    throw new Exception($"Model creation did not complete successfully (status: {laststatus})");
+                }
+            }
+            catch (HttpRequestException e)
+            {
+                throw new Exception($"Could not create '{Modelname}' on the remote server: {e.Message}", e);
+            }
+        }
+
+        private List<string> ExtractBlobDigestsFromModelfile(string modelfile)
+        {
+            var digests = new List<string>();
+
+            if (string.IsNullOrEmpty(modelfile))
+            {
+                return digests;
+            }
+
+            // Parse the modelfile line by line
+            var lines = modelfile.Split('\n');
+
+            foreach (var line in lines)
+            {
+                var trimmedLine = line.Trim();
+
+                // Look for FROM statements with blob paths
+                // Format: FROM /path/to/blobs/sha256-<hash>
+                if (trimmedLine.StartsWith("FROM "))
+                {
+                    var path = trimmedLine.Substring(5).Trim();
+
+                    // Extract the sha256 digest from the path
+                    // Path format: /usr/share/ollama/.ollama/models/blobs/sha256-<hash>
+                    var blobMatch = Regex.Match(path, @"sha256-([a-f0-9]{64})");
+                    if (blobMatch.Success)
+                    {
+                        string digest = $"sha256:{blobMatch.Groups[1].Value}";
+                        if (!digests.Contains(digest))
+                        {
+                            digests.Add(digest);
+                        }
+                    }
+                }
+                // Also check for ADAPTER statements which may reference blobs
+                else if (trimmedLine.StartsWith("ADAPTER "))
+                {
+                    var path = trimmedLine.Substring(8).Trim();
+
+                    var blobMatch = Regex.Match(path, @"sha256-([a-f0-9]{64})");
+                    if (blobMatch.Success)
+                    {
+                        string digest = $"sha256:{blobMatch.Groups[1].Value}";
+                        if (!digests.Contains(digest))
+                        {
+                            digests.Add(digest);
+                        }
+                    }
+                }
+            }
+
+            return digests;
+        }
+
+        private string TransformModelfileForLocalCreate(string modelfile)
+        {
+            if (string.IsNullOrEmpty(modelfile))
+            {
+                return modelfile;
+            }
+
+            // Replace file paths with blob digest references
+            // Transform: FROM /path/to/blobs/sha256-<hash>
+            // To:        FROM @sha256:<hash>
+
+            var result = Regex.Replace(
+                modelfile,
+                @"(FROM|ADAPTER)\s+[^\s]*sha256-([a-f0-9]{64})",
+                "$1 @sha256:$2"
+            );
+
+            return result;
+        }
+
+        private long ParseSize(string sizeStr)
+        {
+            if (string.IsNullOrEmpty(sizeStr))
+            {
+                return 512 * 1024 * 1024; // Default 512MB
+            }
+
+            sizeStr = sizeStr.Trim().ToUpper();
+
+            // Extract number and unit
+            long multiplier = 1;
+            string numericPart = sizeStr;
+
+            if (sizeStr.EndsWith("GB"))
+            {
+                multiplier = 1024 * 1024 * 1024;
+                numericPart = sizeStr.Substring(0, sizeStr.Length - 2);
+            }
+            else if (sizeStr.EndsWith("MB"))
+            {
+                multiplier = 1024 * 1024;
+                numericPart = sizeStr.Substring(0, sizeStr.Length - 2);
+            }
+            else if (sizeStr.EndsWith("KB"))
+            {
+                multiplier = 1024;
+                numericPart = sizeStr.Substring(0, sizeStr.Length - 2);
+            }
+
+            if (long.TryParse(numericPart.Trim(), out long value))
+            {
+                return value * multiplier;
+            }
+
+            return 512 * 1024 * 1024; // Default if parsing fails
+        }
+
+        private async Task StreamBlobSourceToDestination(string sourceServer, string destServer, string sourceModel, string digest, long bufferSize)
+        {
+            var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            destClient.BaseAddress = new Uri(destServer);
+
+            try
+            {
+                // Check if blob exists on destination
+                var headResponse = await destClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, $"api/blobs/{digest}"));
+                if (headResponse.StatusCode == System.Net.HttpStatusCode.OK)
+                {
+                    Console.WriteLine($"  Blob already exists on destination - skipping");
+                    return;
+                }
+
+                Console.WriteLine($"  Blob {digest.Substring(0, Math.Min(12, digest.Length))}... not on destination, fetching from registry");
+
+                var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                registryClient.DefaultRequestHeaders.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json");
+
+                // Parse model name to extract namespace and model
+                // Format: [namespace/]model:tag or just model:tag
+                string modelNameWithoutTag = sourceModel.Split(':')[0]; // Remove tag
+                string tag = sourceModel.Contains(':') ? sourceModel.Split(':')[1] : "latest";
+                string registryPath;
+
+                if (modelNameWithoutTag.Contains("/"))
+                {
+                    // Namespaced model (e.g., "myuser/mymodel")
+                    registryPath = modelNameWithoutTag;
+                }
+                else
+                {
+                    // Library model (e.g., "llama3") - uses "library" namespace
+                    registryPath = $"library/{modelNameWithoutTag}";
+                }
+
+                Console.WriteLine($"  Registry path: {registryPath}:{tag}");
+
+                // First, try to get the manifest to understand the blob structure
+                var manifestUrls = new[]
+                {
+                    $"https://registry.ollama.ai/v2/{registryPath}/manifests/{tag}",
+                    $"https://registry.ollama.com/v2/{registryPath}/manifests/{tag}"
+                };
+
+                Console.WriteLine($"  Attempting to fetch manifest...");
+                foreach (var manifestUrl in manifestUrls)
+                {
+                    try
+                    {
+                        var manifestResponse = await registryClient.GetAsync(manifestUrl);
+                        if (manifestResponse.IsSuccessStatusCode)
+                        {
+                            Console.WriteLine($"  Manifest found at: {manifestUrl}");
+                            var manifestContent = await manifestResponse.Content.ReadAsStringAsync();
+                            Console.WriteLine($"  Manifest preview: {manifestContent.Substring(0, Math.Min(200, manifestContent.Length))}...");
+                            break;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"  Manifest not found at: {manifestUrl} (HTTP {manifestResponse.StatusCode})");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  Manifest fetch failed: {ex.Message}");
+                    }
+                }
+
+                // Now try to download the blob
+                Console.WriteLine($"  Attempting to download blob...");
+
+                // Construct registry URLs to try
+                var registryUrls = new[]
+                {
+                    $"https://registry.ollama.ai/v2/{registryPath}/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/{registryPath}/blobs/{digest}",
+                    // Try without library prefix
+                    $"https://registry.ollama.ai/v2/{modelNameWithoutTag}/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/{modelNameWithoutTag}/blobs/{digest}",
+                    // Fallback to direct blob access
+                    $"https://registry.ollama.ai/v2/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/blobs/{digest}"
+                };
+
+                HttpResponseMessage downloadResponse = null;
+                string successUrl = null;
+
+                foreach (var url in registryUrls)
+                {
+                    try
+                    {
+                        Console.WriteLine($"  Trying: {url}");
+                        downloadResponse = await registryClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                        Console.WriteLine($"    Response: HTTP {(int)downloadResponse.StatusCode} {downloadResponse.StatusCode}");
+
+                        if (downloadResponse.IsSuccessStatusCode)
+                        {
+                            successUrl = url;
+                            Console.WriteLine($"  Success! Blob found at: {url}");
+                            break; // Successfully found the blob
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"    Exception: {ex.Message}");
+                        continue;
+                    }
+                }
+
+                if (downloadResponse == null || !downloadResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"  Error: Blob not found in Ollama registry after trying all URLs");
+                    Console.WriteLine($"  Last HTTP status: {downloadResponse?.StatusCode}");
+                    Console.WriteLine($"  Digest: {digest}");
+                    Console.WriteLine($"  Source model: {sourceModel}");
+                    Console.WriteLine();
+                    Console.WriteLine($"  Note: This model was likely created locally and is not available in the registry.");
+                    Console.WriteLine($"  Remote-to-remote copy only works for models originally from the Ollama registry.");
+                    throw new Exception("Blob not available in registry. Cannot complete remote-to-remote copy.");
+                }
+
+                long totalSize = downloadResponse.Content.Headers.ContentLength ?? 0;
+                var blobSizeBytes = ByteSize.FromBytes(totalSize);
+
+                Console.WriteLine($"transferring layer {digest}");
+                Console.WriteLine($"using {ByteSize.FromBytes(bufferSize).ToString("#.##")} memory buffer");
+
+                // Create a memory buffer stream that limits buffering and enables simultaneous download/upload
+                var pipeStream = new BufferedPipeStream(bufferSize);
+                var downloadStream = await downloadResponse.Content.ReadAsStreamAsync();
+
+                // Setup progress tracking
+                int block_size = 1024;
+                int total_size_blocks = (int)(totalSize / block_size);
+                var blob_size = ByteSize.FromKibiBytes(total_size_blocks);
+                var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
+                var stopwatch = new Stopwatch();
+                stopwatch.Start();
+
+                long bytesTransferred = 0;
+                var progressLock = new object();
+                int tick = 0;
+                bool finished = false;
+
+                // Start download task - reads from registry and writes to pipe
+                var downloadTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        byte[] buffer = new byte[Math.Min(81920, bufferSize)]; // 80KB chunks
+                        int bytesRead;
+                        while ((bytesRead = await downloadStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                        {
+                            await pipeStream.WriteAsync(buffer, 0, bytesRead);
+                        }
+                        pipeStream.CompleteWriting();
+                    }
+                    catch (Exception ex)
+                    {
+                        pipeStream.SetException(ex);
+                        throw;
+                    }
+                });
+
+                // Start upload task - reads from pipe and uploads to destination
+                var uploadTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        SetCursorVisible(false);
+
+                        var uploadStream = new ProgressTrackingStream(pipeStream, totalSize, (transferred) =>
+                        {
+                            lock (progressLock)
+                            {
+                                bytesTransferred = transferred;
+                                tick++;
+                                if (tick < 40) { return; }
+                                tick = 0;
+
+                                double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
+                                double speedInBytesPerSecond = transferred / elapsedTimeInSeconds;
+
+                                try
+                                {
+                                    var sent_size = ByteSize.FromKibiBytes(transferred / block_size);
+                                    int percentage = (int)sent_size.MebiBytes;
+                                    bar.SetLabel($"({ByteSize.FromKibiBytes(transferred / block_size).ToString("#")} / {ByteSize.FromKibiBytes(totalSize / block_size).ToString("#")}) transferring at {ByteSize.FromKibiBytes(speedInBytesPerSecond / block_size).ToString("#")}/s");
+                                    if (!finished)
+                                    {
+                                        bar.Progress(percentage);
+                                    }
+                                    else
+                                    {
+                                        bar.Progress((int)blob_size.MebiBytes);
+                                    }
+                                }
+                                catch
+                                {
+                                    // Silently ignore progress bar errors
+                                }
+                            }
+                        });
+
+                        var uploadContent = new StreamContent(uploadStream);
+                        uploadContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                        uploadContent.Headers.ContentLength = totalSize;
+
+                        var uploadResponse = await destClient.PostAsync($"api/blobs/{digest}", uploadContent);
+
+                        finished = true;
+                        SetCursorVisible(true);
+
+                        if (!uploadResponse.IsSuccessStatusCode)
+                        {
+                            throw new Exception($"Upload failed with HTTP {uploadResponse.StatusCode}");
+                        }
+
+                        return uploadResponse;
+                    }
+                    catch (Exception ex)
+                    {
+                        SetCursorVisible(true);
+                        throw new Exception($"Upload error: {ex.Message}", ex);
+                    }
+                });
+
+                // Wait for both download and upload to complete
+                await Task.WhenAll(downloadTask, uploadTask);
+
+                var finalUploadResponse = await uploadTask;
+
+                bar.Finish();
+
+                if (!finalUploadResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Error: Failed to upload to destination (HTTP {finalUploadResponse.StatusCode})");
+                    System.Environment.Exit(1);
+                }
+
+                Console.WriteLine("success transferring layer");
+
+                downloadStream.Dispose();
+
+                registryClient.Dispose();
+            }
+            finally
+            {
+                destClient.Dispose();
+            }
+        }
+
+        private async Task TransferBlobRemoteToRemote(string sourceServer, string destServer, string digest)
+        {
+            var originalBaseAddress = client.BaseAddress;
+
+            try
+            {
+                // Check if blob already exists on destination
+                client.BaseAddress = new Uri(destServer);
+                var statusCode = (int)await BlobHead(digest);
+
+                if (statusCode == 200)
+                {
+                    Console.WriteLine($"skipping upload for already created layer {digest}");
+                    return;
+                }
+                else if (statusCode != 404)
+                {
+                    Console.WriteLine($"Error: unexpected status code {statusCode} when checking blob on destination");
+                    System.Environment.Exit(1);
+                }
+
+                // Download blob from source
+                Console.WriteLine($"downloading layer {digest} from source");
+                client.BaseAddress = new Uri(sourceServer);
+
+                var downloadResponse = await client.GetAsync($"api/blobs/{digest}", HttpCompletionOption.ResponseHeadersRead);
+
+                if (!downloadResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Error: failed to download blob from source (HTTP {(int)downloadResponse.StatusCode})");
+                    System.Environment.Exit(1);
+                }
+
+                // Upload blob to destination
+                Console.WriteLine($"uploading layer {digest} to destination");
+                client.BaseAddress = new Uri(destServer);
+
+                using (var sourceStream = await downloadResponse.Content.ReadAsStreamAsync())
+                {
+                    Stopwatch stopwatch = new Stopwatch();
+
+                    try
+                    {
+                        SetCursorVisible(false);
+
+                        Stream destFileStream = new ThrottledStream(sourceStream, btvalue);
+
+                        long totalSize = downloadResponse.Content.Headers.ContentLength ?? 0;
+                        int block_size = 1024;
+                        var blob_size = ByteSize.FromBytes(totalSize);
+                        var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
+                        bool finished = false;
+                        int tick = 0;
+
+                        var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
+                            tick++;
+                            if (tick < 40) { return; }
+                            tick = 0;
+                            double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
+                            double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
+                            try
+                            {
+                                int percentage = (int)((sent * 100.0) / total);
+                                var sent_size = ByteSize.FromBytes(sent);
+                                percentage = (int)sent_size.MebiBytes;
+                                bar.SetLabel($"({ByteSize.FromBytes(sent).ToString("#")} / {ByteSize.FromBytes(total).ToString("#")}) uploading at {ByteSize.FromBytes(speedInBytesPerSecond).ToString("#")}/s");
+                                if (!finished)
+                                {
+                                    bar.Progress(percentage);
+                                }
+                                else
+                                {
+                                    bar.Progress((int)blob_size.MebiBytes);
+                                }
+                            }
+                            catch
+                            {
+                                // Silently ignore progress bar errors
+                            }
+                        });
+
+                        stopwatch.Start();
+                        var uploadResponse = await client.PostAsync($"api/blobs/{digest}", streamcontent);
+                        finished = true;
+
+                        SetCursorVisible(true);
+
+                        if (uploadResponse.IsSuccessStatusCode)
+                        {
+                            bar.Finish();
+                            Console.WriteLine("success uploading layer");
+                        }
+                        else if (uploadResponse.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                        {
+                            Console.WriteLine("Error: upload failed invalid digest, check both ollama are running the same version.");
+                            System.Environment.Exit(1);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Error: upload failed: {uploadResponse.ReasonPhrase}");
+                            System.Environment.Exit(1);
+                        }
+
+                        streamcontent.Dispose();
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine($"Error: {e.Message}");
+                        SetCursorVisible(true);
+                        System.Environment.Exit(1);
+                    }
+                    finally
+                    {
+                        stopwatch.Stop();
+                    }
+                }
+            }
+            finally
+            {
+                client.BaseAddress = originalBaseAddress;
+            }
+        }
+
         public void ActionList(string Pattern, string Destination, string sortMode = "name")
         {
             Init();
@@ -890,11 +2189,11 @@ namespace osync
             }
             else
             {
-                if (!ValidateServer(Destination, silent: true))
+                if (!ValidateServerUrl(Destination, silent: true))
                 {
                     System.Environment.Exit(1);
                 }
-                ListRemoteModels(Pattern, sortMode).GetAwaiter().GetResult();
+                ListRemoteModels(Destination, Pattern, sortMode).GetAwaiter().GetResult();
             }
         }
 
@@ -1026,10 +2325,13 @@ namespace osync
             };
         }
 
-        private async Task ListRemoteModels(string pattern, string sortMode = "name")
+        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name")
         {
             try
             {
+                // Set the global client's BaseAddress for the API call
+                client.BaseAddress = new Uri(serverUrl);
+
                 HttpResponseMessage response = await client.GetAsync("api/tags");
 
                 if (!response.IsSuccessStatusCode)
@@ -1139,7 +2441,7 @@ namespace osync
             }
             else
             {
-                if (!ValidateServer(Destination, silent: true))
+                if (!ValidateServerUrl(Destination, silent: true))
                 {
                     System.Environment.Exit(1);
                 }
@@ -1536,11 +2838,24 @@ namespace osync
         {
             Init();
 
-            // If pattern looks like a URL, treat it as destination and update all models
+            // If pattern looks like a URL, treat it as destination and extract model name if present
             if (!string.IsNullOrEmpty(Pattern) && (Pattern.StartsWith("http://") || Pattern.StartsWith("https://")))
             {
-                Destination = Pattern;
-                Pattern = "*";
+                // Check if URL contains a model name (e.g., http://server:port/model:tag)
+                var (serverUrl, modelName) = ParseRemoteSource(Pattern);
+
+                if (!string.IsNullOrEmpty(modelName))
+                {
+                    // URL contains a model name, use it as the pattern
+                    Destination = serverUrl;
+                    Pattern = modelName;
+                }
+                else
+                {
+                    // URL is just the server, update all models
+                    Destination = Pattern;
+                    Pattern = "*";
+                }
             }
 
             // If pattern is null or empty, default to updating all models
@@ -1564,7 +2879,7 @@ namespace osync
             }
             else
             {
-                if (!ValidateServer(Destination, silent: true))
+                if (!ValidateServerUrl(Destination))
                 {
                     System.Environment.Exit(1);
                 }
@@ -1723,19 +3038,18 @@ namespace osync
 
         private async Task UpdateRemoteModels(string pattern, string destination)
         {
+            // Create dedicated client for remote server
+            var remoteClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            remoteClient.BaseAddress = new Uri(destination);
+
             try
             {
-                // Set the base address for the client
-                var originalBaseAddress = client.BaseAddress;
-                client.BaseAddress = new Uri(destination);
-
                 // First get the list of models
-                HttpResponseMessage response = await client.GetAsync("api/tags");
+                HttpResponseMessage response = await remoteClient.GetAsync("api/tags");
 
                 if (!response.IsSuccessStatusCode)
                 {
                     Console.WriteLine($"Error: failed to get models from remote server (HTTP {(int)response.StatusCode})");
-                    client.BaseAddress = originalBaseAddress;
                     System.Environment.Exit(1);
                 }
 
@@ -1756,7 +3070,6 @@ namespace osync
                 if (modelsToUpdate.Count == 0)
                 {
                     Console.WriteLine($"No models found matching pattern: {pattern}");
-                    client.BaseAddress = originalBaseAddress;
                     return;
                 }
 
@@ -1764,19 +3077,21 @@ namespace osync
 
                 foreach (var modelName in modelsToUpdate)
                 {
-                    await UpdateSingleRemoteModel(modelName, destination);
+                    await UpdateSingleRemoteModel(remoteClient, modelName, destination);
                 }
-
-                client.BaseAddress = originalBaseAddress;
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Error: {e.Message}");
                 System.Environment.Exit(1);
             }
+            finally
+            {
+                remoteClient.Dispose();
+            }
         }
 
-        private async Task UpdateSingleRemoteModel(string modelName, string destination)
+        private async Task UpdateSingleRemoteModel(HttpClient httpClient, string modelName, string destination)
         {
             try
             {
@@ -1794,7 +3109,7 @@ namespace osync
                     "application/json"
                 );
 
-                var response = await client.PostAsync("api/pull", content);
+                var response = await httpClient.PostAsync("api/pull", content);
 
                 if (!response.IsSuccessStatusCode)
                 {

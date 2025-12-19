@@ -35,6 +35,7 @@
 ### Key Features
 
 - 🚀 **Fast Model Transfer** - Copy models between local and remote Ollama servers with high-speed uploads
+- 🔄 **Remote-to-Remote Copy** - Transfer models directly between remote servers with memory-buffered streaming
 - 📋 **Smart Model Management** - List, copy, rename, and delete models with pattern matching support
 - 🔄 **Incremental Uploads** - Skips already transferred layers, saving bandwidth and time
 - 📊 **Progress Tracking** - Real-time progress bars with transfer speed indicators
@@ -43,7 +44,7 @@
 - 🌐 **Multi-registry Support** - Works with registry.ollama.ai, hf.co, and custom registries
 - 💾 **Offline Deployment** - Perfect for air-gapped servers and isolated networks
 - 🎯 **Wildcard Patterns** - Use `*` wildcards for batch operations
-- ⚡ **Bandwidth Control** - Throttle upload speeds to manage network usage
+- ⚡ **Bandwidth Control** - Throttle upload speeds and configure memory buffer size
 
 ### Built With
 
@@ -86,16 +87,24 @@ osync
 
 #### Copy (`cp`)
 
-Copy models locally or to remote servers.
+Copy models locally, to remote servers, or between remote servers.
 
 ```bash
 # Local copy (create backup)
 osync cp llama3 my-backup-llama3
 osync cp llama3:70b llama3:backup-v1
 
-# Remote copy (upload to server)
+# Local to remote (upload to server)
 osync cp llama3 http://192.168.0.100:11434
 osync cp qwen2:7b http://192.168.0.100:11434
+
+# Remote to remote (transfer between servers)
+osync cp http://192.168.0.100:11434/qwen2:7b http://192.168.0.200:11434/qwen2:latest
+osync cp http://server1:11434/llama3 http://server2:11434/llama3-copy
+
+# With custom memory buffer size (default: 512MB)
+osync cp http://server1:11434/llama3 http://server2:11434/llama3 -BufferSize 256MB
+osync cp http://server1:11434/qwen2 http://server2:11434/qwen2 -BufferSize 1GB
 
 # With bandwidth throttling
 osync cp llama3 http://192.168.0.100:11434 -bt 50MB
@@ -106,6 +115,14 @@ osync cp llama3 http://192.168.0.100:11434 -bt 50MB
 - Prevents overwriting existing models
 - Skips already uploaded layers
 - Real-time progress with transfer speed
+- Memory-buffered streaming for remote-to-remote transfers
+- Simultaneous download and upload with backpressure control
+
+**Remote-to-Remote Limitations:**
+- ⚠️ The model must exist in the Ollama registry (registry.ollama.ai)
+- ⚠️ The registry must be accessible from the host running osync
+- ⚠️ Locally created models cannot be copied between remote servers
+- ⚠️ Only models originally pulled from the registry can be transferred remotely
 
 #### List (`ls`)
 
@@ -242,11 +259,17 @@ Updating 'qwen2:7b'...
 
 - `-h`, `-?` - Show help for any command
 - `-bt <value>` - Bandwidth throttling (B, KB, MB, GB per second)
+- `-BufferSize <value>` - Memory buffer size for remote-to-remote copy (KB, MB, GB; default: 512MB)
 
 **Examples:**
 ```bash
+# Bandwidth throttling
 osync cp llama3 http://server:11434 -bt 75MB    # Limit to 75 MB/s
 osync cp qwen2 http://server:11434 -bt 1GB      # Limit to 1 GB/s
+
+# Memory buffer configuration for remote-to-remote
+osync cp http://server1:11434/llama3 http://server2:11434/llama3 -BufferSize 256MB
+osync cp http://server1:11434/qwen2 http://server2:11434/qwen2 -BufferSize 1GB
 ```
 
 #### List Options
@@ -317,10 +340,14 @@ osync update llama3
 
 #### Deploy to Multiple Servers
 ```bash
-# Upload to multiple servers
+# Upload from local to multiple servers
 osync cp llama3 http://192.168.0.10:11434
 osync cp llama3 http://192.168.0.11:11434
 osync cp llama3 http://192.168.0.12:11434
+
+# Copy between remote servers
+osync cp http://192.168.0.10:11434/llama3 http://192.168.0.11:11434/llama3
+osync cp http://192.168.0.10:11434/qwen2 http://192.168.0.12:11434/qwen2
 ```
 
 #### Clean Up Old Models
@@ -348,6 +375,17 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.1.0
+- **Remote-to-Remote Copy** - Transfer models directly between remote servers without local storage
+- **Memory-Buffered Streaming** - Efficient transfer using configurable memory buffer (default: 512MB)
+- **Simultaneous Download/Upload** - Downloads from registry while uploading to destination
+- **Backpressure Control** - Automatically throttles download when upload is slower
+- **Configurable Buffer Size** - Use `-BufferSize` parameter (e.g., `256MB`, `1GB`)
+- **Enhanced Progress Display** - Tqdm progress bar for remote-to-remote transfers matching local copy format
+- **Registry-Based Transfer** - Pulls model blobs from Ollama registry for remote-to-remote operations
+- **Fixed HttpClient Issues** - Resolved BaseAddress errors in list and copy commands
+- **Improved Error Messages** - Clear documentation of remote-to-remote limitations
 
 v1.0.9
 - Added update command to update models to their latest versions
