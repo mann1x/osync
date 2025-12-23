@@ -36,7 +36,9 @@
 
 - 🚀 **Fast Model Transfer** - Copy models between local and remote Ollama servers with high-speed uploads
 - 🔄 **Remote-to-Remote Copy** - Transfer models directly between remote servers with memory-buffered streaming
-- 📋 **Smart Model Management** - List, copy, rename, and delete models with pattern matching support
+- 📋 **Smart Model Management** - List, copy, rename, delete, pull, and show models with pattern matching support
+- 📥 **Registry Pull** - Download models from Ollama registry and HuggingFace with automatic tag extraction
+- 📄 **Model Information** - Display detailed model information including license, parameters, and templates
 - 🔄 **Incremental Uploads** - Skips already transferred layers, saving bandwidth and time
 - 📊 **Progress Tracking** - Real-time progress bars with transfer speed indicators
 - 🏷️ **Auto-tagging** - Automatically applies `:latest` tag when not specified
@@ -60,19 +62,48 @@
 
 ### Installation
 
-> **[Download latest binary release]**
+#### Quick Install (Recommended)
 
-> **[Build from sources]**
+Download the latest binary for your platform, then run:
 
-> Clone the repo
+```bash
+# Windows
+osync.exe install
 
-> Compile with Visual Studio 2022
+# Linux/macOS
+./osync install
+```
+
+This will:
+1. Install osync to your user directory (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS)
+2. Add osync to your PATH automatically
+3. Optionally configure shell completion (PowerShell 6.0+ on Windows, Bash on Linux/macOS)
+4. Restart your terminal to use `osync` from anywhere
+
+#### Manual Installation
+
+**Download Binary:**
+- Download the latest release from [GitHub Releases](https://github.com/mann1x/osync/releases)
+- Extract to a directory of your choice
+- Add the directory to your PATH manually
+
+**Build from Source:**
+1. Clone the repository
+2. Open with Visual Studio 2022 or use `dotnet build`
+3. Publish: `dotnet publish -c Release`
+4. Run `osync install` from the published output directory
 
 ## Usage
 
 ### Quick Start
 
 ```bash
+# Pull a model from registry
+osync pull llama3
+
+# Show model information
+osync show llama3
+
 # Copy local model to remote server
 osync cp llama3 http://192.168.100.100:11434
 
@@ -253,6 +284,106 @@ Updating 'qwen2:7b'...
 ✓ 'qwen2:7b' is already up to date
 ```
 
+#### Pull (`pull`)
+
+Pull (download) models from the Ollama registry locally or to remote servers. Works like `ollama pull` with additional support for HuggingFace model URLs.
+
+```bash
+# Pull model locally (adds :latest if no tag specified)
+osync pull llama3
+osync pull llama3:7b
+
+# Pull model to remote server
+osync pull llama3 http://192.168.0.100:11434
+osync pull qwen2:7b http://192.168.0.100:11434
+
+# Pull from HuggingFace using full URL
+osync pull https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF/blob/main/Qwen2.5.1-Coder-7B-Instruct-IQ2_M.gguf
+
+# Pull from HuggingFace using short format
+osync pull hf.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF:IQ2_M
+osync pull hf.co/unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M
+```
+
+**Features:**
+- Pulls models from Ollama registry (registry.ollama.ai)
+- Automatic `:latest` tag when not specified (standard models only)
+- Supports both local and remote server pulls
+- HuggingFace URL conversion and integration
+- Extracts quantization tags (IQ2_M, Q4_K_M, etc.) from GGUF filenames
+- Real-time progress display during downloads
+- Works with standard models, HuggingFace models, and custom registries
+
+**HuggingFace Integration:**
+- Converts full HuggingFace URLs to ollama-compatible format
+- Automatically extracts quantization identifier from filename
+- Supports various GGUF quantization formats (IQ, Q, F, FP, BF series)
+- Example conversion:
+  - Input: `https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF/blob/main/Qwen2.5.1-Coder-7B-Instruct-IQ2_M.gguf`
+  - Output: `hf.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF:IQ2_M`
+
+**Output:**
+```
+Pulling 'llama3:latest' locally...
+pulling manifest
+pulling 6a0746a1ec1a... 100% ▕████████████████▏ 4.7 GB
+verifying sha256 digest
+writing manifest
+removing any unused layers
+✓ Successfully pulled 'llama3:latest'
+```
+
+#### Show (`show`)
+
+Show detailed information about a model locally or on a remote server. Works like `ollama show` with support for displaying specific sections.
+
+```bash
+# Show model information locally
+osync show llama3
+osync show llama3:7b
+
+# Show specific sections
+osync show llama3 --license       # Show license only
+osync show llama3 --modelfile     # Show Modelfile only
+osync show llama3 --parameters    # Show parameters only
+osync show llama3 --system        # Show system message only
+osync show llama3 --template      # Show template only
+osync show llama3 --verbose       # Show all details
+
+# Show model info from remote server
+osync show llama3 http://192.168.0.100:11434
+osync show qwen2:7b http://192.168.0.100:11434 --verbose
+osync show llama3 http://192.168.0.100:11434 --modelfile
+```
+
+**Features:**
+- Display full model information or specific sections
+- Automatic `:latest` tag when not specified
+- Works on both local and remote servers
+- Multiple display options matching ollama's show command
+- Verbose mode for comprehensive details
+
+**Available Flags:**
+- `--license` - Show the model's license
+- `--modelfile` - Show the Modelfile used to create the model
+- `--parameters` - Show the model's parameters
+- `--system` - Show the system message
+- `--template` - Show the prompt template
+- `-v`, `--verbose` - Show detailed information including all sections
+
+**Output:**
+```
+# Default output (shows Modelfile)
+Model: llama3:latest
+Modelfile:
+FROM llama3:latest
+TEMPLATE """{{ .System }}
+{{ .Prompt }}"""
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
+PARAMETER stop "<|eot_id|>"
+```
+
 ### Options
 
 #### Global Options
@@ -286,6 +417,7 @@ Run `osync` without arguments to enter interactive mode with:
 - Command history
 - Multi-registry support
 - Real-time model listing
+- Clear screen with `/clear` command
 
 ```bash
 osync
@@ -293,8 +425,51 @@ osync
 # Type command and press enter
 > cp llama3 my-backup
 > ls "qwen*"
+> clear           # Clear the console screen
 > exit
 ```
+
+**Interactive Commands:**
+- `clear` - Clear the console screen and reset the display
+- `exit` or `quit` - Exit interactive mode
+- All regular osync commands (cp, ls, rm, pull, show, update, etc.)
+
+### Shell Completion
+
+osync supports shell completion for commands and model names on all platforms.
+
+**Automatic Installation:**
+
+Shell completion is automatically offered during the `osync install` process. To install it separately or update it:
+
+```bash
+# The install command will prompt you to configure shell completion
+osync install
+```
+
+**Bash (Linux/macOS):**
+- Installs completion script to `/etc/bash_completion.d/` or `~/.bashrc`
+- Completes commands, model names, and options
+- Automatically handles remote server completions via `-d` flag
+- Activate with `source ~/.bashrc` or restart terminal
+- Unix line endings automatically applied for cross-platform compatibility
+
+**PowerShell (Windows):**
+- **Requires PowerShell 6.0 or higher** (PowerShell Core/7+)
+- PowerShell Desktop 5.x is not supported (use interactive mode instead)
+- Version check performed before installation
+- Configures PowerShell profile automatically
+- Creates profile if it doesn't exist
+- Completes commands, model names, and flags
+- May require: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+**Features:**
+- Auto-completes model names from local or remote Ollama installations
+- Completes command-specific options and flags
+- Works in both interactive and command-line modes
+- Supports remote server model completion
+- Updates automatically as models change
+- osync must be in PATH for completion to work (automatically configured by `install` command)
 
 ### Pattern Matching
 
@@ -375,6 +550,70 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.1.4
+- **Fixed Pattern Matching** - Enhanced `:latest` tag handling in list command pattern matching
+  - Patterns without tags (e.g., `llama3`) now correctly match models with `:latest` tag
+  - Improved wildcard matching consistency across all commands
+- **Fixed Linux Argument Order** - Resolved cross-platform argument parsing issue
+  - Arguments now work in any order on Linux (e.g., `osync show -d http://... model` and `osync show model -d http://...`)
+  - Added automatic argument reordering for PowerArgs compatibility on Linux
+  - Maintains backward compatibility with Windows argument handling
+- **Fixed REPL Tab Completion** - Enhanced interactive mode model name completion
+  - Fixed colon (`:`) handling in model names for tab completion
+  - Improved completion when typing model name followed by colon (e.g., `qwen3:` + tab)
+  - Better support for model:tag format in interactive mode
+- **Fixed Bash Completion** - Improved Bash shell completion for model names with colons
+  - Modified `COMP_WORDBREAKS` to handle colon as part of model names
+  - Better completion for model:tag format in Bash shell
+- **Fixed PowerShell Completion** - Cleaned up PowerShell completion script
+  - Removed unnecessary success message when loading completion
+  - Improved version line filtering in model listing
+- **Improved Error Messages** - Simplified error output for better user experience
+  - Errors now show concise hint to use `-h` or `-?` for help
+  - Replaced verbose usage output with brief help reference
+  - Users can now see actual error messages without clutter
+
+v1.1.3
+- **Install Command** - New unified installation command replacing `install-completion`
+- **Automatic Installation** - Installs osync to user directory (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS)
+- **PATH Management** - Automatically adds osync directory to PATH on all platforms
+  - Windows: Updates user PATH environment variable with broadcast notification
+  - Linux: Adds export to `~/.bashrc`
+  - macOS: Adds export to `~/.zshrc` (or `~/.bash_profile`)
+- **Complete Application Copy** - Copies all required files (exe, dlls, dependencies) for proper installation
+- **Shell Completion Integration** - Optionally configures shell completion during installation
+- **PowerShell Version Check** - Validates PowerShell version before offering completion (requires 6.0+)
+- **Improved Completion Scripts** - Assumes osync is in PATH for reliable completion
+- **Cross-Platform Line Endings** - Automatic CRLF to LF conversion for bash completion on Unix
+- **Executable Permissions** - Automatically sets execute permissions on Linux/macOS
+- **Smart Installation** - Detects if already installed and avoids duplicate installations
+- **Enhanced Error Handling** - Better PATH update error messages and fallback instructions
+
+v1.1.2
+- **Show Command** - New command to display detailed model information
+- **Local and Remote Show** - View model info locally or from remote servers
+- **Flexible Display Options** - Show specific sections (license, modelfile, parameters, system, template)
+- **Verbose Mode** - Display comprehensive model details with `--verbose` flag
+- **Section Filtering** - Use flags to show only the information you need
+- **Matches ollama show** - Full compatibility with ollama's show command functionality
+- **Clear Command** - New `clear` command for interactive mode to clear console screen
+- **Fixed Interactive Mode** - Properly enters REPL mode when called without arguments
+- **Fixed Tab Completion** - Tab completion now properly clears previous options before displaying new ones
+- **Shell Completion** - Auto-completion for Bash (Linux/macOS) and PowerShell (Windows)
+- **Install-Completion Command** - Automatically configures shell completion with `osync install-completion`
+- **Model Name Completion** - Tab-complete model names from local Ollama installation
+- **PowerShell Profile Setup** - Automatically creates and configures PowerShell profile if needed
+
+v1.1.1
+- **Pull Command** - New command to download models from Ollama registry
+- **Local and Remote Pull** - Pull models locally or directly to remote servers
+- **HuggingFace Integration** - Convert HuggingFace URLs to ollama-compatible format
+- **Automatic Tag Extraction** - Extracts quantization identifiers (IQ2_M, Q4_K_M, etc.) from GGUF filenames
+- **Smart Tag Handling** - Automatically adds `:latest` tag for standard models, preserves explicit tags for HuggingFace models
+- **Comprehensive Quantization Support** - Handles IQ, Q K-quants, Q legacy, Float, and BFloat16 formats
+- **Real-time Progress** - Displays streaming download progress for both local and remote operations
+- **HuggingFace URL Parsing** - Converts full HuggingFace URLs (e.g., `https://huggingface.co/user/repo/blob/main/file.gguf`) to short format (`hf.co/user/repo:tag`)
 
 v1.1.0
 - **Remote-to-Remote Copy** - Transfer models directly between remote servers without local storage

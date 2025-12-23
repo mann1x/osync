@@ -1,9 +1,11 @@
 {
+  "model": "opus",
   "permissions": {
     "allow": [
       "Bash(dotnet build:*)",
       "WebFetch(domain:github.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(cat:*)"
     ]
   }
 }
