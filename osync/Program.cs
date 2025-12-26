@@ -142,6 +142,66 @@ namespace osync
         public bool Verbose { get; set; }
     }
 
+    public class RunArgs
+    {
+        [ArgRequired,
+         ArgDescription("Model name to chat with"),
+         ArgExample("llama3.2:1b", "basic model"),
+         ArgExample("deepseek-r1:1.5b", "thinking model"),
+         ArgPosition(1)]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
+         ArgExample("http://192.168.0.100:11434", "remote server"),
+         ArgShortcut("-d")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Response format (e.g. json)"),
+         ArgShortcut("--format")]
+        public string Format { get; set; }
+
+        [ArgDescription("Duration to keep model loaded (e.g. 5m, 1h)"),
+         ArgShortcut("--keepalive")]
+        public string KeepAlive { get; set; }
+
+        [ArgDescription("Don't wrap words to next line automatically"),
+         ArgShortcut("--nowordwrap")]
+        public bool NoWordWrap { get; set; }
+
+        [ArgDescription("Show timings for response"),
+         ArgShortcut("--verbose")]
+        public bool Verbose { get; set; }
+
+        [ArgDescription("Truncate output embeddings to specified dimension"),
+         ArgShortcut("--dimensions")]
+        public int? Dimensions { get; set; }
+
+        [ArgDescription("Hide thinking output (if provided)"),
+         ArgShortcut("--hidethinking")]
+        public bool HideThinking { get; set; }
+
+        [ArgDescription("Use an insecure registry"),
+         ArgShortcut("--insecure")]
+        public bool Insecure { get; set; }
+
+        [ArgDescription("Enable thinking mode: true/false or high/medium/low"),
+         ArgShortcut("--think")]
+        public string Think { get; set; }
+
+        [ArgDescription("Truncate inputs exceeding context length (default: true)"),
+         ArgShortcut("--truncate")]
+        public bool? Truncate { get; set; }
+    }
+
+    public class PsArgs
+    {
+        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
+         ArgExample("http://192.168.0.100:11434", "remote server"),
+         ArgShortcut("-d"),
+         ArgPosition(1)]
+        public string Destination { get; set; }
+    }
+
     // Progress wrapper stream that displays transfer progress
     public class ProgressStream : Stream
     {
@@ -376,10 +436,10 @@ namespace osync
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.1.4";
+        static string version = "1.1.5";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         string ollama_models = "";
@@ -460,6 +520,206 @@ namespace osync
             ActionShow(args.ModelName, args.Destination, args.License, args.Modelfile, args.Parameters, args.System, args.Template, args.Verbose);
         }
 
+        [ArgActionMethod, ArgDescription("Run an interactive chat session with a model (alias: chat)"), ArgShortcut("chat")]
+        public async Task Run(RunArgs args)
+        {
+            if (string.IsNullOrWhiteSpace(args.ModelName))
+            {
+                Console.WriteLine("Error: Model name is required");
+                Console.WriteLine("Usage: osync run <model-name> [-d <server-url>] [options]");
+                System.Environment.Exit(1);
+            }
+
+            // Get Ollama host from environment variable or argument
+            var ollamaHost = args.Destination
+                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+
+            // Ensure the URL has a protocol
+            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            {
+                ollamaHost = "http://" + ollamaHost;
+            }
+
+            // Ensure model has a tag
+            var modelName = args.ModelName;
+            if (!modelName.Contains(':'))
+            {
+                modelName += ":latest";
+            }
+
+            try
+            {
+                var session = new ChatSession(ollamaHost, modelName, args);
+                await session.RunAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner error: {ex.InnerException.Message}");
+                }
+                System.Environment.Exit(1);
+            }
+        }
+
+        [ArgActionMethod, ArgDescription("Show running models and their status")]
+        public async Task Ps(PsArgs args)
+        {
+            // Get Ollama host from environment variable or argument
+            var ollamaHost = args.Destination
+                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+
+            // Ensure the URL has a protocol
+            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            {
+                ollamaHost = "http://" + ollamaHost;
+            }
+
+            try
+            {
+                using var httpClient = new HttpClient
+                {
+                    BaseAddress = new Uri(ollamaHost),
+                    Timeout = Timeout.InfiniteTimeSpan
+                };
+
+                var response = await httpClient.GetAsync("/api/ps");
+                response.EnsureSuccessStatusCode();
+
+                var json = await response.Content.ReadAsStringAsync();
+                var status = JsonSerializer.Deserialize<ProcessStatusResponse>(json);
+
+                if (status?.Models == null || status.Models.Count == 0)
+                {
+                    Console.WriteLine("No models currently loaded in memory");
+                    return;
+                }
+
+                Console.WriteLine();
+                Console.WriteLine("Loaded Models:");
+                Console.WriteLine(new string('-', 135));
+                Console.WriteLine($"{"NAME",-30} {"ID",-15} {"SIZE",-25} {"VRAM USAGE",-15} {"CONTEXT",-10} {"UNTIL",-30}");
+                Console.WriteLine(new string('-', 135));
+
+                foreach (var model in status.Models)
+                {
+                    var name = TruncateString(model.Name, 30);
+                    var id = GetShortDigest(model.Digest);
+                    var size = FormatModelSize(model.Size, model.Details?.ParameterSize);
+                    var vramUsage = FormatBytes(model.SizeVram);
+                    var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
+                    var until = FormatUntil(model.ExpiresAt);
+
+                    Console.WriteLine($"{name,-30} {id,-15} {size,-25} {vramUsage,-15} {context,-10} {until,-30}");
+                }
+
+                Console.WriteLine(new string('-', 135));
+                Console.WriteLine();
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                Console.WriteLine($"Details: {ex.Message}");
+                System.Environment.Exit(1);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner error: {ex.InnerException.Message}");
+                }
+                System.Environment.Exit(1);
+            }
+        }
+
+        // Helper methods for ps command
+        private string TruncateString(string str, int maxLength)
+        {
+            if (string.IsNullOrEmpty(str) || str.Length <= maxLength)
+                return str ?? "";
+
+            return str.Substring(0, maxLength - 3) + "...";
+        }
+
+        private string GetShortDigest(string digest)
+        {
+            if (string.IsNullOrEmpty(digest))
+                return "N/A";
+
+            // Return first 12 characters of digest (like Docker)
+            return digest.Length >= 12 ? digest.Substring(0, 12) : digest;
+        }
+
+        private string FormatModelSize(long sizeBytes, string parameterSize)
+        {
+            var diskSize = FormatBytes(sizeBytes);
+            if (!string.IsNullOrEmpty(parameterSize))
+            {
+                return $"{diskSize} ({parameterSize})";
+            }
+            return diskSize;
+        }
+
+        private string FormatBytes(long bytes)
+        {
+            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+            double len = bytes;
+            int order = 0;
+            while (len >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                len = len / 1024;
+            }
+            return $"{len:0.##} {sizes[order]}";
+        }
+
+        private string FormatUntil(DateTime expiresAt)
+        {
+            var now = DateTime.Now;
+            var timeSpan = expiresAt - now;
+
+            if (timeSpan.TotalMinutes < 1)
+            {
+                return "Less than a minute";
+            }
+            else if (timeSpan.TotalMinutes < 2)
+            {
+                return "About a minute from now";
+            }
+            else if (timeSpan.TotalMinutes < 60)
+            {
+                return $"{(int)timeSpan.TotalMinutes} minutes from now";
+            }
+            else if (timeSpan.TotalHours < 2)
+            {
+                return "About an hour from now";
+            }
+            else if (timeSpan.TotalHours < 24)
+            {
+                return $"{(int)timeSpan.TotalHours} hours from now";
+            }
+            else
+            {
+                return $"{(int)timeSpan.TotalDays} days from now";
+            }
+        }
+
         [ArgActionMethod, ArgDescription("Clear the console screen (interactive mode only)")]
         public void Clear()
         {
@@ -473,6 +733,14 @@ namespace osync
             Console.Clear();
             Console.WriteLine($"osync v{GetAppVersion()}");
             Console.WriteLine();
+        }
+
+        [ArgActionMethod, ArgDescription("Exit interactive mode"), ArgShortcut("exit")]
+        public void Quit()
+        {
+            // PowerArgs REPL mode will handle this by exiting when Environment.Exit is called
+            // Note: Due to PowerArgs limitations, Ctrl+D may show a character on Windows - use 'quit' or 'exit' instead
+            System.Environment.Exit(0);
         }
 
         [ArgActionMethod, ArgDescription("Install osync to user directory, add to PATH, and optionally configure shell completion")]
@@ -4598,10 +4866,10 @@ _osync_completions() {
     prev=""${COMP_WORDS[COMP_CWORD-1]}""
 
     # Available commands
-    commands=""cp copy ls list rm remove del delete update show""
+    commands=""cp copy ls list rm remove del delete update show run chat ps""
 
     # Global options
-    opts=""-bt -BufferSize --size --sizeasc --time --timeasc --license --modelfile --parameters --system --template -v --verbose -h -? -d""
+    opts=""-bt -BufferSize --size --sizeasc --time --timeasc --license --modelfile --parameters --system --template -v --verbose -h -? -d --format --keepalive --dimensions --think --hide-thinking --insecure --truncate --no-wordwrap""
 
     # Get list of models using osync (supports both local and remote)
     _get_models() {
@@ -4689,6 +4957,20 @@ _osync_completions() {
                 COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
             fi
             ;;
+        run|chat)
+            # Complete model names and flags
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d --verbose --no-wordwrap --format --keepalive --dimensions --think --hide-thinking --insecure --truncate"" -- ""${cur}"") )
+            else
+                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+            fi
+            ;;
+        ps)
+            # Complete flags only (no model names for ps)
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            fi
+            ;;
         *)
             ;;
     esac
@@ -4739,7 +5021,7 @@ function Get-OsyncModels {
 Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
-    $commands = @('cp', 'copy', 'ls', 'list', 'rm', 'remove', 'del', 'delete', 'update', 'show')
+    $commands = @('cp', 'copy', 'ls', 'list', 'rm', 'remove', 'del', 'delete', 'update', 'show', 'run', 'chat', 'ps')
 
     # Get all words in the command line
     $words = $commandAst.ToString() -split '\s+'
@@ -4835,6 +5117,28 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             }
         }
 
+        { $_ -in @('run', 'chat') } {
+            if ($wordToComplete -like '-*') {
+                @('-d', '--verbose', '--no-wordwrap', '--format', '--keepalive', '--dimensions', '--think', '--hide-thinking', '--insecure', '--truncate') |
+                    Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterName', $_)
+                }
+            }
+            else {
+                $models | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', ""Model: $_"")
+                }
+            }
+        }
+
+        'ps' {
+            if ($wordToComplete -like '-*') {
+                @('-d') | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterName', $_)
+                }
+            }
+        }
+
         default {
             # No completion
         }
@@ -4851,7 +5155,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             if (args.Length < 2) return args;
 
             // Commands that have optional positional model/pattern arguments
-            string[] commandsWithPositional = { "show", "pull", "ls", "list", "rm", "remove", "del", "delete", "update" };
+            string[] commandsWithPositional = { "show", "pull", "ls", "list", "rm", "remove", "del", "delete", "update", "run", "chat", "ps" };
 
             string command = args[0];
             if (!commandsWithPositional.Contains(command.ToLower())) return args;
@@ -4863,7 +5167,9 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 if (!args[i].StartsWith("-") && !args[i].StartsWith("http"))
                 {
                     // Skip if it's a value for a previous flag
-                    if (i > 1 && (args[i - 1] == "-d" || args[i - 1] == "-bt" || args[i - 1] == "-BufferSize"))
+                    if (i > 1 && (args[i - 1] == "-d" || args[i - 1] == "-bt" || args[i - 1] == "-BufferSize" ||
+                                  args[i - 1] == "--format" || args[i - 1] == "--keepalive" ||
+                                  args[i - 1] == "--dimensions" || args[i - 1] == "--think"))
                         continue;
 
                     firstUnlabeledIndex = i;

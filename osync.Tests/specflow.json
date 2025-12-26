@@ -1,0 +1,23 @@
+{
+  "$schema": "https://specflow.org/schemas/specflow-config.json",
+  "language": {
+    "feature": "en"
+  },
+  "bindingCulture": {
+    "name": "en-US"
+  },
+  "runtime": {
+    "stopAtFirstError": false,
+    "missingOrPendingStepsOutcome": "Inconclusive"
+  },
+  "trace": {
+    "traceSuccessfulSteps": true,
+    "traceTimings": true,
+    "minTracedDuration": "0:0:0.1"
+  },
+  "stepAssemblies": [
+    {
+      "assembly": "osync.Tests"
+    }
+  ]
+}

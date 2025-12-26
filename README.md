@@ -384,6 +384,158 @@ PARAMETER stop "<|end_header_id|>"
 PARAMETER stop "<|eot_id|>"
 ```
 
+#### Run/Chat (`run`, `chat`)
+
+Interactive chat with a model. Automatically preloads the model into memory and displays status information before starting the chat session.
+
+```bash
+# Chat with model locally
+osync run llama3
+osync chat mistral-nemo
+
+# Chat with model on remote server
+osync run llama3 -d http://192.168.0.100:11434
+osync run mistral-nemo -d http://192.168.0.100:11434
+
+# Chat with additional options
+osync run llama3 --verbose                    # Show performance stats
+osync run llama3 --no-wordwrap               # Disable word wrapping
+osync run llama3 --format json               # Request JSON output
+osync run llama3 --think                     # Enable thinking mode
+osync run llama3 --keepalive 10m             # Keep model loaded for 10 minutes
+```
+
+**Features:**
+- **Automatic Model Preloading** - Loads model into memory before first input
+- **Process Status Display** - Shows table of all loaded models with details:
+  - NAME: Model name
+  - ID: First 12 characters of model digest (Docker-style)
+  - SIZE: Disk size combined with parameter count (e.g., "4.54 GB (8.0B)")
+  - VRAM USAGE: Memory allocated in VRAM
+  - CONTEXT: Context window size (e.g., 4096)
+  - UNTIL: Human-readable expiration time (e.g., "2 minutes from now")
+- **Fast Streaming** - Optimized for both local and remote servers
+- **Command History** - Navigate with Up/Down arrows
+- **Keyboard Shortcuts**:
+  - `Ctrl+D` on empty line - Exit chat
+  - `Ctrl+C` - Cancel current generation
+  - `Ctrl+A` - Move to beginning of line
+  - `Ctrl+E` - Move to end of line
+  - `Ctrl+K` - Delete from cursor to end
+  - `Ctrl+U` - Delete entire line
+  - `Ctrl+W` - Delete previous word
+  - `Ctrl+L` - Clear screen
+  - `Up/Down` - Navigate command history
+- **Multiline Input** - Use triple quotes for multiline messages:
+  ```
+  >>> """This is a
+  ... multiline
+  ... message"""
+  ```
+- **Session Management**:
+  - `/save <filename>` - Save chat session
+  - `/load <filename>` - Load chat session
+  - `/clear` - Clear conversation history
+  - `/stats` - Show performance statistics
+  - `/bye` or `/exit` - Exit chat
+- **Runtime Options**:
+  - `/set verbose` - Enable verbose mode
+  - `/set wordwrap` - Enable word wrapping
+  - `/set format <format>` - Set output format (json, etc.)
+  - `/set system` - Set system message
+  - `/set parameter <name> <value>` - Set model parameters (temperature, top_p, etc.)
+  - `/show` - Display current settings
+
+**Available Flags:**
+- `-d`, `--destination` - Remote Ollama server URL
+- `-v`, `--verbose` - Show performance statistics after each response
+- `--no-wordwrap` - Disable automatic word wrapping
+- `--format <format>` - Request specific output format (e.g., json)
+- `--keepalive <duration>` - Keep model loaded for specified duration (e.g., 5m, 1h)
+- `--think` - Enable thinking mode (can also specify: high, medium, low)
+- `--hide-thinking` - Hide thinking process in output
+- `--truncate` - Truncate context when it exceeds model limits
+- `--dimensions <size>` - Set embedding dimensions
+
+**Example Session:**
+```
+>>> Connecting to mistral-nemo:latest...
+>>> Loading model into memory...
+
+Loaded Models:
+---------------------------------------------------------------------------------------------------------------------------------------
+NAME                           ID              SIZE                      VRAM USAGE      CONTEXT    UNTIL
+---------------------------------------------------------------------------------------------------------------------------------------
+mistral-nemo:latest            994f3b8b7801    6.85 GB (12.2B)           0 B             4096       About a minute from now
+---------------------------------------------------------------------------------------------------------------------------------------
+
+>>> Type /? for help or /bye to exit
+
+>>> What is the capital of France?
+The capital of France is Paris.
+
+>>> /stats
+=== Performance Statistics ===
+Total requests: 1
+
+Total Duration (ms):
+  Min: 1234.56
+  Avg: 1234.56
+  Max: 1234.56
+
+Tokens/Second:
+  Min: 45.32
+  Avg: 45.32
+  Max: 45.32
+
+>>> /bye
+```
+
+#### Process Status (`ps`)
+
+Display information about models currently loaded in memory on local or remote Ollama servers.
+
+```bash
+# Show locally loaded models
+osync ps
+
+# Show loaded models on remote server
+osync ps -d http://192.168.0.100:11434
+osync ps http://192.168.0.100:11434
+```
+
+**Features:**
+- Shows all models currently loaded in memory
+- Displays the same information as the run/chat command preload table
+- Works with both local and remote servers
+- No model preloading - shows current state only
+
+**Output:**
+```
+Loaded Models:
+---------------------------------------------------------------------------------------------------------------------------------------
+NAME                           ID              SIZE                      VRAM USAGE      CONTEXT    UNTIL
+---------------------------------------------------------------------------------------------------------------------------------------
+llama3:latest                  365c0bd3c000    4.54 GB (8.0B)            0 B             4096       2 minutes from now
+mistral-nemo:latest            994f3b8b7801    6.85 GB (12.2B)           0 B             4096       About a minute from now
+---------------------------------------------------------------------------------------------------------------------------------------
+```
+
+**Table Columns:**
+- **NAME**: Model name with tag
+- **ID**: First 12 characters of model digest (Docker-style hash)
+- **SIZE**: Disk size and parameter count (e.g., "4.54 GB (8.0B)")
+- **VRAM USAGE**: Memory currently allocated in VRAM
+- **CONTEXT**: Context window size (number of tokens)
+- **UNTIL**: Human-readable time until model is unloaded from memory
+  - Examples: "Less than a minute", "2 minutes from now", "About an hour from now"
+
+**Use Cases:**
+- Check which models are currently loaded before starting a chat
+- Monitor memory usage across models
+- See when models will be automatically unloaded
+- Verify model loading on remote servers
+
 ### Options
 
 #### Global Options
@@ -550,6 +702,28 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.1.5
+- **New `ps` Command** - Show running models and their status
+  - Display all models currently loaded in memory
+  - Works with both local and remote Ollama servers
+  - Shows NAME, ID, SIZE, VRAM USAGE, CONTEXT, UNTIL in formatted table
+  - Same output format as run/chat command preload display
+- **Chat Model Preloading** - Models are now automatically loaded into memory before first chat input
+  - Sends empty chat request to preload model
+  - Displays loaded model status table after preload
+  - Shows model name, ID (shortened digest), size, VRAM usage, context length, and expiration time
+- **Process Status Display** - New formatted table showing all loaded models via `/api/ps`
+  - NAME: Model name with truncation for long names
+  - ID: First 12 characters of model digest (Docker-style)
+  - SIZE: Disk size combined with parameter count (e.g., "4.54 GB (8.0B)")
+  - VRAM USAGE: Memory allocated in VRAM
+  - CONTEXT: Context window size (e.g., 4096)
+  - UNTIL: Human-readable expiration time (e.g., "2 minutes from now", "About a minute from now")
+- **Improved Chat Performance** - Fixed streaming response buffering for remote servers
+  - Uses `HttpCompletionOption.ResponseHeadersRead` for immediate streaming
+  - Remote chat now responds as fast as local chat
+  - No more delays waiting for full response buffering
 
 v1.1.4
 - **Fixed Pattern Matching** - Enhanced `:latest` tag handling in list command pattern matching
