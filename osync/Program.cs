@@ -202,6 +202,43 @@ namespace osync
         public string Destination { get; set; }
     }
 
+    public class LoadArgs
+    {
+        [ArgRequired,
+         ArgDescription("Model name to load into memory"),
+         ArgExample("llama3", "basic model"),
+         ArgExample("mistral-nemo", "larger model"),
+         ArgPosition(1)]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
+         ArgExample("http://192.168.0.100:11434", "remote server"),
+         ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    public class UnloadArgs
+    {
+        [ArgDescription("Model name to unload from memory (optional - if not specified, unloads all models)"),
+         ArgExample("llama3", "specific model"),
+         ArgPosition(1)]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
+         ArgExample("http://192.168.0.100:11434", "remote server"),
+         ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    public class ManageArgs
+    {
+        [ArgDescription("Remote ollama server (optional - defaults to local)"),
+         ArgExample("http://192.168.0.100:11434", "remote server"),
+         ArgShortcut("-d"),
+         ArgPosition(1)]
+        public string Destination { get; set; }
+    }
+
     // Progress wrapper stream that displays transfer progress
     public class ProgressStream : Stream
     {
@@ -439,12 +476,15 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.1.5";
+        static string version = "1.1.6";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
-        string ollama_models = "";
+        public string ollama_models = "";
         long btvalue = 0;
         string separator = Path.DirectorySeparatorChar.ToString();
+
+        // Flag to indicate we're running from manage mode - errors should throw instead of Exit
+        internal bool ThrowOnError { get; set; } = false;
 
         public static string GetAppVersion()
         {
@@ -621,7 +661,19 @@ namespace osync
                     var name = TruncateString(model.Name, 30);
                     var id = GetShortDigest(model.Digest);
                     var size = FormatModelSize(model.Size, model.Details?.ParameterSize);
-                    var vramUsage = FormatBytes(model.SizeVram);
+
+                    // Add percentage if VRAM usage is less than total size
+                    string vramUsage;
+                    if (model.SizeVram < model.Size && model.Size > 0)
+                    {
+                        double percentage = ((double)model.SizeVram / model.Size) * 100;
+                        vramUsage = $"{FormatBytes(model.SizeVram)} ({percentage:F0}%)";
+                    }
+                    else
+                    {
+                        vramUsage = FormatBytes(model.SizeVram);
+                    }
+
                     var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
                     var until = FormatUntil(model.ExpiresAt);
 
@@ -718,6 +770,217 @@ namespace osync
             {
                 return $"{(int)timeSpan.TotalDays} days from now";
             }
+        }
+
+        [ArgActionMethod, ArgDescription("Load a model into memory")]
+        public async Task Load(LoadArgs args)
+        {
+            if (string.IsNullOrWhiteSpace(args.ModelName))
+            {
+                Console.WriteLine("Error: Model name is required");
+                Console.WriteLine("Usage: osync load <model-name> [-d <server-url>]");
+                System.Environment.Exit(1);
+            }
+
+            // Get Ollama host from environment variable or argument
+            var ollamaHost = args.Destination
+                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+
+            // Ensure the URL has a protocol
+            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            {
+                ollamaHost = "http://" + ollamaHost;
+            }
+
+            // Ensure model has a tag
+            var modelName = args.ModelName;
+            if (!modelName.Contains(':'))
+            {
+                modelName += ":latest";
+            }
+
+            try
+            {
+                Console.WriteLine($"Loading model '{modelName}' into memory...");
+
+                using var httpClient = new HttpClient
+                {
+                    BaseAddress = new Uri(ollamaHost),
+                    Timeout = Timeout.InfiniteTimeSpan
+                };
+
+                // Send empty chat request to preload the model
+                var preloadRequest = new
+                {
+                    model = modelName
+                };
+
+                var jsonContent = JsonSerializer.Serialize(preloadRequest);
+                var httpContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+                var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+                {
+                    Content = httpContent
+                };
+
+                var response = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+
+                // Consume the response to complete the preload
+                await response.Content.ReadAsStringAsync();
+
+                Console.WriteLine($"✓ Model '{modelName}' loaded successfully");
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                Console.WriteLine($"Details: {ex.Message}");
+                System.Environment.Exit(1);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner error: {ex.InnerException.Message}");
+                }
+                System.Environment.Exit(1);
+            }
+        }
+
+        [ArgActionMethod, ArgDescription("Unload a model (or all models) from memory")]
+        public async Task Unload(UnloadArgs args)
+        {
+            // Get Ollama host from environment variable or argument
+            var ollamaHost = args.Destination
+                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+
+            // Ensure the URL has a protocol
+            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            {
+                ollamaHost = "http://" + ollamaHost;
+            }
+
+            try
+            {
+                using var httpClient = new HttpClient
+                {
+                    BaseAddress = new Uri(ollamaHost),
+                    Timeout = Timeout.InfiniteTimeSpan
+                };
+
+                List<string> modelsToUnload = new List<string>();
+
+                // If model name is specified, unload just that model
+                if (!string.IsNullOrWhiteSpace(args.ModelName))
+                {
+                    var modelName = args.ModelName;
+                    if (!modelName.Contains(':'))
+                    {
+                        modelName += ":latest";
+                    }
+                    modelsToUnload.Add(modelName);
+                }
+                else
+                {
+                    // Get all loaded models from /api/ps
+                    Console.WriteLine("Fetching loaded models...");
+                    var psResponse = await httpClient.GetAsync("/api/ps");
+                    psResponse.EnsureSuccessStatusCode();
+
+                    var json = await psResponse.Content.ReadAsStringAsync();
+                    var status = JsonSerializer.Deserialize<ProcessStatusResponse>(json);
+
+                    if (status?.Models == null || status.Models.Count == 0)
+                    {
+                        Console.WriteLine("No models currently loaded in memory");
+                        return;
+                    }
+
+                    modelsToUnload.AddRange(status.Models.Select(m => m.Name));
+                }
+
+                // Unload each model
+                foreach (var modelName in modelsToUnload)
+                {
+                    Console.WriteLine($"Unloading model '{modelName}'...");
+
+                    var unloadRequest = new
+                    {
+                        model = modelName,
+                        keep_alive = 0
+                    };
+
+                    var jsonContent = JsonSerializer.Serialize(unloadRequest);
+                    var httpContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+                    var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+                    {
+                        Content = httpContent
+                    };
+
+                    var response = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
+                    response.EnsureSuccessStatusCode();
+
+                    // Consume the response
+                    await response.Content.ReadAsStringAsync();
+
+                    Console.WriteLine($"✓ Model '{modelName}' unloaded successfully");
+                }
+
+                if (modelsToUnload.Count > 1)
+                {
+                    Console.WriteLine($"\nUnloaded {modelsToUnload.Count} models");
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                Console.WriteLine($"Details: {ex.Message}");
+                System.Environment.Exit(1);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner error: {ex.InnerException.Message}");
+                }
+                System.Environment.Exit(1);
+            }
+        }
+
+        [ArgActionMethod, ArgDescription("Interactive TUI for model management")]
+        public void Manage(ManageArgs args)
+        {
+            Init();
+
+            // Validate destination if provided
+            if (!string.IsNullOrEmpty(args.Destination))
+            {
+                if (!ValidateServerUrl(args.Destination, silent: true))
+                {
+                    System.Environment.Exit(1);
+                }
+            }
+
+            // Launch TUI
+            var manageUI = new ManageUI(this, args.Destination);
+            manageUI.Run();
         }
 
         [ArgActionMethod, ArgDescription("Clear the console screen (interactive mode only)")]
@@ -949,10 +1212,17 @@ namespace osync
                 Console.WriteLine(e.Message);
             }
         }
-        static async Task<HttpStatusCode> BlobHead(string digest)
+        static async Task<HttpStatusCode> BlobHead(string digest, string? serverUrl = null)
         {
-
-            HttpRequestMessage request = new(HttpMethod.Head, $"api/blobs/{digest}");
+            HttpRequestMessage request;
+            if (!string.IsNullOrEmpty(serverUrl))
+            {
+                request = new(HttpMethod.Head, $"{serverUrl.TrimEnd('/')}/api/blobs/{digest}");
+            }
+            else
+            {
+                request = new(HttpMethod.Head, $"api/blobs/{digest}");
+            }
             HttpResponseMessage response = await client.SendAsync(request);
             return response.StatusCode;
         }
@@ -962,11 +1232,13 @@ namespace osync
                 $"api/blobs/{digest}");
             return response.StatusCode;
         }
-        static async Task RunBlobUpload(string digest, string blobfile, long btvalue)
+        static async Task RunBlobUpload(string digest, string blobfile, long btvalue, CancellationToken cancellationToken = default, bool throwOnError = false, string? serverUrl = null)
         {
             try
             {
-                var statusCode = (int)await BlobHead(digest);
+                cancellationToken.ThrowIfCancellationRequested();
+                var statusCode = (int)await BlobHead(digest, serverUrl);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 if (statusCode == 200)
                 {
@@ -1022,7 +1294,10 @@ namespace osync
                             });
 
                             stopwatch.Start();
-                            var response = await client.PostAsync($"api/blobs/{digest}", streamcontent);
+                            string postUrl = !string.IsNullOrEmpty(serverUrl)
+                                ? $"{serverUrl.TrimEnd('/')}/api/blobs/{digest}"
+                                : $"api/blobs/{digest}";
+                            var response = await client.PostAsync(postUrl, streamcontent, cancellationToken);
                             finished = true;
 
                             SetCursorVisible(true);
@@ -1034,21 +1309,31 @@ namespace osync
                             }
                             else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
                             {
-                                Console.WriteLine("Error: upload failed invalid digest, check both ollama are running the same version.");
+                                var errorMsg = "Error: upload failed invalid digest, check both ollama are running the same version.";
+                                Console.WriteLine(errorMsg);
+                                if (throwOnError) throw new Exception(errorMsg);
                                 System.Environment.Exit(1);
                             }
                             else
                             {
-                                Console.WriteLine($"Error: upload failed: {response.ReasonPhrase}");
+                                var errorMsg = $"Error: upload failed: {response.ReasonPhrase}";
+                                Console.WriteLine(errorMsg);
+                                if (throwOnError) throw new Exception(errorMsg);
                                 System.Environment.Exit(1);
                             }
 
                             streamcontent.Dispose();
                         }
+                        catch (Exception e) when (e is OperationCanceledException || e is TaskCanceledException)
+                        {
+                            SetCursorVisible(true);
+                            throw; // Re-throw cancellation to allow proper handling
+                        }
                         catch (Exception e)
                         {
                             Console.WriteLine($"Error: {e.Message}");
                             SetCursorVisible(true);
+                            if (throwOnError) throw;
                             System.Environment.Exit(1);
                         }
                         finally
@@ -1060,18 +1345,25 @@ namespace osync
                 }
                 else
                 {
-                    Console.WriteLine($"Error: the remote server has answered with HTTP status code: {statusCode} for layer {digest}");
+                    var errorMsg = $"Error: the remote server has answered with HTTP status code: {statusCode} for layer {digest}";
+                    Console.WriteLine(errorMsg);
+                    if (throwOnError) throw new Exception(errorMsg);
                     System.Environment.Exit(1);
                 }
 
             }
+            catch (Exception e) when (e is OperationCanceledException || e is TaskCanceledException)
+            {
+                throw; // Re-throw cancellation
+            }
             catch (Exception e)
             {
                 Console.WriteLine($"Exception: error during blob upload: {e.Message}");
+                if (throwOnError) throw;
             }
         }
 
-        static async Task RunCreateModel(string Modelname, Dictionary<string, string> files, string? template = null, string? system = null, List<string>? parameters = null)
+        static async Task RunCreateModel(string Modelname, Dictionary<string, string> files, string? template = null, string? system = null, List<string>? parameters = null, string? serverUrl = null, bool throwOnError = false)
         {
             int exitcode = 0;
             try
@@ -1106,7 +1398,10 @@ namespace osync
                 try
                 {
                     var body = new StringContent(data, Encoding.UTF8, "application/json");
-                    var postmessage = new HttpRequestMessage(HttpMethod.Post, $"api/create");
+                    string createUrl = !string.IsNullOrEmpty(serverUrl)
+                        ? $"{serverUrl.TrimEnd('/')}/api/create"
+                        : $"api/create";
+                    var postmessage = new HttpRequestMessage(HttpMethod.Post, createUrl);
                     postmessage.Content = body;
                     var response = await client.SendAsync(postmessage, HttpCompletionOption.ResponseHeadersRead);
                     var stream = await response.Content.ReadAsStreamAsync();
@@ -1152,7 +1447,16 @@ namespace osync
             finally
             {
                 SetCursorVisible(true);
-                System.Environment.Exit(exitcode);
+                // Only exit if not in manage mode (throwOnError=false means we should exit on error)
+                if (!throwOnError)
+                {
+                    System.Environment.Exit(exitcode);
+                }
+                else if (exitcode != 0)
+                {
+                    // In manage mode, throw exception instead of exiting
+                    throw new Exception($"Blob upload failed with exit code {exitcode}");
+                }
             }
         }
         public static string GetPlatformPath(string inputPath, string separator)
@@ -1219,11 +1523,14 @@ namespace osync
             }
         }
 
-        public void ActionCopy(string Source, string Destination, string? BufferSize = null)
+        public void ActionCopy(string Source, string Destination, string? BufferSize = null, CancellationToken cancellationToken = default)
         {
             Init();
 
             Debug.WriteLine("Copy: you entered model '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Source, Destination, ollama_models);
+
+            // Check for cancellation before starting
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Detect if source and destination are remote or local
             bool isSourceRemote = Source.StartsWith("http://") || Source.StartsWith("https://");
@@ -1262,7 +1569,7 @@ namespace osync
                     System.Environment.Exit(1);
                 }
 
-                ActionCopyLocalToRemote(Source, destServer, destModel);
+                ActionCopyLocalToRemote(Source, destServer, destModel, cancellationToken);
             }
             else
             {
@@ -1346,8 +1653,10 @@ namespace osync
             }
         }
 
-        private void ActionCopyLocalToRemote(string Source, string destServer, string destModel)
+        private void ActionCopyLocalToRemote(string Source, string destServer, string destModel, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (!Directory.Exists(ollama_models))
             {
                 Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
@@ -1358,9 +1667,6 @@ namespace osync
             {
                 System.Environment.Exit(1);
             }
-
-            // Set the global client's BaseAddress for subsequent RunBlobUpload and RunCreateModel calls
-            client.BaseAddress = new Uri(destServer);
 
             string modelBase = ModelBase(Source);
 
@@ -1544,7 +1850,7 @@ namespace osync
                     var digest = layer.digest;
                     var hash = digest.Substring(7);
                     var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue).GetAwaiter().GetResult();
+                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
 
                     string filename = modelIndex == 0 ? "model.gguf" : $"model_{modelIndex}.gguf";
                     files[filename] = digest;
@@ -1555,7 +1861,7 @@ namespace osync
                     var digest = layer.digest;
                     var hash = digest.Substring(7);
                     var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue).GetAwaiter().GetResult();
+                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
 
                     string filename = projectorIndex == 0 ? "projector.gguf" : $"projector_{projectorIndex}.gguf";
                     files[filename] = digest;
@@ -1566,7 +1872,7 @@ namespace osync
                     var digest = layer.digest;
                     var hash = digest.Substring(7);
                     var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue).GetAwaiter().GetResult();
+                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
 
                     string filename = adapterIndex == 0 ? "adapter.gguf" : $"adapter_{adapterIndex}.gguf";
                     files[filename] = digest;
@@ -1576,7 +1882,7 @@ namespace osync
 
             Debug.WriteLine($"Creating model with files: {string.Join(", ", files.Keys)}");
 
-            RunCreateModel(destModel, files, template, system, parameters).GetAwaiter().GetResult();
+            RunCreateModel(destModel, files, template, system, parameters, destServer, ThrowOnError).GetAwaiter().GetResult();
         }
 
         private async Task ActionCopyRemoteToRemoteStreaming(string sourceServer, string sourceModel, string destServer, string destModel, string? bufferSizeStr)
@@ -4866,7 +5172,7 @@ _osync_completions() {
     prev=""${COMP_WORDS[COMP_CWORD-1]}""
 
     # Available commands
-    commands=""cp copy ls list rm remove del delete update show run chat ps""
+    commands=""cp copy ls list rm remove del delete update show run chat ps load unload""
 
     # Global options
     opts=""-bt -BufferSize --size --sizeasc --time --timeasc --license --modelfile --parameters --system --template -v --verbose -h -? -d --format --keepalive --dimensions --think --hide-thinking --insecure --truncate --no-wordwrap""
@@ -4971,6 +5277,22 @@ _osync_completions() {
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             fi
             ;;
+        load)
+            # Complete model names and flags
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            else
+                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+            fi
+            ;;
+        unload)
+            # Complete model names and flags
+            if [[ ${cur} == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            else
+                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+            fi
+            ;;
         *)
             ;;
     esac
@@ -5021,7 +5343,7 @@ function Get-OsyncModels {
 Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
 
-    $commands = @('cp', 'copy', 'ls', 'list', 'rm', 'remove', 'del', 'delete', 'update', 'show', 'run', 'chat', 'ps')
+    $commands = @('cp', 'copy', 'ls', 'list', 'rm', 'remove', 'del', 'delete', 'update', 'show', 'run', 'chat', 'ps', 'load', 'unload')
 
     # Get all words in the command line
     $words = $commandAst.ToString() -split '\s+'
@@ -5139,6 +5461,32 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             }
         }
 
+        'load' {
+            if ($wordToComplete -like '-*') {
+                @('-d') | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterName', $_)
+                }
+            }
+            else {
+                $models | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', ""Model: $_"")
+                }
+            }
+        }
+
+        'unload' {
+            if ($wordToComplete -like '-*') {
+                @('-d') | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterName', $_)
+                }
+            }
+            else {
+                $models | Where-Object { $_ -like ""$wordToComplete*"" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', ""Model: $_"")
+                }
+            }
+        }
+
         default {
             # No completion
         }
@@ -5155,7 +5503,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             if (args.Length < 2) return args;
 
             // Commands that have optional positional model/pattern arguments
-            string[] commandsWithPositional = { "show", "pull", "ls", "list", "rm", "remove", "del", "delete", "update", "run", "chat", "ps" };
+            string[] commandsWithPositional = { "show", "pull", "ls", "list", "rm", "remove", "del", "delete", "update", "run", "chat", "ps", "load", "unload" };
 
             string command = args[0];
             if (!commandsWithPositional.Contains(command.ToLower())) return args;

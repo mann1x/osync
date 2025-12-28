@@ -50,7 +50,11 @@ osync.Tests/
 │   ├── RenameCommand.feature          # Rename command tests
 │   ├── ShowCommand.feature            # Show command tests
 │   ├── UpdateCommand.feature          # Update command tests
-│   └── ChatCommand.feature            # Chat/run command tests (NEW in v1.1.5)
+│   ├── ChatCommand.feature            # Chat/run command tests (NEW in v1.1.5)
+│   ├── LoadCommand.feature            # Load command tests (NEW in v1.1.6)
+│   ├── UnloadCommand.feature          # Unload command tests (NEW in v1.1.6)
+│   ├── ProcessStatusCommand.feature   # Process status (ps) command tests (NEW in v1.1.6)
+│   └── ManageCommand.feature          # Manage TUI command tests (NEW in v1.1.6)
 ├── StepDefinitions/                   # C# step implementations
 │   └── CommonSteps.cs                 # Reusable step definitions
 ├── Infrastructure/                    # Core test infrastructure
@@ -760,11 +764,393 @@ steps:
 - Document any special setup requirements
 - Update tests when adding new features
 
+## Manage Command Testing (v1.1.6)
+
+The `osync manage` command provides an interactive Terminal User Interface (TUI) for model management. Testing this command requires a combination of automated and manual testing approaches.
+
+### Automated Testing Limitations
+
+The manage command uses Terminal.Gui which creates a full-screen interactive interface. Automated testing of TUI applications has inherent challenges:
+- Keyboard input simulation requires UI automation frameworks
+- Screen rendering validation is complex
+- Interactive workflows are difficult to assert programmatically
+
+### Recommended Testing Approach
+
+#### 1. Component Testing
+
+Test individual operations that the manage command uses internally:
+
+```gherkin
+Feature: Manage Command Components
+  Background:
+    Given Ollama is running
+    And test model "llama3.2:1b" exists
+
+  Scenario: List models for manage view
+    When I execute "osync ls"
+    Then the output should contain "llama3.2:1b"
+    And the exit code should be 0
+
+  Scenario: Copy operation from manage
+    When I execute "osync cp llama3.2:1b llama3.2:1b-backup"
+    Then the output should contain "successfully"
+    And model "llama3.2:1b-backup" should exist
+
+  Scenario: Delete operation from manage
+    Given test model "test-model-to-delete" exists
+    When I execute "osync rm test-model-to-delete"
+    Then the output should contain "deleted"
+    And model "test-model-to-delete" should not exist
+
+  Scenario: Update operation from manage
+    When I execute "osync update llama3.2:1b"
+    Then the output should contain "updated" or "already up to date"
+    And the exit code should be 0
+
+  Scenario: Rename operation from manage
+    Given test model "rename-source" exists
+    When I execute "osync rename rename-source rename-target"
+    Then model "rename-target" should exist
+    And model "rename-source" should not exist
+```
+
+#### 2. Process Status Testing
+
+Test the ps command which is used by manage (Ctrl+X):
+
+```gherkin
+Feature: Process Status Command
+  Background:
+    Given Ollama is running
+
+  Scenario: Show loaded models
+    Given model "llama3.2:1b" is loaded in memory
+    When I execute "osync ps"
+    Then the output should contain "llama3.2:1b"
+    And the output should contain "VRAM USAGE"
+    And the output should contain a percentage if model is partially loaded
+    And the exit code should be 0
+
+  Scenario: Show percentage for partially loaded model
+    Given model "large-model" is partially loaded (50% in VRAM)
+    When I execute "osync ps"
+    Then the VRAM usage should show "50%"
+    And the output format should match CLI ps format
+
+  Scenario: No models loaded
+    Given no models are loaded in memory
+    When I execute "osync ps"
+    Then the output should contain "No models currently loaded"
+    And the exit code should be 0
+```
+
+#### 3. Load/Unload Testing
+
+Test memory management operations used by manage (Ctrl+L, Ctrl+K):
+
+```gherkin
+Feature: Load and Unload Commands
+  Background:
+    Given Ollama is running
+    And test model "llama3.2:1b" exists
+
+  Scenario: Load model into memory
+    When I execute "osync load llama3.2:1b"
+    Then the output should contain "loaded successfully"
+    And "osync ps" should show "llama3.2:1b" as loaded
+
+  Scenario: Unload model from memory
+    Given model "llama3.2:1b" is loaded in memory
+    When I execute "osync unload llama3.2:1b"
+    Then the output should contain "unloaded successfully"
+    And "osync ps" should not show "llama3.2:1b"
+
+  Scenario: Load with custom keep-alive
+    When I execute "osync load llama3.2:1b --keepalive 30m"
+    Then the output should contain "loaded successfully"
+```
+
+### Manual Testing Procedures
+
+Since the manage command is a full TUI application, comprehensive manual testing is essential:
+
+#### Test Checklist: Basic Navigation
+
+- [ ] Launch `osync manage` successfully
+- [ ] Models list displays with proper formatting
+- [ ] Column widths adjust dynamically to terminal size
+- [ ] Up/Down arrow keys navigate the list
+- [ ] Page Up/Down scroll through models
+- [ ] Home/End keys jump to first/last model
+- [ ] Selected row is highlighted correctly
+
+#### Test Checklist: Filtering (/)
+
+- [ ] Press `/` to activate filter mode
+- [ ] Type "llama" - list updates to show only matching models
+- [ ] Filter indicator shows in top bar: `Filter: llama`
+- [ ] Continue typing - list updates in real-time
+- [ ] Press Esc - filter clears, all models shown
+- [ ] Top bar updates to remove filter indicator
+
+#### Test Checklist: Sorting (Ctrl+O)
+
+- [ ] Press Ctrl+O - sort changes to Name-
+- [ ] Top bar shows: `Sorting: Name-`
+- [ ] Models reorder descending by name
+- [ ] Press Ctrl+O again - changes to Size-
+- [ ] Top bar shows: `Sorting: Size-`
+- [ ] Models reorder by size (largest first)
+- [ ] Continue cycling through all 6 sort modes:
+  - [ ] Name+, Name-, Size-, Size+, Created-, Created+
+- [ ] Selected model stays selected during sort changes
+
+#### Test Checklist: Theme Switching (Ctrl+T)
+
+- [ ] Press Ctrl+T - theme changes to Dark
+- [ ] Colors update for all UI elements
+- [ ] Continue cycling through all 7 themes:
+  - [ ] Default, Dark, Blue, Solarized, Gruvbox, Nord, Dracula
+- [ ] All themes render correctly
+- [ ] Text remains readable in all themes
+
+#### Test Checklist: Multi-Selection (Space)
+
+- [ ] Press Space on a model - checkbox shows `[X]`
+- [ ] Press Space again - checkbox shows `[ ]`
+- [ ] Select 3 models using Space
+- [ ] All selected models show `[X]`
+- [ ] Navigate away and back - selections persist
+
+#### Test Checklist: Copy Operation (Ctrl+C)
+
+**Single Model Copy (Local):**
+- [ ] Select a model
+- [ ] Press Ctrl+C
+- [ ] Dialog appears with destination field
+- [ ] Enter new model name
+- [ ] Press Enter (or click Copy button)
+- [ ] Operation completes successfully
+- [ ] Returns to manage view
+- [ ] Cursor is on the same model
+
+**Single Model Copy (Remote):**
+- [ ] Select a model
+- [ ] Press Ctrl+C
+- [ ] Enter remote server URL
+- [ ] Operation shows progress
+- [ ] Returns to manage view after completion
+
+**Batch Copy:**
+- [ ] Select 3 models with Space
+- [ ] Press Ctrl+C
+- [ ] Enter remote server URL (required for batch)
+- [ ] All 3 models copy with progress
+- [ ] Incremental upload skips existing layers
+- [ ] Returns to manage view
+- [ ] Cursor returns to first selected model
+
+#### Test Checklist: Rename Operation (Ctrl+M)
+
+- [ ] Select a model
+- [ ] Press Ctrl+M
+- [ ] Dialog appears with new name field
+- [ ] Enter new name
+- [ ] Press Enter
+- [ ] Model renames successfully
+- [ ] Cursor stays on renamed model
+- [ ] Model appears with new name in list
+
+#### Test Checklist: Run/Chat Operation (Ctrl+R)
+
+- [ ] Select a model
+- [ ] Press Ctrl+R
+- [ ] TUI exits, console appears
+- [ ] Model preloads into memory
+- [ ] Shows loading status
+- [ ] Chat prompt appears
+- [ ] Type a message - model responds
+- [ ] Type `/bye` - exits chat
+- [ ] Returns to manage TUI
+- [ ] Same model is selected
+
+#### Test Checklist: Show Operation (Ctrl+S)
+
+- [ ] Select a model
+- [ ] Press Ctrl+S
+- [ ] TUI exits, console appears
+- [ ] Model information displays
+- [ ] Shows metadata, parameters, configuration
+- [ ] Press any key
+- [ ] Returns to manage TUI
+- [ ] Same model is selected
+
+#### Test Checklist: Delete Operation (Ctrl+D)
+
+**Single Delete:**
+- [ ] Select a model
+- [ ] Press Ctrl+D
+- [ ] Confirmation dialog appears
+- [ ] Confirm deletion
+- [ ] Model deletes successfully
+- [ ] Cursor moves to next model (or previous if last)
+
+**Batch Delete:**
+- [ ] Select 3 models with Space
+- [ ] Press Ctrl+D
+- [ ] Confirmation shows count (3 models)
+- [ ] Confirm deletion
+- [ ] All 3 models delete
+
+#### Test Checklist: Update Operation (Ctrl+U)
+
+**Single Update:**
+- [ ] Select a model
+- [ ] Press Ctrl+U
+- [ ] TUI exits, console appears
+- [ ] Update progress displays
+- [ ] Shows "updated successfully" or "already up to date"
+- [ ] Press any key
+- [ ] Returns to manage TUI
+- [ ] Same model is selected
+
+**Batch Update:**
+- [ ] Select 3 models with Space
+- [ ] Press Ctrl+U
+- [ ] TUI exits, console appears
+- [ ] Updates all 3 models sequentially
+- [ ] Shows status for each model
+- [ ] Press any key to return
+- [ ] Returns to manage TUI
+
+#### Test Checklist: Pull Operation (Ctrl+P)
+
+- [ ] Press Ctrl+P (no model selection needed)
+- [ ] Dialog appears with model name field
+- [ ] Enter model name (e.g., "qwen2:0.5b")
+- [ ] Press Enter
+- [ ] Validates model exists on ollama.com
+- [ ] If valid: TUI exits, shows pull progress
+- [ ] If invalid: Error dialog appears
+- [ ] After pull: Returns to manage TUI
+- [ ] New model appears in list
+
+#### Test Checklist: Load Operation (Ctrl+L)
+
+- [ ] Select a model
+- [ ] Press Ctrl+L
+- [ ] Model loads into memory
+- [ ] Success message displays
+- [ ] Use Ctrl+X to verify model is loaded
+
+#### Test Checklist: Unload Operation (Ctrl+K)
+
+- [ ] Select a loaded model
+- [ ] Press Ctrl+K
+- [ ] Model unloads from memory
+- [ ] Success message displays
+- [ ] Use Ctrl+X to verify model is unloaded
+
+#### Test Checklist: Process Status (Ctrl+X)
+
+- [ ] Load a model (Ctrl+L)
+- [ ] Press Ctrl+X
+- [ ] Dialog shows loaded models in table format
+- [ ] Format matches CLI `osync ps` output
+- [ ] Shows: NAME, ID, SIZE, VRAM USAGE, CONTEXT, UNTIL
+- [ ] VRAM percentage displays for partially loaded models
+- [ ] Example: "1.33 GB (63%)"
+- [ ] Press Close or Esc to dismiss
+
+#### Test Checklist: Exit (Ctrl+Q / Esc)
+
+- [ ] Press Ctrl+Q
+- [ ] Confirmation dialog appears
+- [ ] Select No - stays in manage
+- [ ] Press Ctrl+Q again
+- [ ] Select Yes - exits cleanly
+- [ ] Same test with Esc key
+
+### Edge Cases and Error Scenarios
+
+#### Test Checklist: Error Handling
+
+- [ ] **Empty model list** - manage displays appropriate message
+- [ ] **Network failure** - remote operations show error, don't crash
+- [ ] **Invalid destination** - copy shows error dialog
+- [ ] **Model already exists** - prevents overwrite, shows error
+- [ ] **Terminal too small** - UI adjusts or shows warning
+- [ ] **SSH session** - TUI renders correctly
+- [ ] **Special characters in model names** - handles correctly
+- [ ] **Very long model names** - truncates with "..."
+- [ ] **Large model list (100+ models)** - scrolling works
+- [ ] **Rapid key presses** - no crashes or duplicate operations
+
+### Performance Testing
+
+#### Test Checklist: Performance
+
+- [ ] List loads quickly with 100+ models (< 1 second)
+- [ ] Filtering updates in real-time (< 100ms)
+- [ ] Sorting completes instantly (< 200ms)
+- [ ] Theme switching is immediate
+- [ ] Navigation is responsive
+- [ ] Batch operations don't freeze UI
+- [ ] Memory usage is reasonable (< 100MB for TUI)
+
+### Integration Testing
+
+Test manage command with different server configurations:
+
+```gherkin
+Feature: Manage Command Integration
+  Scenario: Manage local server
+    When I execute "osync manage"
+    Then the TUI should launch successfully
+    And models from localhost:11434 should be listed
+
+  Scenario: Manage remote server
+    Given remote Ollama server at "http://192.168.0.100:11434"
+    When I execute "osync manage http://192.168.0.100:11434"
+    Then the TUI should launch successfully
+    And models from remote server should be listed
+
+  Scenario: Manage with OLLAMA_HOST environment variable
+    Given OLLAMA_HOST is set to "http://192.168.0.100:11434"
+    When I execute "osync manage"
+    Then the TUI should launch successfully
+    And models from the environment-specified server should be listed
+```
+
+### Testing Recommendations
+
+1. **Automated Tests** - Focus on component operations (ls, cp, rm, update, etc.)
+2. **Manual Testing** - Required for TUI interactions, use checklist above
+3. **Integration Tests** - Test with local and remote servers
+4. **Regression Testing** - Run full manual checklist before each release
+5. **User Acceptance Testing** - Have users test common workflows
+
+### Known Testing Challenges
+
+1. **Terminal.Gui Testing** - No built-in test framework for UI automation
+2. **Keyboard Input** - Difficult to simulate programmatically
+3. **Visual Verification** - Screen rendering cannot be easily asserted
+4. **Timing Issues** - Async operations may require manual observation
+
+### Future Testing Improvements
+
+- Consider UI automation framework (e.g., Selenium-like for TUI)
+- Record/playback for keyboard interactions
+- Screenshot comparison for visual regression testing
+- Mock Terminal.Gui components for unit testing
+
 ## Additional Resources
 
 - [xUnit Documentation](https://xunit.net/)
 - [SpecFlow Documentation](https://docs.specflow.org/)
 - [FluentAssertions Documentation](https://fluentassertions.com/)
+- [Terminal.Gui Documentation](https://gui-cs.github.io/Terminal.Gui/)
 - [osync README](README.md)
 - [osync GitHub Issues](https://github.com/mann1x/osync/issues)
 

@@ -34,6 +34,7 @@
 
 ### Key Features
 
+- 🖥️ **Interactive TUI** - Full-screen terminal interface with keyboard shortcuts for all operations
 - 🚀 **Fast Model Transfer** - Copy models between local and remote Ollama servers with high-speed uploads
 - 🔄 **Remote-to-Remote Copy** - Transfer models directly between remote servers with memory-buffered streaming
 - 📋 **Smart Model Management** - List, copy, rename, delete, pull, and show models with pattern matching support
@@ -42,11 +43,14 @@
 - 🔄 **Incremental Uploads** - Skips already transferred layers, saving bandwidth and time
 - 📊 **Progress Tracking** - Real-time progress bars with transfer speed indicators
 - 🏷️ **Auto-tagging** - Automatically applies `:latest` tag when not specified
-- 🔍 **Advanced Listing** - Sort models by name, size, or modification time
+- 🔍 **Advanced Listing** - Sort models by name, size, or modification time with visual indicators
 - 🌐 **Multi-registry Support** - Works with registry.ollama.ai, hf.co, and custom registries
 - 💾 **Offline Deployment** - Perfect for air-gapped servers and isolated networks
 - 🎯 **Wildcard Patterns** - Use `*` wildcards for batch operations
 - ⚡ **Bandwidth Control** - Throttle upload speeds and configure memory buffer size
+- 🎨 **Theme Support** - Choose from 7 built-in color themes
+- 💬 **Interactive Chat** - Chat with models directly from the CLI
+- 🧠 **Memory Management** - Load/unload models from VRAM with process status monitoring
 
 ### Built With
 
@@ -98,11 +102,17 @@ This will:
 ### Quick Start
 
 ```bash
+# Interactive TUI for model management (recommended)
+osync manage
+
 # Pull a model from registry
 osync pull llama3
 
 # Show model information
 osync show llama3
+
+# Chat with a model
+osync run llama3
 
 # Copy local model to remote server
 osync cp llama3 http://192.168.100.100:11434
@@ -110,7 +120,7 @@ osync cp llama3 http://192.168.100.100:11434
 # List all local models
 osync ls
 
-# Interactive mode with tab completion
+# Interactive REPL mode with tab completion
 osync
 ```
 
@@ -536,6 +546,143 @@ mistral-nemo:latest            994f3b8b7801    6.85 GB (12.2B)           0 B    
 - See when models will be automatically unloaded
 - Verify model loading on remote servers
 
+#### Load (`load`)
+
+Preload a model into memory on local or remote Ollama servers without starting a chat session.
+
+```bash
+# Load model locally
+osync load llama3
+osync load mistral-nemo
+
+# Load model on remote server
+osync load llama3 -d http://192.168.0.100:11434
+osync load mistral-nemo -d http://192.168.0.100:11434
+```
+
+**Features:**
+- Preloads model into memory without starting interactive chat
+- Automatic `:latest` tag when not specified
+- Works with both local and remote servers
+- Useful for warming up models before use
+- Model stays loaded based on Ollama's `keep_alive` setting
+
+**Use Cases:**
+- Preload models before starting workload
+- Warm up models on remote servers
+- Ensure models are ready for API calls
+- Reduce first-request latency
+
+**Example:**
+```bash
+# Load model and check status
+osync load llama3
+osync ps
+
+# Output:
+# Loading model 'llama3:latest' into memory...
+# ✓ Model 'llama3:latest' loaded successfully
+```
+
+#### Unload (`unload`)
+
+Unload a specific model or all models from memory on local or remote Ollama servers.
+
+```bash
+# Unload specific model locally
+osync unload llama3
+osync unload mistral-nemo:latest
+
+# Unload all loaded models locally
+osync unload
+
+# Unload specific model on remote server
+osync unload llama3 -d http://192.168.0.100:11434
+
+# Unload all models on remote server
+osync unload -d http://192.168.0.100:11434
+```
+
+**Features:**
+- Unload individual models or all models at once
+- Automatic `:latest` tag when not specified
+- Works with both local and remote servers
+- Sets `keep_alive: 0` to immediately unload from memory
+- Fetches loaded models list when no model name specified
+
+**Use Cases:**
+- Free up VRAM/memory when models are not needed
+- Clear memory before loading different models
+- Manage memory on servers with limited resources
+- Reset model state without restarting Ollama
+
+**Example:**
+```bash
+# Check loaded models
+osync ps
+# Output shows: llama3:latest and mistral-nemo:latest
+
+# Unload one model
+osync unload llama3
+# Output: ✓ Model 'llama3:latest' unloaded successfully
+
+# Unload all remaining models
+osync unload
+# Output:
+# Fetching loaded models...
+# Unloading model 'mistral-nemo:latest'...
+# ✓ Model 'mistral-nemo:latest' unloaded successfully
+#
+# Unloaded 1 models
+```
+
+####  Manage (`manage`)
+
+Interactive TUI for managing models with keyboard shortcuts.
+
+```bash
+# Launch manage interface for local server
+osync manage
+
+# Launch manage interface for remote server
+osync manage http://192.168.0.100:11434
+```
+
+**Features:**
+- Full-screen terminal user interface
+- Real-time model listing with dynamic column widths
+- Multi-selection support for batch operations
+- Filtering with live search
+- Multiple sort modes (name, size, created date - ascending/descending)
+- Theme switching (7 built-in themes)
+- Visual status indicators for sorting and filtering
+
+**Keyboard Shortcuts:**
+- **Ctrl+C** - Copy model(s) (local or to remote server)
+- **Ctrl+M** - Rename model
+- **Ctrl+R** - Run/chat with model
+- **Ctrl+S** - Show model information
+- **Ctrl+D** - Delete model(s)
+- **Ctrl+U** - Update model(s)
+- **Ctrl+P** - Pull model from registry
+- **Ctrl+L** - Load model into memory
+- **Ctrl+K** - Unload model from memory
+- **Ctrl+X** - Show process status (loaded models)
+- **Ctrl+O** - Cycle sort order
+- **Ctrl+T** - Cycle theme
+- **Ctrl+Q** or **Esc** - Quit (with confirmation)
+- **Space** - Toggle model selection
+- **/** - Start filtering (type to filter, Esc to clear)
+- **Enter** - Execute action in dialogs
+
+**Sort Modes:**
+- Name+ (ascending), Name- (descending)
+- Size+ (ascending), Size- (descending)
+- Created+ (oldest first), Created- (newest first)
+
+**Themes:**
+- Default, Dark, Blue, Solarized, Gruvbox, Nord, Dracula
+
 ### Options
 
 #### Global Options
@@ -702,6 +849,40 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.1.6
+- **Manage TUI Command** - Full-screen interactive terminal user interface for model management
+  - Real-time model listing with dynamic column widths
+  - Multi-selection support for batch operations (copy, update, delete)
+  - Live filtering with instant search
+  - Six sort modes: Name+/-, Size+/-, Created+/- (with visual status indicator)
+  - Seven built-in themes (Default, Dark, Blue, Solarized, Gruvbox, Nord, Dracula)
+  - All operations accessible via keyboard shortcuts (Ctrl+C/M/R/S/D/U/P/L/K/X/O/T/Q)
+  - Enter key support in all dialogs for faster workflow
+  - Smart model selection persistence after operations
+  - Batch copy with incremental uploads
+  - Console output for long operations (update, pull) with auto-return to TUI
+- **Process Status Enhancements** - `ps` command improvements
+  - Shows VRAM usage percentage when model is partially loaded (e.g., "1.33 GB (63%)")
+  - Consistent tabular format in both CLI and manage TUI
+  - Displays model ID, size, context length, and expiration time
+- **New `load` Command** - Preload models into memory without starting a chat session
+  - Load models locally or on remote servers
+  - Automatic `:latest` tag when not specified
+  - Useful for warming up models before use
+  - Reduces first-request latency by preloading models
+- **New `unload` Command** - Unload models from memory to free VRAM
+  - Unload specific models or all loaded models at once
+  - Works with both local and remote servers
+  - Sets `keep_alive: 0` to immediately free memory
+  - Automatically fetches and unloads all models when no model name specified
+- **Enhanced Tab Completion** - Added shell completion support for load and unload commands
+  - PowerShell completion for model names and -d flag
+  - Bash completion for model names and -d flag
+  - Works in both interactive and command-line modes
+- **Cross-Platform Argument Support** - Load and unload commands support flexible argument ordering
+  - Arguments work in any order (e.g., `osync load -d http://... model` or `osync load model -d http://...`)
+  - Consistent behavior across Windows, Linux, and macOS
 
 v1.1.5
 - **New `ps` Command** - Show running models and their status
