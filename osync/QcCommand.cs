@@ -229,9 +229,31 @@ namespace osync
                     return false;
                 }
 
-                // TODO: Implement external test suite JSON loading
-                AnsiConsole.MarkupLine("[red]Error: External test suite loading not yet implemented[/]");
-                return false;
+                var json = File.ReadAllText(_args.TestSuite);
+                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var externalData = JsonSerializer.Deserialize<ExternalTestSuiteJson>(json, options);
+
+                if (externalData == null)
+                {
+                    AnsiConsole.MarkupLine("[red]Error: Failed to parse test suite JSON file[/]");
+                    return false;
+                }
+
+                if (string.IsNullOrEmpty(externalData.Name))
+                {
+                    AnsiConsole.MarkupLine("[red]Error: Test suite JSON must have a 'name' property[/]");
+                    return false;
+                }
+
+                if (externalData.Categories == null || externalData.Categories.Count == 0)
+                {
+                    AnsiConsole.MarkupLine("[red]Error: Test suite JSON must have at least one category[/]");
+                    return false;
+                }
+
+                _testSuite = new ExternalTestSuite(externalData);
+                AnsiConsole.MarkupLine($"[dim]Using external test suite: {_testSuite.Name} ({_testSuite.TotalQuestions} questions)[/]");
+                return true;
             }
             catch (Exception ex)
             {

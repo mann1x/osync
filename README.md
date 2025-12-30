@@ -488,9 +488,35 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
 - `-To <value>` - top_p parameter (default: 0.001)
 - `-Top <value>` - top_k parameter (default: -1)
 - `-R <value>` - repeat_penalty parameter
-- `-F <value>` - frequency_penalty parameter
+- `-Fr <value>` - frequency_penalty parameter
 - `-T <file>` - External test suite JSON file (default: internal v1base)
 - `--force` - Force re-run testing for quantizations already present in results file
+
+**External Test Suite Format:**
+
+Create custom test suites using JSON files with the following structure:
+```json
+{
+  "name": "my-custom-suite",
+  "categories": [
+    {
+      "id": 1,
+      "name": "Category Name",
+      "questions": [
+        {
+          "categoryId": 1,
+          "questionId": 1,
+          "text": "Your question text here"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Use with: `osync qc -M model -Q q4_k_m -T my-custom-suite.json`
+
+A reference `v1base.json` file is included in the osync directory.
 
 #### View Quantization Results (`qcview`)
 
@@ -706,6 +732,18 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.1.8
+- **External Test Suite Support** - Load custom test suites from JSON files using `-T path/to/suite.json`
+  - Bundled `v1base.json` file for reference and portability
+  - Create custom test suites with your own categories and questions
+  - Full JSON schema support with categories, questions, and metadata
+- **Force Re-run Option** - Added `--force` flag to re-run testing for quantizations already in results file
+- **Improved Base Model Handling** - Base tag defaults to `fp16` and is automatically detected from existing results
+- **Bug Fixes**
+  - Fixed case-sensitive model name matching when retrieving disk size from `/api/tags`
+  - Fixed command argument positioning (PowerArgs uses 1-based indexing)
+  - Fixed `osync ls` to accept model name as positional argument (e.g., `osync ls qw` works like `osync ls qw*`)
+
 v1.1.7
 - **Quantization Comparison Testing** - New `qc` and `qcview` commands for comprehensive quality testing
   - 50-question test suite across 5 categories (Reasoning, Math, Finance, Technology, Science)
@@ -717,7 +755,6 @@ v1.1.7
   - JSON export option for programmatic analysis
   - Uses Ollama's logprobs API (requires Ollama v0.12.11+)
   - Configurable test parameters: temperature, seed, top_p, top_k, repeat_penalty, frequency_penalty
-  - Support for custom external test suites
   - Works on both local and remote servers
 - **Bug Fixes**
   - Fixed PowerArgs duplicate alias errors by removing explicit shortcuts (auto-generated from property names)

@@ -27,6 +27,15 @@ namespace osync
     }
 
     /// <summary>
+    /// External test suite JSON file structure
+    /// </summary>
+    public class ExternalTestSuiteJson
+    {
+        public string Name { get; set; } = string.Empty;
+        public List<TestCategory> Categories { get; set; } = new List<TestCategory>();
+    }
+
+    /// <summary>
     /// Complete results file structure
     /// </summary>
     public class QcResultsFile
