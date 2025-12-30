@@ -33,450 +33,10 @@ using ByteSizeLib;
 
 namespace osync
 {
-    public class CopyArgs
-    {
-        [ArgRequired, ArgDescription("Source: local model name (e.g., mistral:latest) or remote server URL with model (e.g., http://192.168.0.100:11434/mistral:latest)"), ArgPosition(1)]
-        public string Source { get; set; }
-        [ArgRequired, ArgDescription("Destination: local model name (e.g., my-model:v1) or remote server URL with model (e.g., http://192.168.0.100:11434/my-model:v1). Note: Remote-to-remote copy only works for models originally from the Ollama registry. Locally created models cannot be copied between remote servers."), ArgExample("my-backup-model", "local model name"), ArgExample("http://192.168.0.100:11434/mistral:latest", "remote server with model"), ArgPosition(2)]
-        public string Destination { get; set; }
-        [ArgDescription("Buffer size for remote-to-remote copy (e.g., 256MB, 1GB). Default: 512MB")]
-        public string BufferSize { get; set; }
-    }
-
-    public class ListArgs
-    {
-        [ArgDescription("Model pattern, supports * as wildcard, eg: mistral:* or *mistral*"),
-         ArgPosition(1)]
-        public string Pattern { get; set; }
-        [ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgShortcut("-d")]
-        public string Destination { get; set; }
-        [ArgDescription("Sort by size (descending)"), ArgShortcut("--size")]
-        public bool SortBySize { get; set; }
-        [ArgDescription("Sort by size (ascending)"), ArgShortcut("--sizeasc")]
-        public bool SortBySizeAsc { get; set; }
-        [ArgDescription("Sort by modified time (descending)"), ArgShortcut("--time")]
-        public bool SortByTime { get; set; }
-        [ArgDescription("Sort by modified time (ascending)"), ArgShortcut("--timeasc")]
-        public bool SortByTimeAsc { get; set; }
-    }
-
-    public class RemoveArgs
-    {
-        [ArgDescription("Model pattern to delete, supports * as wildcard, eg: mistral:* or *mistral*"),
-         ArgPosition(1)]
-        public string Pattern { get; set; }
-        [ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgShortcut("-d")]
-        public string Destination { get; set; }
-    }
-
-    public class RenameArgs
-    {
-        [ArgRequired, ArgDescription("Source model name (e.g., llama3:latest or llama3 for :latest)"), ArgPosition(1)]
-        public string Source { get; set; }
-        [ArgRequired, ArgDescription("New model name (e.g., my-llama3:v1 or my-llama3 for :latest)"), ArgPosition(2)]
-        public string NewName { get; set; }
-    }
-
-    public class UpdateArgs
-    {
-        [ArgDescription("Model pattern to update, supports * as wildcard (e.g., llama* or * for all models). If omitted, updates all models."),
-         ArgPosition(1)]
-        public string Pattern { get; set; }
-        [ArgDescription("Remote ollama server, eg: http://192.168.0.100:11434"), ArgExample("http://192.168.0.100:11434", "protocol://ip:port"), ArgShortcut("-d")]
-        public string Destination { get; set; }
-    }
-
-    public class PullArgs
-    {
-        [ArgRequired,
-         ArgDescription("Model name to pull from registry. Supports standard format (llama3, llama3:7b), HuggingFace short format (hf.co/user/repo:tag), or full HuggingFace URL"),
-         ArgExample("llama3", "standard model"),
-         ArgExample("llama3:7b", "model with tag"),
-         ArgExample("hf.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF:IQ2_M", "HuggingFace short format"),
-         ArgExample("https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF/blob/main/Qwen2.5.1-Coder-7B-Instruct-IQ2_M.gguf", "HuggingFace URL"),
-         ArgPosition(1)]
-        public string ModelName { get; set; }
-        [ArgDescription("Remote ollama server URL for remote pull (optional). If omitted, pulls locally."),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d")]
-        public string Destination { get; set; }
-    }
-
-    public class ShowArgs
-    {
-        [ArgRequired,
-         ArgDescription("Model name to show information about"),
-         ArgExample("llama3", "show basic info"),
-         ArgExample("llama3:7b", "show info with tag"),
-         ArgPosition(1)]
-        public string ModelName { get; set; }
-
-        [ArgDescription("Remote ollama server URL for remote show (optional). If omitted, shows locally."),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d")]
-        public string Destination { get; set; }
-
-        [ArgDescription("Show license of the model"),
-         ArgShortcut("--license")]
-        public bool License { get; set; }
-
-        [ArgDescription("Show Modelfile of the model"),
-         ArgShortcut("--modelfile")]
-        public bool Modelfile { get; set; }
-
-        [ArgDescription("Show parameters of the model"),
-         ArgShortcut("--parameters")]
-        public bool Parameters { get; set; }
-
-        [ArgDescription("Show system message of the model"),
-         ArgShortcut("--system")]
-        public bool System { get; set; }
-
-        [ArgDescription("Show template of the model"),
-         ArgShortcut("--template")]
-        public bool Template { get; set; }
-
-        [ArgDescription("Show detailed model information"),
-         ArgShortcut("-v"),
-         ArgShortcut("--verbose")]
-        public bool Verbose { get; set; }
-    }
-
-    public class RunArgs
-    {
-        [ArgRequired,
-         ArgDescription("Model name to chat with"),
-         ArgExample("llama3.2:1b", "basic model"),
-         ArgExample("deepseek-r1:1.5b", "thinking model"),
-         ArgPosition(1)]
-        public string ModelName { get; set; }
-
-        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d")]
-        public string Destination { get; set; }
-
-        [ArgDescription("Response format (e.g. json)"),
-         ArgShortcut("--format")]
-        public string Format { get; set; }
-
-        [ArgDescription("Duration to keep model loaded (e.g. 5m, 1h)"),
-         ArgShortcut("--keepalive")]
-        public string KeepAlive { get; set; }
-
-        [ArgDescription("Don't wrap words to next line automatically"),
-         ArgShortcut("--nowordwrap")]
-        public bool NoWordWrap { get; set; }
-
-        [ArgDescription("Show timings for response"),
-         ArgShortcut("--verbose")]
-        public bool Verbose { get; set; }
-
-        [ArgDescription("Truncate output embeddings to specified dimension"),
-         ArgShortcut("--dimensions")]
-        public int? Dimensions { get; set; }
-
-        [ArgDescription("Hide thinking output (if provided)"),
-         ArgShortcut("--hidethinking")]
-        public bool HideThinking { get; set; }
-
-        [ArgDescription("Use an insecure registry"),
-         ArgShortcut("--insecure")]
-        public bool Insecure { get; set; }
-
-        [ArgDescription("Enable thinking mode: true/false or high/medium/low"),
-         ArgShortcut("--think")]
-        public string Think { get; set; }
-
-        [ArgDescription("Truncate inputs exceeding context length (default: true)"),
-         ArgShortcut("--truncate")]
-        public bool? Truncate { get; set; }
-    }
-
-    public class PsArgs
-    {
-        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d"),
-         ArgPosition(1)]
-        public string Destination { get; set; }
-    }
-
-    public class LoadArgs
-    {
-        [ArgRequired,
-         ArgDescription("Model name to load into memory"),
-         ArgExample("llama3", "basic model"),
-         ArgExample("mistral-nemo", "larger model"),
-         ArgPosition(1)]
-        public string ModelName { get; set; }
-
-        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d")]
-        public string Destination { get; set; }
-    }
-
-    public class UnloadArgs
-    {
-        [ArgDescription("Model name to unload from memory (optional - if not specified, unloads all models)"),
-         ArgExample("llama3", "specific model"),
-         ArgPosition(1)]
-        public string ModelName { get; set; }
-
-        [ArgDescription("Ollama server URL (default: OLLAMA_HOST env var or http://localhost:11434)"),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d")]
-        public string Destination { get; set; }
-    }
-
-    public class ManageArgs
-    {
-        [ArgDescription("Remote ollama server (optional - defaults to local)"),
-         ArgExample("http://192.168.0.100:11434", "remote server"),
-         ArgShortcut("-d"),
-         ArgPosition(1)]
-        public string Destination { get; set; }
-    }
-
-    // Progress wrapper stream that displays transfer progress
-    public class ProgressStream : Stream
-    {
-        private readonly Stream _baseStream;
-        private readonly long _totalBytes;
-        private readonly ByteSize _totalSize;
-        private long _bytesTransferred;
-
-        public ProgressStream(Stream baseStream, long totalBytes, ByteSize totalSize)
-        {
-            _baseStream = baseStream;
-            _totalBytes = totalBytes;
-            _totalSize = totalSize;
-            _bytesTransferred = 0;
-        }
-
-        public override bool CanRead => _baseStream.CanRead;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => _totalBytes;
-        public override long Position
-        {
-            get => _bytesTransferred;
-            set => throw new NotSupportedException();
-        }
-
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            int bytesRead = _baseStream.Read(buffer, offset, count);
-            _bytesTransferred += bytesRead;
-
-            // Show progress
-            int percentage = _totalBytes > 0 ? (int)((_bytesTransferred * 100) / _totalBytes) : 0;
-            var transferred = ByteSize.FromBytes(_bytesTransferred);
-            Console.Write($"\r  Progress: {percentage}% ({transferred.ToString("#.##")} / {_totalSize.ToString("#.##")})");
-
-            return bytesRead;
-        }
-
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            int bytesRead = await _baseStream.ReadAsync(buffer, offset, count, cancellationToken);
-            _bytesTransferred += bytesRead;
-
-            // Show progress
-            int percentage = _totalBytes > 0 ? (int)((_bytesTransferred * 100) / _totalBytes) : 0;
-            var transferred = ByteSize.FromBytes(_bytesTransferred);
-            Console.Write($"\r  Progress: {percentage}% ({transferred.ToString("#.##")} / {_totalSize.ToString("#.##")})");
-
-            return bytesRead;
-        }
-
-        public override void Flush() => _baseStream.Flush();
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                _baseStream?.Dispose();
-            }
-            base.Dispose(disposing);
-        }
-    }
-
-    // Bounded buffer stream for simultaneous download/upload with backpressure
-    public class BufferedPipeStream : Stream
-    {
-        private readonly SemaphoreSlim _writeSemaphore;
-        private readonly SemaphoreSlim _readSemaphore;
-        private readonly Queue<byte[]> _bufferQueue;
-        private readonly object _lock = new object();
-        private readonly long _maxBufferSize;
-        private long _currentBufferSize;
-        private bool _writeCompleted;
-        private Exception _exception;
-
-        public BufferedPipeStream(long maxBufferSize)
-        {
-            _maxBufferSize = maxBufferSize;
-            _bufferQueue = new Queue<byte[]>();
-            _writeSemaphore = new SemaphoreSlim(1, 1);
-            _readSemaphore = new SemaphoreSlim(0);
-            _currentBufferSize = 0;
-            _writeCompleted = false;
-        }
-
-        public void CompleteWriting()
-        {
-            lock (_lock)
-            {
-                _writeCompleted = true;
-                _readSemaphore.Release();
-            }
-        }
-
-        public void SetException(Exception ex)
-        {
-            lock (_lock)
-            {
-                _exception = ex;
-                _readSemaphore.Release();
-            }
-        }
-
-        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            if (_exception != null)
-                throw _exception;
-
-            // Create a copy of the data to write
-            byte[] data = new byte[count];
-            Array.Copy(buffer, offset, data, 0, count);
-
-            // Wait if buffer is full (backpressure)
-            while (true)
-            {
-                lock (_lock)
-                {
-                    if (_currentBufferSize + count <= _maxBufferSize)
-                    {
-                        _bufferQueue.Enqueue(data);
-                        _currentBufferSize += count;
-                        _readSemaphore.Release();
-                        return;
-                    }
-                }
-
-                // Buffer is full, wait a bit before retrying (backpressure)
-                await Task.Delay(10, cancellationToken);
-            }
-        }
-
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                if (_exception != null)
-                    throw _exception;
-
-                lock (_lock)
-                {
-                    if (_bufferQueue.Count > 0)
-                    {
-                        byte[] data = _bufferQueue.Dequeue();
-                        int bytesToCopy = Math.Min(data.Length, count);
-                        Array.Copy(data, 0, buffer, offset, bytesToCopy);
-                        _currentBufferSize -= data.Length;
-
-                        // If we didn't copy all data, put the rest back
-                        if (bytesToCopy < data.Length)
-                        {
-                            byte[] remaining = new byte[data.Length - bytesToCopy];
-                            Array.Copy(data, bytesToCopy, remaining, 0, remaining.Length);
-                            var tempQueue = new Queue<byte[]>();
-                            tempQueue.Enqueue(remaining);
-                            while (_bufferQueue.Count > 0)
-                                tempQueue.Enqueue(_bufferQueue.Dequeue());
-                            _bufferQueue.Clear();
-                            while (tempQueue.Count > 0)
-                                _bufferQueue.Enqueue(tempQueue.Dequeue());
-                            _currentBufferSize += remaining.Length;
-                        }
-
-                        return bytesToCopy;
-                    }
-                    else if (_writeCompleted)
-                    {
-                        return 0; // End of stream
-                    }
-                }
-
-                // Wait for data to be available
-                await _readSemaphore.WaitAsync(cancellationToken);
-            }
-        }
-
-        public override bool CanRead => true;
-        public override bool CanSeek => false;
-        public override bool CanWrite => true;
-        public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override void Flush() { }
-        public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => WriteAsync(buffer, offset, count).GetAwaiter().GetResult();
-    }
-
-    // Stream wrapper for tracking upload progress
-    public class ProgressTrackingStream : Stream
-    {
-        private readonly Stream _baseStream;
-        private readonly long _totalBytes;
-        private long _bytesRead;
-        private readonly Action<long> _progressCallback;
-
-        public ProgressTrackingStream(Stream baseStream, long totalBytes, Action<long> progressCallback)
-        {
-            _baseStream = baseStream;
-            _totalBytes = totalBytes;
-            _progressCallback = progressCallback;
-            _bytesRead = 0;
-        }
-
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
-        {
-            int bytesRead = await _baseStream.ReadAsync(buffer, offset, count, cancellationToken);
-            _bytesRead += bytesRead;
-            _progressCallback?.Invoke(_bytesRead);
-            return bytesRead;
-        }
-
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            int bytesRead = _baseStream.Read(buffer, offset, count);
-            _bytesRead += bytesRead;
-            _progressCallback?.Invoke(_bytesRead);
-            return bytesRead;
-        }
-
-        public override bool CanRead => _baseStream.CanRead;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => _totalBytes;
-        public override long Position { get => _bytesRead; set => throw new NotSupportedException(); }
-        public override void Flush() => _baseStream.Flush();
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-    }
-
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.1.6";
+        static string version = "1.1.7";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -962,6 +522,51 @@ namespace osync
                 }
                 System.Environment.Exit(1);
             }
+        }
+
+        [ArgActionMethod, ArgDescription("Run quantization comparison tests on model variants")]
+        public async Task Qc(QcArgs args)
+        {
+            Init();
+
+            // Get Ollama host from environment variable or argument
+            var ollamaHost = args.Destination
+                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+            // If OLLAMA_HOST doesn't have protocol, add it
+            else if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            {
+                ollamaHost = "http://" + ollamaHost;
+            }
+
+            // Validate server URL if it's not localhost
+            if (!ollamaHost.Contains("localhost") && !ollamaHost.Contains("127.0.0.1"))
+            {
+                if (!ValidateServerUrl(ollamaHost, silent: true))
+                {
+                    System.Environment.Exit(1);
+                }
+            }
+
+            var qcCommand = new QcCommand(args, ollamaHost);
+            var exitCode = await qcCommand.ExecuteAsync();
+            System.Environment.Exit(exitCode);
+        }
+
+        [ArgActionMethod, ArgDescription("View quantization comparison results from qc command")]
+        public async Task QcView(QcViewArgs args)
+        {
+            Init();
+
+            var qcViewCommand = new QcViewCommand(args);
+            var exitCode = await qcViewCommand.ExecuteAsync();
+            System.Environment.Exit(exitCode);
         }
 
         [ArgActionMethod, ArgDescription("Interactive TUI for model management")]
@@ -2858,6 +2463,13 @@ namespace osync
             {
                 Destination = Pattern;
                 Pattern = null;
+            }
+
+            // If pattern is provided but doesn't contain a wildcard, append * to match prefix
+            // This makes "osync ls qw" work the same as "osync ls qw*"
+            if (!string.IsNullOrEmpty(Pattern) && !Pattern.Contains("*"))
+            {
+                Pattern = Pattern + "*";
             }
 
             Debug.WriteLine("List: you entered pattern '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Pattern, Destination, ollama_models);
@@ -5816,143 +5428,4 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         }
     }
 
-    public class Config
-    {
-        public string mediaType { get; set; }
-        public string digest { get; set; }
-        public int size { get; set; }
-    }
-
-    public class Layer
-    {
-        public string mediaType { get; set; }
-        public string digest { get; set; }
-        public long size { get; set; }
-        public string from { get; set; }
-    }
-
-    public class RootManifest
-    {
-        public int schemaVersion { get; set; }
-        public string mediaType { get; set; }
-        public Config config { get; set; }
-        public List<Layer> layers { get; set; }
-    }
-
-    public class RootStatus
-    {
-        public string status { get; set; }
-    }
-    public class RootVersion
-    {
-        public string version { get; set; }
-    }
-
-    public class LocalModelInfo
-    {
-        public string Name { get; set; }
-        public string Id { get; set; }
-        public long Size { get; set; }
-        public DateTime ModifiedAt { get; set; }
-    }
-
-    public class OllamaModelsResponse
-    {
-        public List<OllamaModel> models { get; set; }
-    }
-
-    public class OllamaModel
-    {
-        public string name { get; set; }
-        public string model { get; set; }
-        public DateTime modified_at { get; set; }
-        public long size { get; set; }
-        public string digest { get; set; }
-    }
-
-    // From https://stackoverflow.com/a/41392145/4213397
-    internal class ProgressableStreamContent : HttpContent
-    {
-        /// <summary>
-        /// Lets keep buffer of 20kb
-        /// </summary>
-        private const int defaultBufferSize = 5 * 4096;
-
-        private HttpContent content;
-
-        private int bufferSize;
-
-        //private bool contentConsumed;
-        private Action<long, long> progress;
-
-        public ProgressableStreamContent(HttpContent content, Action<long, long> progress) : this(content,
-            defaultBufferSize, progress)
-        {
-        }
-
-        public ProgressableStreamContent(HttpContent content, int bufferSize, Action<long, long> progress)
-        {
-            if (content == null)
-            {
-                throw new ArgumentNullException("content");
-            }
-
-            if (bufferSize <= 0)
-            {
-                throw new ArgumentOutOfRangeException("bufferSize");
-            }
-
-            this.content = content;
-            this.bufferSize = bufferSize;
-            this.progress = progress;
-
-            foreach (var h in content.Headers)
-            {
-                this.Headers.Add(h.Key, h.Value);
-            }
-        }
-
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext context)
-        {
-            return Task.Run(async () =>
-            {
-                var buffer = new Byte[this.bufferSize];
-                long size;
-                TryComputeLength(out size);
-                long uploaded = 0;
-                using (var sinput = await content.ReadAsStreamAsync())
-                {
-                    while (true)
-                    {
-                        var length = sinput.Read(buffer, 0, buffer.Length);
-                        if (length <= 0) break;
-                        //downloader.Uploaded = uploaded += length;
-                        uploaded += length;
-                        progress?.Invoke(uploaded, size);
-                        //System.Diagnostics.Debug.WriteLine($"Bytes sent {uploaded} of {size}");
-                        stream.Write(buffer, 0, length);
-                        stream.Flush();
-                    }
-                }
-                stream.Flush();
-            });
-        }
-
-        protected override bool TryComputeLength(out long length)
-        {
-            length = content.Headers.ContentLength.GetValueOrDefault();
-            return true;
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                content.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-
-    }
 }

@@ -37,9 +37,7 @@
 - 🖥️ **Interactive TUI** - Full-screen terminal interface with keyboard shortcuts for all operations
 - 🚀 **Fast Model Transfer** - Copy models between local and remote Ollama servers with high-speed uploads
 - 🔄 **Remote-to-Remote Copy** - Transfer models directly between remote servers with memory-buffered streaming
-- 📋 **Smart Model Management** - List, copy, rename, delete, pull, and show models with pattern matching support
-- 📥 **Registry Pull** - Download models from Ollama registry and HuggingFace with automatic tag extraction
-- 📄 **Model Information** - Display detailed model information including license, parameters, and templates
+- 📋 **Smart Model Management** - List, copy, rename, and delete models with pattern matching support
 - 🔄 **Incremental Uploads** - Skips already transferred layers, saving bandwidth and time
 - 📊 **Progress Tracking** - Real-time progress bars with transfer speed indicators
 - 🏷️ **Auto-tagging** - Automatically applies `:latest` tag when not specified
@@ -51,6 +49,7 @@
 - 🎨 **Theme Support** - Choose from 7 built-in color themes
 - 💬 **Interactive Chat** - Chat with models directly from the CLI
 - 🧠 **Memory Management** - Load/unload models from VRAM with process status monitoring
+- 📊 **Quantization Comparison** - Compare quality and performance across model quantizations with detailed scoring
 
 ### Built With
 
@@ -66,36 +65,13 @@
 
 ### Installation
 
-#### Quick Install (Recommended)
+> **[Download latest binary release]**
 
-Download the latest binary for your platform, then run:
+> **[Build from sources]**
 
-```bash
-# Windows
-osync.exe install
+> Clone the repo
 
-# Linux/macOS
-./osync install
-```
-
-This will:
-1. Install osync to your user directory (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS)
-2. Add osync to your PATH automatically
-3. Optionally configure shell completion (PowerShell 6.0+ on Windows, Bash on Linux/macOS)
-4. Restart your terminal to use `osync` from anywhere
-
-#### Manual Installation
-
-**Download Binary:**
-- Download the latest release from [GitHub Releases](https://github.com/mann1x/osync/releases)
-- Extract to a directory of your choice
-- Add the directory to your PATH manually
-
-**Build from Source:**
-1. Clone the repository
-2. Open with Visual Studio 2022 or use `dotnet build`
-3. Publish: `dotnet publish -c Release`
-4. Run `osync install` from the published output directory
+> Compile with Visual Studio 2022
 
 ## Usage
 
@@ -105,20 +81,14 @@ This will:
 # Interactive TUI for model management (recommended)
 osync manage
 
-# Pull a model from registry
-osync pull llama3
-
-# Show model information
-osync show llama3
-
-# Chat with a model
-osync run llama3
-
 # Copy local model to remote server
 osync cp llama3 http://192.168.100.100:11434
 
 # List all local models
 osync ls
+
+# Chat with a model
+osync run llama3
 
 # Interactive REPL mode with tab completion
 osync
@@ -294,231 +264,81 @@ Updating 'qwen2:7b'...
 ✓ 'qwen2:7b' is already up to date
 ```
 
-#### Pull (`pull`)
-
-Pull (download) models from the Ollama registry locally or to remote servers. Works like `ollama pull` with additional support for HuggingFace model URLs.
-
-```bash
-# Pull model locally (adds :latest if no tag specified)
-osync pull llama3
-osync pull llama3:7b
-
-# Pull model to remote server
-osync pull llama3 http://192.168.0.100:11434
-osync pull qwen2:7b http://192.168.0.100:11434
-
-# Pull from HuggingFace using full URL
-osync pull https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF/blob/main/Qwen2.5.1-Coder-7B-Instruct-IQ2_M.gguf
-
-# Pull from HuggingFace using short format
-osync pull hf.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF:IQ2_M
-osync pull hf.co/unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M
-```
-
-**Features:**
-- Pulls models from Ollama registry (registry.ollama.ai)
-- Automatic `:latest` tag when not specified (standard models only)
-- Supports both local and remote server pulls
-- HuggingFace URL conversion and integration
-- Extracts quantization tags (IQ2_M, Q4_K_M, etc.) from GGUF filenames
-- Real-time progress display during downloads
-- Works with standard models, HuggingFace models, and custom registries
-
-**HuggingFace Integration:**
-- Converts full HuggingFace URLs to ollama-compatible format
-- Automatically extracts quantization identifier from filename
-- Supports various GGUF quantization formats (IQ, Q, F, FP, BF series)
-- Example conversion:
-  - Input: `https://huggingface.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF/blob/main/Qwen2.5.1-Coder-7B-Instruct-IQ2_M.gguf`
-  - Output: `hf.co/bartowski/Qwen2.5.1-Coder-7B-Instruct-GGUF:IQ2_M`
-
-**Output:**
-```
-Pulling 'llama3:latest' locally...
-pulling manifest
-pulling 6a0746a1ec1a... 100% ▕████████████████▏ 4.7 GB
-verifying sha256 digest
-writing manifest
-removing any unused layers
-✓ Successfully pulled 'llama3:latest'
-```
-
 #### Show (`show`)
 
-Show detailed information about a model locally or on a remote server. Works like `ollama show` with support for displaying specific sections.
+Display detailed information about a model.
 
 ```bash
-# Show model information locally
+# Show information about a local model
 osync show llama3
-osync show llama3:7b
+osync show qwen2:7b
 
-# Show specific sections
-osync show llama3 --license       # Show license only
-osync show llama3 --modelfile     # Show Modelfile only
-osync show llama3 --parameters    # Show parameters only
-osync show llama3 --system        # Show system message only
-osync show llama3 --template      # Show template only
-osync show llama3 --verbose       # Show all details
-
-# Show model info from remote server
+# Show information about a remote model
 osync show llama3 http://192.168.0.100:11434
-osync show qwen2:7b http://192.168.0.100:11434 --verbose
-osync show llama3 http://192.168.0.100:11434 --modelfile
 ```
 
 **Features:**
-- Display full model information or specific sections
-- Automatic `:latest` tag when not specified
+- Displays model metadata and configuration
+- Shows model file details, parameters, and system information
 - Works on both local and remote servers
-- Multiple display options matching ollama's show command
-- Verbose mode for comprehensive details
 
-**Available Flags:**
-- `--license` - Show the model's license
-- `--modelfile` - Show the Modelfile used to create the model
-- `--parameters` - Show the model's parameters
-- `--system` - Show the system message
-- `--template` - Show the prompt template
-- `-v`, `--verbose` - Show detailed information including all sections
+#### Pull (`pull`)
 
-**Output:**
-```
-# Default output (shows Modelfile)
-Model: llama3:latest
-Modelfile:
-FROM llama3:latest
-TEMPLATE """{{ .System }}
-{{ .Prompt }}"""
-PARAMETER stop "<|start_header_id|>"
-PARAMETER stop "<|end_header_id|>"
-PARAMETER stop "<|eot_id|>"
-```
-
-#### Run/Chat (`run`, `chat`)
-
-Interactive chat with a model. Automatically preloads the model into memory and displays status information before starting the chat session.
+Pull a model from the Ollama registry.
 
 ```bash
-# Chat with model locally
-osync run llama3
-osync chat mistral-nemo
+# Pull a model from the registry
+osync pull llama3
+osync pull qwen2:7b
+osync pull hf.co/unsloth/llama3
 
-# Chat with model on remote server
-osync run llama3 -d http://192.168.0.100:11434
-osync run mistral-nemo -d http://192.168.0.100:11434
-
-# Chat with additional options
-osync run llama3 --verbose                    # Show performance stats
-osync run llama3 --no-wordwrap               # Disable word wrapping
-osync run llama3 --format json               # Request JSON output
-osync run llama3 --think                     # Enable thinking mode
-osync run llama3 --keepalive 10m             # Keep model loaded for 10 minutes
+# Pull to a remote server
+osync pull llama3 http://192.168.0.100:11434
 ```
 
 **Features:**
-- **Automatic Model Preloading** - Loads model into memory before first input
-- **Process Status Display** - Shows table of all loaded models with details:
-  - NAME: Model name
-  - ID: First 12 characters of model digest (Docker-style)
-  - SIZE: Disk size combined with parameter count (e.g., "4.54 GB (8.0B)")
-  - VRAM USAGE: Memory allocated in VRAM
-  - CONTEXT: Context window size (e.g., 4096)
-  - UNTIL: Human-readable expiration time (e.g., "2 minutes from now")
-- **Fast Streaming** - Optimized for both local and remote servers
-- **Command History** - Navigate with Up/Down arrows
-- **Keyboard Shortcuts**:
-  - `Ctrl+D` on empty line - Exit chat
-  - `Ctrl+C` - Cancel current generation
-  - `Ctrl+A` - Move to beginning of line
-  - `Ctrl+E` - Move to end of line
-  - `Ctrl+K` - Delete from cursor to end
-  - `Ctrl+U` - Delete entire line
-  - `Ctrl+W` - Delete previous word
-  - `Ctrl+L` - Clear screen
-  - `Up/Down` - Navigate command history
-- **Multiline Input** - Use triple quotes for multiline messages:
-  ```
-  >>> """This is a
-  ... multiline
-  ... message"""
-  ```
-- **Session Management**:
-  - `/save <filename>` - Save chat session
-  - `/load <filename>` - Load chat session
-  - `/clear` - Clear conversation history
-  - `/stats` - Show performance statistics
-  - `/bye` or `/exit` - Exit chat
-- **Runtime Options**:
-  - `/set verbose` - Enable verbose mode
-  - `/set wordwrap` - Enable word wrapping
-  - `/set format <format>` - Set output format (json, etc.)
-  - `/set system` - Set system message
-  - `/set parameter <name> <value>` - Set model parameters (temperature, top_p, etc.)
-  - `/show` - Display current settings
+- Downloads models from Ollama registry
+- Shows real-time progress during download
+- Supports library models and user models
+- Works on both local and remote servers
 
-**Available Flags:**
-- `-d`, `--destination` - Remote Ollama server URL
-- `-v`, `--verbose` - Show performance statistics after each response
-- `--no-wordwrap` - Disable automatic word wrapping
-- `--format <format>` - Request specific output format (e.g., json)
-- `--keepalive <duration>` - Keep model loaded for specified duration (e.g., 5m, 1h)
-- `--think` - Enable thinking mode (can also specify: high, medium, low)
-- `--hide-thinking` - Hide thinking process in output
-- `--truncate` - Truncate context when it exceeds model limits
-- `--dimensions <size>` - Set embedding dimensions
+#### Run (`run`, `chat`)
 
-**Example Session:**
+Interactive chat with a model.
+
+```bash
+# Chat with a local model
+osync run llama3
+osync chat qwen2:7b
+
+# Chat with a model on remote server
+osync run llama3 http://192.168.0.100:11434
 ```
->>> Connecting to mistral-nemo:latest...
->>> Loading model into memory...
 
-Loaded Models:
----------------------------------------------------------------------------------------------------------------------------------------
-NAME                           ID              SIZE                      VRAM USAGE      CONTEXT    UNTIL
----------------------------------------------------------------------------------------------------------------------------------------
-mistral-nemo:latest            994f3b8b7801    6.85 GB (12.2B)           0 B             4096       About a minute from now
----------------------------------------------------------------------------------------------------------------------------------------
-
->>> Type /? for help or /bye to exit
-
->>> What is the capital of France?
-The capital of France is Paris.
-
->>> /stats
-=== Performance Statistics ===
-Total requests: 1
-
-Total Duration (ms):
-  Min: 1234.56
-  Avg: 1234.56
-  Max: 1234.56
-
-Tokens/Second:
-  Min: 45.32
-  Avg: 45.32
-  Max: 45.32
-
->>> /bye
-```
+**Features:**
+- Interactive conversation mode
+- Preloads model into memory before chat
+- Shows model loading status
+- Type `/bye` or press Ctrl+D to exit
+- Works on both local and remote servers
 
 #### Process Status (`ps`)
 
-Display information about models currently loaded in memory on local or remote Ollama servers.
+Show models currently loaded in memory.
 
 ```bash
-# Show locally loaded models
+# Show loaded models on local server
 osync ps
 
 # Show loaded models on remote server
-osync ps -d http://192.168.0.100:11434
 osync ps http://192.168.0.100:11434
 ```
 
 **Features:**
-- Shows all models currently loaded in memory
-- Displays the same information as the run/chat command preload table
-- Works with both local and remote servers
-- No model preloading - shows current state only
+- Displays models loaded in VRAM
+- Shows VRAM usage with percentage when partially loaded
+- Displays model size, context length, and expiration time
+- Formatted table output
 
 **Output:**
 ```
@@ -526,117 +346,197 @@ Loaded Models:
 ---------------------------------------------------------------------------------------------------------------------------------------
 NAME                           ID              SIZE                      VRAM USAGE      CONTEXT    UNTIL
 ---------------------------------------------------------------------------------------------------------------------------------------
-llama3:latest                  365c0bd3c000    4.54 GB (8.0B)            0 B             4096       2 minutes from now
-mistral-nemo:latest            994f3b8b7801    6.85 GB (12.2B)           0 B             4096       About a minute from now
+tinyllama:1.1b-chat-v1-fp16    71c2f9b69b52    2.11 GB (1B)              1.33 GB (63%)   4096       4 minutes from now
 ---------------------------------------------------------------------------------------------------------------------------------------
 ```
 
-**Table Columns:**
-- **NAME**: Model name with tag
-- **ID**: First 12 characters of model digest (Docker-style hash)
-- **SIZE**: Disk size and parameter count (e.g., "4.54 GB (8.0B)")
-- **VRAM USAGE**: Memory currently allocated in VRAM
-- **CONTEXT**: Context window size (number of tokens)
-- **UNTIL**: Human-readable time until model is unloaded from memory
-  - Examples: "Less than a minute", "2 minutes from now", "About an hour from now"
-
-**Use Cases:**
-- Check which models are currently loaded before starting a chat
-- Monitor memory usage across models
-- See when models will be automatically unloaded
-- Verify model loading on remote servers
-
 #### Load (`load`)
 
-Preload a model into memory on local or remote Ollama servers without starting a chat session.
+Preload a model into memory.
 
 ```bash
-# Load model locally
+# Load a model on local server
 osync load llama3
-osync load mistral-nemo
+osync load qwen2:7b
 
-# Load model on remote server
-osync load llama3 -d http://192.168.0.100:11434
-osync load mistral-nemo -d http://192.168.0.100:11434
+# Load a model on remote server
+osync load llama3 http://192.168.0.100:11434
+
+# Load with custom keep-alive duration
+osync load llama3 --keepalive 30m
 ```
 
 **Features:**
-- Preloads model into memory without starting interactive chat
-- Automatic `:latest` tag when not specified
-- Works with both local and remote servers
-- Useful for warming up models before use
-- Model stays loaded based on Ollama's `keep_alive` setting
-
-**Use Cases:**
-- Preload models before starting workload
-- Warm up models on remote servers
-- Ensure models are ready for API calls
-- Reduce first-request latency
-
-**Example:**
-```bash
-# Load model and check status
-osync load llama3
-osync ps
-
-# Output:
-# Loading model 'llama3:latest' into memory...
-# ✓ Model 'llama3:latest' loaded successfully
-```
+- Preloads model into VRAM for faster inference
+- Configurable keep-alive duration
+- Works on both local and remote servers
 
 #### Unload (`unload`)
 
-Unload a specific model or all models from memory on local or remote Ollama servers.
+Unload a model from memory.
 
 ```bash
-# Unload specific model locally
+# Unload a model on local server
 osync unload llama3
-osync unload mistral-nemo:latest
+osync unload qwen2:7b
 
-# Unload all loaded models locally
-osync unload
-
-# Unload specific model on remote server
-osync unload llama3 -d http://192.168.0.100:11434
-
-# Unload all models on remote server
-osync unload -d http://192.168.0.100:11434
+# Unload a model on remote server
+osync unload llama3 http://192.168.0.100:11434
 ```
 
 **Features:**
-- Unload individual models or all models at once
-- Automatic `:latest` tag when not specified
-- Works with both local and remote servers
-- Sets `keep_alive: 0` to immediately unload from memory
-- Fetches loaded models list when no model name specified
+- Frees VRAM by unloading model
+- Immediate unloading (keep-alive set to 0)
+- Works on both local and remote servers
 
-**Use Cases:**
-- Free up VRAM/memory when models are not needed
-- Clear memory before loading different models
-- Manage memory on servers with limited resources
-- Reset model state without restarting Ollama
+#### Quantization Comparison (`qc`)
 
-**Example:**
+Run comprehensive tests comparing quantization quality and performance across model variants.
+
 ```bash
-# Check loaded models
-osync ps
-# Output shows: llama3:latest and mistral-nemo:latest
+# Compare quantizations of a model (f16 as base)
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0
 
-# Unload one model
-osync unload llama3
-# Output: ✓ Model 'llama3:latest' unloaded successfully
+# Specify custom base quantization
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -B fp16
 
-# Unload all remaining models
-osync unload
-# Output:
-# Fetching loaded models...
-# Unloading model 'mistral-nemo:latest'...
-# ✓ Model 'mistral-nemo:latest' unloaded successfully
-#
-# Unloaded 1 models
+# Test on remote server
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -D http://192.168.1.100:11434
+
+# Custom output file
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -O my-results.json
+
+# Adjust test parameters
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -Te 0.1 -S 42 -To 0.9
 ```
 
-####  Manage (`manage`)
+**How It Works:**
+
+The `qc` command runs a comprehensive test suite (50 questions across 5 categories: Reasoning, Math, Finance, Technology, Science) on each quantization variant and captures detailed metrics using Ollama's logprobs API.
+
+**Scoring Algorithm:**
+
+Each quantization is compared against the base model using a 4-component weighted scoring system:
+
+1. **Token Sequence Similarity (5% weight)**
+   - Uses Longest Common Subsequence (LCS) to measure token sequence matching
+   - More forgiving of small variations while detecting major differences
+   - Higher score = quantization produces similar token sequences as base
+
+2. **Logprobs Divergence (70% weight)**
+   - Compares sequence-level confidence between base and quantization
+   - Calculates average confidence (mean logprob) for each sequence
+   - Formula: `100 × exp(-confidence_difference × 2)`
+   - Higher score = quantization has similar confidence in its predictions
+
+3. **Answer Length Consistency (5% weight)**
+   - Compares total token count between base and quantization answers
+   - Formula: `100 × exp(-2 × |1 - length_ratio|)`
+   - Higher score = quantization produces similar-length answers
+
+4. **Perplexity Score (20% weight)**
+   - Compares model confidence via perplexity (lower = more confident)
+   - Perplexity: `exp(-average_logprob)`
+   - Formula: `100 × exp(-0.5 × |1 - perplexity_ratio|)`
+   - Higher score = quantization maintains similar confidence levels
+
+**Overall Confidence Score:** Weighted sum of all four components (0-100%)
+
+**Color Coding:**
+- Green (90-100%): Excellent quality preservation
+- Lime (80-90%): Very good quality
+- Yellow (70-80%): Good quality
+- Orange (50-70%): Moderate quality loss
+- Red (below 50%): Significant quality degradation
+
+**Performance Metrics:**
+- Evaluation tokens per second (generation speed)
+- Prompt tokens per second (encoding speed)
+- Performance percentages vs base model
+
+**Results File:**
+
+Results are saved as JSON (`modelname.qc.json` by default) with:
+- Test suite name and version
+- Test options (temperature, seed, top_p, top_k, etc.)
+- Per-quantization results with all question answers and tokens
+- Model metadata (family, parameter size, quantization type, disk size)
+
+**Incremental Testing:**
+
+You can add new quantizations to existing results without re-testing:
+```bash
+# Initial test
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m
+
+# Later add more quantizations (f16 and q8_0 will be skipped if already tested)
+osync qc -M llama3.2 -Q q8_0,q6_k
+
+# Force re-run testing for quantizations already in results file
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
+```
+
+**Options:**
+
+- `-M <name>` - Model name without tag (required)
+- `-Q <tags>` - Comma-separated quantization tags to compare (required)
+- `-B <tag>` - Base quantization tag for comparison (default: fp16, or uses existing base from results file)
+- `-D <url>` - Remote server URL (default: local)
+- `-O <file>` - Output results file (default: modelname.qc.json)
+- `-Te <value>` - Temperature (default: 0.0 for deterministic results)
+- `-S <value>` - Random seed (default: 365)
+- `-To <value>` - top_p parameter (default: 0.001)
+- `-Top <value>` - top_k parameter (default: -1)
+- `-R <value>` - repeat_penalty parameter
+- `-F <value>` - frequency_penalty parameter
+- `-T <file>` - External test suite JSON file (default: internal v1base)
+- `--force` - Force re-run testing for quantizations already present in results file
+
+#### View Quantization Results (`qcview`)
+
+Display quantization comparison results in formatted tables or export as JSON.
+
+```bash
+# View results in table format
+osync qcview -F llama3.2.qc.json
+
+# Export as JSON
+osync qcview -F llama3.2.qc.json -Fo json -O report.json
+
+# View in console as JSON
+osync qcview -F llama3.2.qc.json -Fo json
+```
+
+**Table Output:**
+
+Displays color-coded results with:
+- Overall confidence scores (0-100%) for each quantization
+- Category-by-category breakdown
+- Performance metrics (tokens/sec, speed vs base)
+- Model metadata (quantization type, disk size)
+
+**Color Coding:**
+- 🟢 Green (95-100%): Excellent quality preservation
+- 🟡 Lime (90-94%): Very good quality
+- 🟡 Yellow (80-89%): Good quality
+- 🟠 Orange (70-79%): Moderate quality loss
+- 🔴 Red (<70%): Significant quality degradation
+
+**JSON Output:**
+
+Complete results including:
+- Base model information
+- Per-quantization overall and category scores
+- Detailed per-question scores (with `QuestionScores` array)
+- Performance metrics
+
+**Options:**
+
+- `-F <file>` - Results file to view (required)
+- `-Fo <format>` - Output format: table or json (default: table)
+- `-O <file>` - Output filename (default: console)
+
+#### Manage (`manage`)
 
 Interactive TUI for managing models with keyboard shortcuts.
 
@@ -716,7 +616,6 @@ Run `osync` without arguments to enter interactive mode with:
 - Command history
 - Multi-registry support
 - Real-time model listing
-- Clear screen with `/clear` command
 
 ```bash
 osync
@@ -724,51 +623,8 @@ osync
 # Type command and press enter
 > cp llama3 my-backup
 > ls "qwen*"
-> clear           # Clear the console screen
 > exit
 ```
-
-**Interactive Commands:**
-- `clear` - Clear the console screen and reset the display
-- `exit` or `quit` - Exit interactive mode
-- All regular osync commands (cp, ls, rm, pull, show, update, etc.)
-
-### Shell Completion
-
-osync supports shell completion for commands and model names on all platforms.
-
-**Automatic Installation:**
-
-Shell completion is automatically offered during the `osync install` process. To install it separately or update it:
-
-```bash
-# The install command will prompt you to configure shell completion
-osync install
-```
-
-**Bash (Linux/macOS):**
-- Installs completion script to `/etc/bash_completion.d/` or `~/.bashrc`
-- Completes commands, model names, and options
-- Automatically handles remote server completions via `-d` flag
-- Activate with `source ~/.bashrc` or restart terminal
-- Unix line endings automatically applied for cross-platform compatibility
-
-**PowerShell (Windows):**
-- **Requires PowerShell 6.0 or higher** (PowerShell Core/7+)
-- PowerShell Desktop 5.x is not supported (use interactive mode instead)
-- Version check performed before installation
-- Configures PowerShell profile automatically
-- Creates profile if it doesn't exist
-- Completes commands, model names, and flags
-- May require: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-
-**Features:**
-- Auto-completes model names from local or remote Ollama installations
-- Completes command-specific options and flags
-- Works in both interactive and command-line modes
-- Supports remote server model completion
-- Updates automatically as models change
-- osync must be in PATH for completion to work (automatically configured by `install` command)
 
 ### Pattern Matching
 
@@ -850,6 +706,27 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.1.7
+- **Quantization Comparison Testing** - New `qc` and `qcview` commands for comprehensive quality testing
+  - 50-question test suite across 5 categories (Reasoning, Math, Finance, Technology, Science)
+  - 4-component weighted scoring: Logprobs Divergence (70%), Perplexity (20%), Token Similarity (5%), Length Consistency (5%)
+  - Performance metrics: eval/prompt tokens per second with percentage comparison to base model
+  - Incremental testing support - add new quantizations without re-testing existing ones
+  - JSON results file format with full question/answer history
+  - Color-coded table output in `qcview` (90-100% green, 80-90% lime, 70-80% yellow, 50-70% orange, <50% red)
+  - JSON export option for programmatic analysis
+  - Uses Ollama's logprobs API (requires Ollama v0.12.11+)
+  - Configurable test parameters: temperature, seed, top_p, top_k, repeat_penalty, frequency_penalty
+  - Support for custom external test suites
+  - Works on both local and remote servers
+- **Bug Fixes**
+  - Fixed PowerArgs duplicate alias errors by removing explicit shortcuts (auto-generated from property names)
+  - Fixed model detection issue: `/api/show` endpoint doesn't include `size` field, now fetches from `/api/tags`
+  - Fixed misleading "Results saved" message when no quantizations were successfully tested
+  - Added proper error handling with exit codes (returns 1 when no results)
+  - Set max output tokens to 4096 to prevent tests hanging on overly verbose answers
+  - Improved tag handling: accepts any tag format (with or without ":"), extracts quantization from API
+
 v1.1.6
 - **Manage TUI Command** - Full-screen interactive terminal user interface for model management
   - Real-time model listing with dynamic column widths
@@ -866,109 +743,23 @@ v1.1.6
   - Shows VRAM usage percentage when model is partially loaded (e.g., "1.33 GB (63%)")
   - Consistent tabular format in both CLI and manage TUI
   - Displays model ID, size, context length, and expiration time
-- **New `load` Command** - Preload models into memory without starting a chat session
-  - Load models locally or on remote servers
-  - Automatic `:latest` tag when not specified
-  - Useful for warming up models before use
-  - Reduces first-request latency by preloading models
-- **New `unload` Command** - Unload models from memory to free VRAM
-  - Unload specific models or all loaded models at once
-  - Works with both local and remote servers
-  - Sets `keep_alive: 0` to immediately free memory
-  - Automatically fetches and unloads all models when no model name specified
-- **Enhanced Tab Completion** - Added shell completion support for load and unload commands
-  - PowerShell completion for model names and -d flag
-  - Bash completion for model names and -d flag
-  - Works in both interactive and command-line modes
-- **Cross-Platform Argument Support** - Load and unload commands support flexible argument ordering
-  - Arguments work in any order (e.g., `osync load -d http://... model` or `osync load model -d http://...`)
-  - Consistent behavior across Windows, Linux, and macOS
-
-v1.1.5
-- **New `ps` Command** - Show running models and their status
-  - Display all models currently loaded in memory
-  - Works with both local and remote Ollama servers
-  - Shows NAME, ID, SIZE, VRAM USAGE, CONTEXT, UNTIL in formatted table
-  - Same output format as run/chat command preload display
-- **Chat Model Preloading** - Models are now automatically loaded into memory before first chat input
-  - Sends empty chat request to preload model
-  - Displays loaded model status table after preload
-  - Shows model name, ID (shortened digest), size, VRAM usage, context length, and expiration time
-- **Process Status Display** - New formatted table showing all loaded models via `/api/ps`
-  - NAME: Model name with truncation for long names
-  - ID: First 12 characters of model digest (Docker-style)
-  - SIZE: Disk size combined with parameter count (e.g., "4.54 GB (8.0B)")
-  - VRAM USAGE: Memory allocated in VRAM
-  - CONTEXT: Context window size (e.g., 4096)
-  - UNTIL: Human-readable expiration time (e.g., "2 minutes from now", "About a minute from now")
-- **Improved Chat Performance** - Fixed streaming response buffering for remote servers
-  - Uses `HttpCompletionOption.ResponseHeadersRead` for immediate streaming
-  - Remote chat now responds as fast as local chat
-  - No more delays waiting for full response buffering
-
-v1.1.4
-- **Fixed Pattern Matching** - Enhanced `:latest` tag handling in list command pattern matching
-  - Patterns without tags (e.g., `llama3`) now correctly match models with `:latest` tag
-  - Improved wildcard matching consistency across all commands
-- **Fixed Linux Argument Order** - Resolved cross-platform argument parsing issue
-  - Arguments now work in any order on Linux (e.g., `osync show -d http://... model` and `osync show model -d http://...`)
-  - Added automatic argument reordering for PowerArgs compatibility on Linux
-  - Maintains backward compatibility with Windows argument handling
-- **Fixed REPL Tab Completion** - Enhanced interactive mode model name completion
-  - Fixed colon (`:`) handling in model names for tab completion
-  - Improved completion when typing model name followed by colon (e.g., `qwen3:` + tab)
-  - Better support for model:tag format in interactive mode
-- **Fixed Bash Completion** - Improved Bash shell completion for model names with colons
-  - Modified `COMP_WORDBREAKS` to handle colon as part of model names
-  - Better completion for model:tag format in Bash shell
-- **Fixed PowerShell Completion** - Cleaned up PowerShell completion script
-  - Removed unnecessary success message when loading completion
-  - Improved version line filtering in model listing
-- **Improved Error Messages** - Simplified error output for better user experience
-  - Errors now show concise hint to use `-h` or `-?` for help
-  - Replaced verbose usage output with brief help reference
-  - Users can now see actual error messages without clutter
-
-v1.1.3
-- **Install Command** - New unified installation command replacing `install-completion`
-- **Automatic Installation** - Installs osync to user directory (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS)
-- **PATH Management** - Automatically adds osync directory to PATH on all platforms
-  - Windows: Updates user PATH environment variable with broadcast notification
-  - Linux: Adds export to `~/.bashrc`
-  - macOS: Adds export to `~/.zshrc` (or `~/.bash_profile`)
-- **Complete Application Copy** - Copies all required files (exe, dlls, dependencies) for proper installation
-- **Shell Completion Integration** - Optionally configures shell completion during installation
-- **PowerShell Version Check** - Validates PowerShell version before offering completion (requires 6.0+)
-- **Improved Completion Scripts** - Assumes osync is in PATH for reliable completion
-- **Cross-Platform Line Endings** - Automatic CRLF to LF conversion for bash completion on Unix
-- **Executable Permissions** - Automatically sets execute permissions on Linux/macOS
-- **Smart Installation** - Detects if already installed and avoids duplicate installations
-- **Enhanced Error Handling** - Better PATH update error messages and fallback instructions
-
-v1.1.2
-- **Show Command** - New command to display detailed model information
-- **Local and Remote Show** - View model info locally or from remote servers
-- **Flexible Display Options** - Show specific sections (license, modelfile, parameters, system, template)
-- **Verbose Mode** - Display comprehensive model details with `--verbose` flag
-- **Section Filtering** - Use flags to show only the information you need
-- **Matches ollama show** - Full compatibility with ollama's show command functionality
-- **Clear Command** - New `clear` command for interactive mode to clear console screen
-- **Fixed Interactive Mode** - Properly enters REPL mode when called without arguments
-- **Fixed Tab Completion** - Tab completion now properly clears previous options before displaying new ones
-- **Shell Completion** - Auto-completion for Bash (Linux/macOS) and PowerShell (Windows)
-- **Install-Completion Command** - Automatically configures shell completion with `osync install-completion`
-- **Model Name Completion** - Tab-complete model names from local Ollama installation
-- **PowerShell Profile Setup** - Automatically creates and configures PowerShell profile if needed
-
-v1.1.1
-- **Pull Command** - New command to download models from Ollama registry
-- **Local and Remote Pull** - Pull models locally or directly to remote servers
-- **HuggingFace Integration** - Convert HuggingFace URLs to ollama-compatible format
-- **Automatic Tag Extraction** - Extracts quantization identifiers (IQ2_M, Q4_K_M, etc.) from GGUF filenames
-- **Smart Tag Handling** - Automatically adds `:latest` tag for standard models, preserves explicit tags for HuggingFace models
-- **Comprehensive Quantization Support** - Handles IQ, Q K-quants, Q legacy, Float, and BFloat16 formats
-- **Real-time Progress** - Displays streaming download progress for both local and remote operations
-- **HuggingFace URL Parsing** - Converts full HuggingFace URLs (e.g., `https://huggingface.co/user/repo/blob/main/file.gguf`) to short format (`hf.co/user/repo:tag`)
+- **Load/Unload Commands** - VRAM memory management
+  - `load` command to preload models into memory with configurable keep-alive
+  - `unload` command to free VRAM immediately
+  - Works on both local and remote servers
+- **Run/Chat Command** - Interactive conversation with models
+  - Preloads model into memory before starting chat
+  - Shows loading status and model information
+  - Type `/bye` or Ctrl+D to exit
+  - Works on both local and remote servers
+- **Show Command** - Display detailed model information
+  - Shows model metadata, configuration, and parameters
+  - Works on both local and remote servers
+- **Pull Command** - Download models from Ollama registry
+  - Validates model existence on ollama.com before pulling
+  - Real-time progress display
+  - Supports library and user models
+  - Works on both local and remote servers
 
 v1.1.0
 - **Remote-to-Remote Copy** - Transfer models directly between remote servers without local storage

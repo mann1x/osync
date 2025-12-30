@@ -1,0 +1,234 @@
+using PowerArgs;
+
+namespace osync
+{
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class CopyArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Source model (e.g., llama3:latest or http://server:port/model:tag)")]
+        public string Source { get; set; }
+
+        [ArgRequired, ArgPosition(2), ArgDescription("Destination (e.g., newmodel:tag or http://server:port/model:tag)")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Buffer size for remote-to-remote copy (default: 512MB, e.g., 1GB, 256MB)")]
+        public string BufferSize { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class ListArgs
+    {
+        [ArgPosition(1), ArgDescription("Model pattern to filter (supports * wildcard, e.g., llama*, *:7b)")]
+        public string Pattern { get; set; }
+
+        [ArgDescription("Remote server URL (e.g., http://192.168.1.100:11434)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Sort by size descending"), ArgShortcut("--size")]
+        public bool SortBySize { get; set; }
+
+        [ArgDescription("Sort by size ascending"), ArgShortcut("--sizeasc")]
+        public bool SortBySizeAsc { get; set; }
+
+        [ArgDescription("Sort by creation time, newest first"), ArgShortcut("--time")]
+        public bool SortByTime { get; set; }
+
+        [ArgDescription("Sort by creation time, oldest first"), ArgShortcut("--timeasc")]
+        public bool SortByTimeAsc { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class RemoveArgs
+    {
+        [ArgPosition(1), ArgDescription("Model pattern to remove (supports * wildcard)")]
+        public string Pattern { get; set; }
+
+        [ArgDescription("Remote server URL"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class RenameArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Source model name")]
+        public string Source { get; set; }
+
+        [ArgRequired, ArgPosition(2), ArgDescription("New model name")]
+        public string NewName { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class UpdateArgs
+    {
+        [ArgPosition(1), ArgDescription("Model pattern to update (supports * wildcard, default: *)")]
+        public string Pattern { get; set; }
+
+        [ArgDescription("Remote server URL"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class PullArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Model name or HuggingFace URL (e.g., llama3:latest or https://huggingface.co/...)")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class ShowArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Model name to show information")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Show license information"), ArgShortcut("--license")]
+        public bool License { get; set; }
+
+        [ArgDescription("Show modelfile"), ArgShortcut("--modelfile")]
+        public bool Modelfile { get; set; }
+
+        [ArgDescription("Show parameters"), ArgShortcut("--parameters")]
+        public bool Parameters { get; set; }
+
+        [ArgDescription("Show system prompt"), ArgShortcut("--system")]
+        public bool System { get; set; }
+
+        [ArgDescription("Show template"), ArgShortcut("--template")]
+        public bool Template { get; set; }
+
+        [ArgDescription("Show all information"), ArgShortcut("-v"), ArgShortcut("--verbose")]
+        public bool Verbose { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class RunArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Model name to run/chat with")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Response format (json)"), ArgShortcut("--format")]
+        public string Format { get; set; }
+
+        [ArgDescription("Keep alive duration (e.g., 5m, 1h, default: server default)"), ArgShortcut("--keepalive")]
+        public string KeepAlive { get; set; }
+
+        [ArgDescription("Disable word wrap"), ArgShortcut("--nowordwrap")]
+        public bool NoWordWrap { get; set; }
+
+        [ArgDescription("Show verbose output"), ArgShortcut("--verbose")]
+        public bool Verbose { get; set; }
+
+        [ArgDescription("Image dimensions for vision models (e.g., 512)"), ArgShortcut("--dimensions")]
+        public int? Dimensions { get; set; }
+
+        [ArgDescription("Hide thinking process output"), ArgShortcut("--hidethinking")]
+        public bool HideThinking { get; set; }
+
+        [ArgDescription("Allow insecure connections"), ArgShortcut("--insecure")]
+        public bool Insecure { get; set; }
+
+        [ArgDescription("Enable extended thinking (reasoning) mode"), ArgShortcut("--think")]
+        public string Think { get; set; }
+
+        [ArgDescription("Truncate long context (default: server setting)"), ArgShortcut("--truncate")]
+        public bool? Truncate { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class PsArgs
+    {
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d"), ArgPosition(1)]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class LoadArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Model name to load into memory")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class UnloadArgs
+    {
+        [ArgPosition(1), ArgDescription("Model name to unload from memory (optional - if not specified, unloads all models)")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class ManageArgs
+    {
+        [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d"), ArgPosition(1)]
+        public string Destination { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class QcArgs
+    {
+        [ArgRequired, ArgDescription("Model name without tag"), ArgShortcut("-M")]
+        public string ModelName { get; set; }
+
+        [ArgDescription("Remote server URL"), ArgShortcut("-D")]
+        public string Destination { get; set; }
+
+        [ArgDescription("Results output file (default: modelname.qc.json)"), ArgShortcut("-O")]
+        public string OutputFile { get; set; }
+
+        [ArgDescription("Base quantization tag for comparison (default: fp16, or existing base from results file)"), ArgShortcut("-B")]
+        public string BaseTag { get; set; }
+
+        [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated)"), ArgShortcut("-Q")]
+        public string Quants { get; set; }
+
+        [ArgDescription("Test suite: v1base (50 questions), v1quick (10 questions), or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
+        public string TestSuite { get; set; }
+
+        [ArgDescription("Model temperature (default: 0.0)"), ArgShortcut("-Te")]
+        public double Temperature { get; set; } = 0.0;
+
+        [ArgDescription("Model seed (default: 365)"), ArgShortcut("-S")]
+        public int Seed { get; set; } = 365;
+
+        [ArgDescription("Model top_p (default: 0.001)"), ArgShortcut("-To")]
+        public double TopP { get; set; } = 0.001;
+
+        [ArgDescription("Model top_k (default: -1)"), ArgShortcut("-Top")]
+        public int TopK { get; set; } = -1;
+
+        [ArgDescription("Model repeat_penalty"), ArgShortcut("-R")]
+        public double? RepeatPenalty { get; set; }
+
+        [ArgDescription("Model frequency_penalty"), ArgShortcut("-Fr")]
+        public double? FrequencyPenalty { get; set; }
+
+        [ArgDescription("Force re-run testing for quantizations already present in results file"), ArgShortcut("--force")]
+        public bool Force { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class QcViewArgs
+    {
+        [ArgRequired, ArgPosition(1), ArgDescription("Results file to view")]
+        public string FileName { get; set; }
+
+        [ArgDescription("Output format: table, json (default: table)"), ArgShortcut("-Fo")]
+        public string Format { get; set; } = "table";
+
+        [ArgDescription("Output filename (default: console)"), ArgShortcut("-O")]
+        public string OutputFile { get; set; }
+    }
+}

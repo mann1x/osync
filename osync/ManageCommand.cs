@@ -257,6 +257,10 @@ namespace osync
                 _themes = InitializeThemes();
                 SetupUI();
                 LoadModels();
+
+                // Subscribe to window resize events
+                Application.Top.Resized += OnWindowResized;
+
                 Application.Run(_top);
             }
             catch (Exception ex)
@@ -412,6 +416,29 @@ namespace osync
             };
         }
 
+        // Handle window resize events
+        private void OnWindowResized(Size obj)
+        {
+            try
+            {
+                // Recalculate column widths based on new window size
+                CalculateColumnWidths();
+
+                // Refresh the model list to adapt to new width
+                if (_modelListView != null)
+                {
+                    UpdateModelList();
+                }
+
+                // Refresh top bar to update layout
+                UpdateTopBar();
+            }
+            catch
+            {
+                // Silently ignore resize errors during shutdown
+            }
+        }
+
         // Load models from local or remote server
         private void LoadModels()
         {
@@ -452,28 +479,51 @@ namespace osync
         {
             if (_allModels.Count == 0) return;
 
-            // Calculate maximum width needed for each column
-            _sizeColumnWidth = _allModels.Max(m => m.SizeFormatted.Length);
+            // Get current terminal width
+            var termWidth = Application.Driver?.Cols ?? 80;
 
-            _paramsColumnWidth = _allModels.Max(m =>
-                string.IsNullOrEmpty(m.ParameterSize) ? 0 : m.ParameterSize.Length);
-
-            _quantColumnWidth = _allModels.Max(m =>
-                string.IsNullOrEmpty(m.Quantization) ? 7 : m.Quantization.Length); // "unknown" = 7 chars
-
-            _familyColumnWidth = _allModels.Max(m =>
-                string.IsNullOrEmpty(m.Family) ? 0 : m.Family.Length);
-
-            _modifiedColumnWidth = _allModels.Max(m => m.ModifiedFormatted.Length);
-
-            _idColumnWidth = 8; // ID is always 8 characters from digest
+            // Calculate maximum width needed for each column based on content
+            var contentSizeWidth = _allModels.Max(m => m.SizeFormatted.Length);
+            var contentParamsWidth = _allModels.Max(m => string.IsNullOrEmpty(m.ParameterSize) ? 0 : m.ParameterSize.Length);
+            var contentQuantWidth = _allModels.Max(m => string.IsNullOrEmpty(m.Quantization) ? 7 : m.Quantization.Length);
+            var contentFamilyWidth = _allModels.Max(m => string.IsNullOrEmpty(m.Family) ? 0 : m.Family.Length);
+            var contentModifiedWidth = _allModels.Max(m => m.ModifiedFormatted.Length);
 
             // Ensure minimum widths
-            _sizeColumnWidth = Math.Max(_sizeColumnWidth, 6);
-            _paramsColumnWidth = Math.Max(_paramsColumnWidth, 4); // Minimum width for params like "70B"
-            _quantColumnWidth = Math.Max(_quantColumnWidth, 6);
-            _familyColumnWidth = Math.Max(_familyColumnWidth, 6);
-            _modifiedColumnWidth = Math.Max(_modifiedColumnWidth, 3); // Minimum width for "now", "1y", etc.
+            _sizeColumnWidth = Math.Max(contentSizeWidth, 6);
+            _paramsColumnWidth = Math.Max(contentParamsWidth, 4); // Minimum width for params like "70B"
+            _quantColumnWidth = Math.Max(contentQuantWidth, 6);
+            _familyColumnWidth = Math.Max(contentFamilyWidth, 6);
+            _modifiedColumnWidth = Math.Max(contentModifiedWidth, 3); // Minimum width for "now", "1y", etc.
+            _idColumnWidth = 8; // ID is always 8 characters from digest
+
+            // Calculate total fixed width (checkbox + columns + spaces between)
+            // Format: "[x] name size params quant family modified id"
+            var minNameWidth = 20;
+            var fixedWidth = 4 + _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth +
+                            _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth + 6 + minNameWidth;
+
+            // If the terminal is too narrow, reduce column widths proportionally
+            if (termWidth < fixedWidth)
+            {
+                // Calculate scale factor to fit within terminal width
+                var availableWidth = termWidth - (4 + minNameWidth + 6); // Reserve space for checkbox, name, and spaces
+                var currentTotalWidth = _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth +
+                                       _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth;
+
+                if (currentTotalWidth > availableWidth && availableWidth > 20)
+                {
+                    var scaleFactor = (double)availableWidth / currentTotalWidth;
+
+                    // Scale down columns proportionally, but maintain minimums
+                    _sizeColumnWidth = Math.Max(4, (int)(_sizeColumnWidth * scaleFactor));
+                    _paramsColumnWidth = Math.Max(3, (int)(_paramsColumnWidth * scaleFactor));
+                    _quantColumnWidth = Math.Max(4, (int)(_quantColumnWidth * scaleFactor));
+                    _familyColumnWidth = Math.Max(4, (int)(_familyColumnWidth * scaleFactor));
+                    _modifiedColumnWidth = Math.Max(2, (int)(_modifiedColumnWidth * scaleFactor));
+                    _idColumnWidth = Math.Max(6, (int)(_idColumnWidth * scaleFactor));
+                }
+            }
         }
 
         // Fetch models from local filesystem
@@ -1326,6 +1376,7 @@ namespace osync
                 }
 
                 // Check if this is a local copy (no remote server specified)
+                // Important: if manage itself is connected to a remote server, "local" means on that remote server
                 bool isLocalCopy = string.IsNullOrEmpty(destServer);
 
                 // For single local copy, check if destination already exists
@@ -1333,7 +1384,7 @@ namespace osync
                 {
                     if (_allModels.Any(m => m.Name.Equals(destName, StringComparison.OrdinalIgnoreCase)))
                     {
-                        MessageBox.ErrorQuery("Error", $"Model '{destName}' already exists locally", "OK");
+                        MessageBox.ErrorQuery("Error", $"Model '{destName}' already exists", "OK");
                         return;
                     }
                 }
@@ -1455,7 +1506,15 @@ namespace osync
 
                         if (isLocalCopy)
                         {
-                            destination = destName!;
+                            // If manage is connected to a remote server, "local copy" means copy on that remote server
+                            if (!string.IsNullOrEmpty(_destination))
+                            {
+                                destination = _destination.TrimEnd('/') + "/" + destName;
+                            }
+                            else
+                            {
+                                destination = destName!;
+                            }
                         }
                         else
                         {
@@ -1549,9 +1608,11 @@ namespace osync
                     }
 
                     // Not a cancellation, show the error
-                    Console.WriteLine($"Error: {ex.Message}");
+                    Console.WriteLine($"\nError: {ex.Message}");
                     Console.WriteLine("\nPress any key to return to manage view...");
                     Console.ReadKey(true);
+
+                    Console.WriteLine("Reinitializing manage view...");
 
                     // Force cleanup before reinitializing Terminal.Gui
                     GC.Collect();
