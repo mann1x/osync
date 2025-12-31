@@ -2,15 +2,19 @@ namespace osync
 {
     /// <summary>
     /// Scoring algorithms for comparing quantizations against base model
-    /// Implements 4-component weighted scoring system
+    /// Implements 4-component weighted scoring system with optional judgment scoring
     /// </summary>
     public class QcScoring
     {
-        // Scoring weights (must sum to 100%)
+        // Scoring weights for metrics (must sum to 100%)
         private const double LOGPROBS_DIVERGENCE_WEIGHT = 0.70;
         private const double PERPLEXITY_WEIGHT = 0.20;
         private const double TOKEN_SIMILARITY_WEIGHT = 0.05;
         private const double LENGTH_CONSISTENCY_WEIGHT = 0.05;
+
+        // Final score weights when judgment is available
+        private const double METRICS_WEIGHT = 0.50;
+        private const double JUDGMENT_WEIGHT = 0.50;
 
         /// <summary>
         /// Calculate comprehensive scores for all quantizations compared to base
@@ -56,6 +60,18 @@ namespace osync
                 scoringResults.QuantScores.Add(scoreResult);
             }
 
+            // Check if all quantizations have judgment scoring
+            var allHaveJudgment = scoringResults.QuantScores.All(q => q.HasJudgmentScoring);
+            scoringResults.HasJudgmentScoring = allHaveJudgment;
+
+            // Get judge model name from first quantization that has judgment
+            if (allHaveJudgment && resultsFile.Results.Any(r => !r.IsBase))
+            {
+                var firstQuant = resultsFile.Results.FirstOrDefault(r => !r.IsBase);
+                var firstQuestion = firstQuant?.QuestionResults.FirstOrDefault(q => q.Judgment != null);
+                scoringResults.JudgeModel = firstQuestion?.Judgment?.JudgeModel;
+            }
+
             return scoringResults;
         }
 
@@ -75,7 +91,9 @@ namespace osync
             // Calculate per-question scores
             var categoryScores = new Dictionary<string, List<double>>();
             double totalConfidence = 0;
+            double totalJudgment = 0;
             int questionCount = 0;
+            int judgmentCount = 0;
 
             foreach (var baseQuestion in baseResult.QuestionResults)
             {
@@ -95,6 +113,13 @@ namespace osync
                 categoryScores[questionScore.Category].Add(questionScore.OverallConfidenceScore);
                 totalConfidence += questionScore.OverallConfidenceScore;
                 questionCount++;
+
+                // Accumulate judgment scores if available
+                if (questionScore.JudgmentScore.HasValue)
+                {
+                    totalJudgment += questionScore.JudgmentScore.Value;
+                    judgmentCount++;
+                }
             }
 
             // Calculate category averages
@@ -103,8 +128,25 @@ namespace osync
                 scoreResult.CategoryScores[category.Key] = category.Value.Average();
             }
 
-            // Calculate overall confidence score
+            // Calculate overall confidence score (metrics only)
             scoreResult.TotalConfidenceScore = questionCount > 0 ? totalConfidence / questionCount : 0;
+
+            // Calculate judgment score if all questions have judgment
+            if (judgmentCount == questionCount && questionCount > 0)
+            {
+                scoreResult.HasJudgmentScoring = true;
+                scoreResult.AverageJudgmentScore = totalJudgment / judgmentCount;
+
+                // Final score: 50% metrics + 50% judgment
+                scoreResult.FinalScore = (scoreResult.TotalConfidenceScore * METRICS_WEIGHT) +
+                                        (scoreResult.AverageJudgmentScore.Value * JUDGMENT_WEIGHT);
+            }
+            else
+            {
+                // No judgment - final score equals metrics score
+                scoreResult.HasJudgmentScoring = false;
+                scoreResult.FinalScore = scoreResult.TotalConfidenceScore;
+            }
 
             // Calculate performance metrics
             CalculatePerformanceMetrics(baseResult, quantResult, scoreResult);
@@ -141,6 +183,12 @@ namespace osync
                 (score.LogprobsDivergenceScore * LOGPROBS_DIVERGENCE_WEIGHT) +
                 (score.LengthConsistencyScore * LENGTH_CONSISTENCY_WEIGHT) +
                 (score.PerplexityScore * PERPLEXITY_WEIGHT);
+
+            // Include judgment score if available
+            if (quantQuestion.Judgment != null)
+            {
+                score.JudgmentScore = quantQuestion.Judgment.Score;
+            }
 
             return score;
         }

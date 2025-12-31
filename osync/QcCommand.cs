@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Spectre.Console;
 
 namespace osync
@@ -16,6 +18,40 @@ namespace osync
         private readonly QcArgs _args;
         private ITestSuite _testSuite;
         private QcResultsFile _resultsFile;
+
+        // Judge model fields
+        private HttpClient? _judgeHttpClient;
+        private string? _judgeBaseUrl;
+        private string? _judgeModelName;
+        private bool _judgeEnabled;
+
+        // Retry configuration for API calls
+        private const int MAX_RETRY_ATTEMPTS = 5;
+        private const int RETRY_DELAY_MS = 1000;
+
+        // System prompt for the judge model
+        private const string JUDGE_SYSTEM_PROMPT = @"You are evaluating the similarity between two LLM responses to the same question.
+
+Compare the ""quantized"" response against the ""base"" response and provide a similarity score.
+
+CRITICAL: Your score MUST be an integer between 1 and 100. Never use 0 or negative numbers.
+
+Scoring criteria:
+- 90-100: Responses are essentially identical in meaning and correctness
+- 70-89: Minor differences but same core answer and logic
+- 50-69: Noticeable differences but still reasonably similar
+- 30-49: Significant differences in answer or approach
+- 10-29: Fundamentally different or incorrect compared to base
+- 1-9: Completely unrelated or nonsensical responses
+
+Important:
+- Do NOT evaluate correctness of the base answer - only compare similarity
+- Verbosity differences are acceptable if the core answer is the same
+- Focus on whether the quantized version provides equivalent information
+- Even if both responses are poor quality, rate their SIMILARITY to each other
+- If responses are identical gibberish, they are still 90-100 similar
+
+Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluation.";
 
         public QcCommand(QcArgs args, string baseUrl = "http://localhost:11434")
         {
@@ -35,6 +71,102 @@ namespace osync
             if (_args.TopK == 0)
                 _args.TopK = -1;
             // Note: BaseTag default is handled in ExecuteAsync after loading results file
+
+            // Initialize judge if specified
+            if (!string.IsNullOrEmpty(_args.Judge))
+            {
+                ParseJudgeArgument(_args.Judge);
+            }
+        }
+
+        /// <summary>
+        /// Parse the --judge argument to extract base URL and model name
+        /// Supports: "modelname", "http://host:port/modelname"
+        /// </summary>
+        private void ParseJudgeArgument(string judge)
+        {
+            if (judge.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                judge.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                // Remote judge: http://host:port/modelname
+                var match = Regex.Match(judge, @"^(https?://[^/]+)/(.+)$", RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    _judgeBaseUrl = match.Groups[1].Value;
+                    _judgeModelName = match.Groups[2].Value;
+                }
+                else
+                {
+                    // URL without model name - invalid
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid judge URL format. Expected http://host:port/modelname[/]");
+                    return;
+                }
+            }
+            else
+            {
+                // Local judge: just model name, use local server
+                _judgeBaseUrl = "http://localhost:11434";
+                _judgeModelName = judge;
+            }
+
+            // Add :latest if no tag specified
+            if (!_judgeModelName.Contains(':'))
+            {
+                _judgeModelName += ":latest";
+            }
+
+            _judgeHttpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromMinutes(5)
+            };
+
+            _judgeEnabled = true;
+            AnsiConsole.MarkupLine($"[dim]Judge model: {_judgeModelName} @ {_judgeBaseUrl}[/]");
+        }
+
+        /// <summary>
+        /// Check if running in serial judgment mode (default)
+        /// </summary>
+        private bool IsSerialMode()
+        {
+            return string.IsNullOrEmpty(_args.JudgeMode) ||
+                   _args.JudgeMode.Equals("serial", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Check if running in parallel judgment mode
+        /// </summary>
+        private bool IsParallelMode()
+        {
+            return _args.JudgeMode?.Equals("parallel", StringComparison.OrdinalIgnoreCase) == true;
+        }
+
+        /// <summary>
+        /// Check if a quantization result needs judgment
+        /// Returns true if: no judgment exists, or judgment was done with a different model
+        /// </summary>
+        private bool NeedsJudgment(QuantResult quantResult)
+        {
+            if (!_judgeEnabled || _judgeModelName == null)
+                return false;
+
+            // Check each question - if ANY question is missing judgment or has different judge model, needs re-judgment
+            foreach (var question in quantResult.QuestionResults)
+            {
+                if (question.Judgment == null)
+                {
+                    // No judgment at all
+                    return true;
+                }
+
+                if (question.Judgment.JudgeModel != _judgeModelName)
+                {
+                    // Different judge model was used
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -63,6 +195,19 @@ namespace osync
                     return 1;
                 }
 
+                // Verify judge model exists at startup (if enabled)
+                if (_judgeEnabled)
+                {
+                    AnsiConsole.MarkupLine($"[dim]Verifying judge model exists...[/]");
+                    if (!await VerifyJudgeModelExistsAsync())
+                    {
+                        AnsiConsole.MarkupLine($"[red]Error: Judge model '{_judgeModelName}' not found on server {_judgeBaseUrl}[/]");
+                        AnsiConsole.MarkupLine($"[yellow]Make sure the judge model is pulled. Try: ollama pull {_judgeModelName}[/]");
+                        return 1;
+                    }
+                    AnsiConsole.MarkupLine($"[dim]Judge model verified: {_judgeModelName}[/]");
+                }
+
                 // Check if we have a base model in results
                 var existingBase = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
 
@@ -83,6 +228,12 @@ namespace osync
                 {
                     quantTags.Insert(0, _args.BaseTag);
                 }
+
+                // Track quantizations that need judgment (existing but missing/different judge)
+                var quantsNeedingJudgment = new List<QuantResult>();
+
+                // Track all background judgment tasks (parallel mode only)
+                var allBackgroundJudgmentTasks = new ConcurrentDictionary<string, (List<Task> tasks, int totalQuestions)>();
 
                 // Test each quantization
                 foreach (var tag in quantTags)
@@ -112,6 +263,12 @@ namespace osync
                         if (!_args.Force)
                         {
                             AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (already tested, use -force to re-run)[/]");
+
+                            // Check if this existing result needs judgment
+                            if (_judgeEnabled && !existingResult.IsBase && NeedsJudgment(existingResult))
+                            {
+                                quantsNeedingJudgment.Add(existingResult);
+                            }
                             continue;
                         }
                         // Remove existing result to re-run
@@ -155,17 +312,75 @@ namespace osync
                         continue;
                     }
 
-                    // Run test suite
-                    var quantResult = await RunTestSuiteAsync(modelFullName, tagForTracking, modelInfo);
+                    // Run test suite - in parallel mode, pass base result for concurrent judgment
+                    QuantResult? baseResultForParallel = null;
+                    if (_judgeEnabled && IsParallelMode() && tagForTracking != _args.BaseTag)
+                    {
+                        baseResultForParallel = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
+                    }
+
+                    var (quantResult, judgmentTasks) = await RunTestSuiteAsync(modelFullName, tagForTracking, modelInfo, baseResultForParallel);
                     if (quantResult != null)
                     {
                         quantResult.IsBase = (tagForTracking == _args.BaseTag);
                         _resultsFile.Results.Add(quantResult);
 
-                        // Save after each quantization
+                        // Save after each quantization (testing complete, judgment may still be running)
                         SaveResultsFile();
-                        AnsiConsole.MarkupLine($"[green]✓ Completed {modelFullName}[/]");
+                        AnsiConsole.MarkupLine($"[green]✓ Completed testing {modelFullName}[/]");
+
+                        // Track background judgment tasks for parallel mode
+                        if (judgmentTasks.Count > 0)
+                        {
+                            allBackgroundJudgmentTasks[tagForTracking] = (judgmentTasks, judgmentTasks.Count);
+                            AnsiConsole.MarkupLine($"[dim]  Judgment for {tagForTracking} running in background ({judgmentTasks.Count} questions)...[/]");
+                        }
+
+                        // Run serial judgment if enabled and not base model
+                        if (_judgeEnabled && !quantResult.IsBase && IsSerialMode())
+                        {
+                            var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
+                            if (baseResult != null)
+                            {
+                                await RunJudgmentSerialAsync(quantResult, baseResult);
+                            }
+                        }
                     }
+                }
+
+                // Run judgment for existing quantizations that need it
+                if (_judgeEnabled && quantsNeedingJudgment.Count > 0)
+                {
+                    var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
+                    if (baseResult != null)
+                    {
+                        if (IsSerialMode())
+                        {
+                            AnsiConsole.MarkupLine($"\n[cyan]Running judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
+                            foreach (var quantResult in quantsNeedingJudgment)
+                            {
+                                await RunJudgmentSerialAsync(quantResult, baseResult);
+                            }
+                        }
+                        else if (IsParallelMode())
+                        {
+                            // Run parallel judgment for existing quantizations with progress tracking
+                            AnsiConsole.MarkupLine($"\n[magenta]Running parallel judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
+                            foreach (var quantResult in quantsNeedingJudgment)
+                            {
+                                await RunJudgmentParallelAsync(quantResult, baseResult);
+                            }
+                        }
+                    }
+                }
+
+                // Wait for all background judgment tasks from new quantizations (parallel mode)
+                if (allBackgroundJudgmentTasks.Count > 0)
+                {
+                    await WaitForBackgroundJudgmentsAsync(allBackgroundJudgmentTasks);
+
+                    // Save final results with all judgments complete
+                    SaveResultsFile();
                 }
 
                 // Final summary
@@ -434,9 +649,21 @@ namespace osync
         /// </summary>
         private async Task<QuantResult?> RunTestSuiteAsync(string modelFullName, string tag, ModelMetadata metadata)
         {
+            var (result, _) = await RunTestSuiteAsync(modelFullName, tag, metadata, null);
+            return result;
+        }
+
+        /// <summary>
+        /// Run complete test suite on a quantization with optional parallel judgment
+        /// Returns tuple of (result, backgroundJudgmentTasks) - caller must await the tasks
+        /// </summary>
+        private async Task<(QuantResult? result, List<Task> judgmentTasks)> RunTestSuiteAsync(string modelFullName, string tag, ModelMetadata metadata, QuantResult? baseResult)
+        {
             var categories = _testSuite.GetCategories();
             var totalQuestions = _testSuite.TotalQuestions;
             var questionResults = new List<QuestionResult>();
+            var parallelJudgmentTasks = new List<Task>();
+            int judgmentCompletedCount = 0;
 
             await AnsiConsole.Progress()
                 .AutoClear(false)
@@ -450,34 +677,75 @@ namespace osync
                 })
                 .StartAsync(async ctx =>
                 {
-                    var task = ctx.AddTask($"[cyan]Testing {tag}[/]", maxValue: totalQuestions);
+                    var testTask = ctx.AddTask($"[cyan]Testing {tag}[/]", maxValue: totalQuestions);
+
+                    // Add judgment progress bar in parallel mode with base result
+                    ProgressTask? judgeTask = null;
+                    if (_judgeEnabled && IsParallelMode() && baseResult != null)
+                    {
+                        judgeTask = ctx.AddTask($"[magenta]Judging {tag}[/]", maxValue: totalQuestions);
+                    }
 
                     foreach (var category in categories)
                     {
                         foreach (var question in category.Questions)
                         {
-                            task.Description = $"[cyan]{tag}[/] [dim]{category.Name} {question.QuestionId}/{category.Questions.Count}[/]";
+                            testTask.Description = $"[cyan]{tag}[/] [dim]{category.Name} {question.QuestionId}/{category.Questions.Count}[/]";
 
                             var result = await RunSingleQuestionAsync(modelFullName, category, question);
                             if (result == null)
                             {
                                 // Critical error - cannot continue without logprobs
-                                task.StopTask();
+                                testTask.StopTask();
                                 return;
                             }
 
                             questionResults.Add(result);
-                            task.Increment(1);
+
+                            // In parallel mode, immediately start judging this question (runs in background)
+                            if (_judgeEnabled && IsParallelMode() && baseResult != null && judgeTask != null)
+                            {
+                                var baseQuestion = baseResult.QuestionResults
+                                    .FirstOrDefault(q => q.QuestionId == result.QuestionId);
+
+                                if (baseQuestion != null)
+                                {
+                                    var questionToJudge = result;
+                                    var baseToCompare = baseQuestion;
+                                    var capturedJudgeTask = judgeTask;
+
+                                    var judgmentTask = Task.Run(async () =>
+                                    {
+                                        var judgment = await JudgeQuestionAsync(baseToCompare, questionToJudge);
+                                        if (judgment != null)
+                                        {
+                                            questionToJudge.Judgment = judgment;
+                                        }
+                                        Interlocked.Increment(ref judgmentCompletedCount);
+                                        capturedJudgeTask.Increment(1);
+                                    });
+                                    parallelJudgmentTasks.Add(judgmentTask);
+                                }
+                            }
+
+                            testTask.Increment(1);
                         }
                     }
 
-                    task.Description = $"[green]✓ {tag} complete[/]";
+                    testTask.Description = $"[green]✓ {tag} testing complete[/]";
+
+                    // Don't wait for judgment here - let it continue in background
+                    // But update the description to show it's still running
+                    if (judgeTask != null && parallelJudgmentTasks.Count > 0)
+                    {
+                        judgeTask.Description = $"[magenta]Judging {tag}[/] [dim]({judgmentCompletedCount}/{parallelJudgmentTasks.Count} running in background)[/]";
+                    }
                 });
 
             if (questionResults.Count == 0)
-                return null;
+                return (null, parallelJudgmentTasks);
 
-            return new QuantResult
+            var quantResult = new QuantResult
             {
                 Tag = tag,
                 DiskSizeBytes = metadata.SizeBytes,
@@ -486,107 +754,554 @@ namespace osync
                 QuantizationType = metadata.QuantizationType,
                 QuestionResults = questionResults
             };
+
+            return (quantResult, parallelJudgmentTasks);
         }
 
         /// <summary>
-        /// Run a single question and capture logprobs
+        /// Execute an async operation with retry logic
         /// </summary>
-        private async Task<QuestionResult?> RunSingleQuestionAsync(string modelName, TestCategory category, TestQuestion question)
+        private async Task<T?> ExecuteWithRetryAsync<T>(Func<Task<T?>> operation, string operationName) where T : class
         {
+            Exception? lastException = null;
+
+            for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++)
+            {
+                try
+                {
+                    var result = await operation();
+                    if (result != null)
+                        return result;
+
+                    // Result was null, will retry
+                    lastException = null;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                }
+
+                // Show retry message if we have more attempts
+                if (attempt < MAX_RETRY_ATTEMPTS)
+                {
+                    var msg = lastException != null
+                        ? $"[yellow]Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for {operationName}: {lastException.Message}[/]"
+                        : $"[yellow]Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for {operationName}...[/]";
+                    AnsiConsole.MarkupLine(msg);
+                    await Task.Delay(RETRY_DELAY_MS * attempt); // Exponential backoff
+                }
+            }
+
+            // All attempts failed
+            if (lastException != null)
+            {
+                AnsiConsole.MarkupLine($"[red]Failed after {MAX_RETRY_ATTEMPTS} attempts for {operationName}: {lastException.Message}[/]");
+            }
+            else
+            {
+                AnsiConsole.MarkupLine($"[red]Failed after {MAX_RETRY_ATTEMPTS} attempts for {operationName}[/]");
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Run a single question and capture logprobs (with retry)
+        /// </summary>
+        private Task<QuestionResult?> RunSingleQuestionAsync(string modelName, TestCategory category, TestQuestion question)
+        {
+            return ExecuteWithRetryAsync(
+                () => RunSingleQuestionCoreAsync(modelName, category, question),
+                $"question {question.Id}");
+        }
+
+        /// <summary>
+        /// Core implementation for running a single question
+        /// </summary>
+        private async Task<QuestionResult?> RunSingleQuestionCoreAsync(string modelName, TestCategory category, TestQuestion question)
+        {
+            // Non-streaming request with logprobs enabled
+            var request = new OllamaGenerateRequest
+            {
+                Model = modelName,
+                Prompt = question.Text,
+                Stream = false,  // Logprobs only work in non-streaming mode
+                Logprobs = true,  // Enable logprobs at root level
+                Options = new OllamaGenerateOptions
+                {
+                    Temperature = _args.Temperature,
+                    Seed = _args.Seed,
+                    TopP = _args.TopP,
+                    TopK = _args.TopK,
+                    RepeatPenalty = _args.RepeatPenalty,
+                    FrequencyPenalty = _args.FrequencyPenalty,
+                    NumPredict = 4096
+                }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(request);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content);
+            if (!response.IsSuccessStatusCode)
+            {
+                return null; // Will trigger retry
+            }
+
+            var responseJson = await response.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize<OllamaGenerateResponse>(responseJson);
+
+            if (result == null)
+            {
+                return null; // Will trigger retry
+            }
+
+            // Verify logprobs were received
+            if (result.Logprobs == null || result.Logprobs.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[red]Error: No logprobs received for question {question.Id}[/]");
+                AnsiConsole.MarkupLine($"[yellow]Logprobs require Ollama v0.12.11 or later. Please update Ollama.[/]");
+                // This is a permanent failure, not retryable - throw to fail fast
+                throw new InvalidOperationException("Logprobs not available - update Ollama");
+            }
+
+            // Extract performance metrics
+            double evalTokensPerSecond = 0;
+            double promptTokensPerSecond = 0;
+
+            if (result.EvalDuration.HasValue && result.EvalCount.HasValue && result.EvalDuration.Value > 0)
+            {
+                var evalSeconds = result.EvalDuration.Value / 1_000_000_000.0;
+                evalTokensPerSecond = result.EvalCount.Value / evalSeconds;
+            }
+
+            if (result.PromptEvalDuration.HasValue && result.PromptEvalCount.HasValue && result.PromptEvalDuration.Value > 0)
+            {
+                var promptSeconds = result.PromptEvalDuration.Value / 1_000_000_000.0;
+                promptTokensPerSecond = result.PromptEvalCount.Value / promptSeconds;
+            }
+
+            // Convert logprobs to our format
+            var tokens = result.Logprobs.Select(lp => new TokenLogprob
+            {
+                Token = lp.Token,
+                Logprob = lp.Logprob,
+                Bytes = lp.Bytes
+            }).ToList();
+
+            return new QuestionResult
+            {
+                QuestionId = question.Id,
+                Category = category.Name,
+                Question = question.Text,
+                Answer = result.Response ?? string.Empty,
+                Tokens = tokens,
+                EvalTokensPerSecond = evalTokensPerSecond,
+                PromptTokensPerSecond = promptTokensPerSecond,
+                TotalTokens = result.EvalCount ?? 0
+            };
+        }
+
+        /// <summary>
+        /// Run judgment scoring for a quantization (serial mode)
+        /// </summary>
+        private async Task RunJudgmentSerialAsync(QuantResult quantResult, QuantResult baseResult)
+        {
+            if (!_judgeEnabled || _judgeHttpClient == null || _judgeModelName == null)
+                return;
+
+            AnsiConsole.MarkupLine($"[cyan]Running judgment for: {quantResult.Tag}[/]");
+
+            var judgedCount = 0;
+            var skippedCount = 0;
+
+            await AnsiConsole.Progress()
+                .AutoClear(false)
+                .Columns(new ProgressColumn[]
+                {
+                    new TaskDescriptionColumn(),
+                    new ProgressBarColumn(),
+                    new PercentageColumn(),
+                    new ElapsedTimeColumn(),
+                    new SpinnerColumn()
+                })
+                .StartAsync(async ctx =>
+                {
+                    var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: quantResult.QuestionResults.Count);
+
+                    foreach (var quantQuestion in quantResult.QuestionResults)
+                    {
+                        // Find corresponding base question
+                        var baseQuestion = baseResult.QuestionResults
+                            .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                        if (baseQuestion == null)
+                        {
+                            task.Increment(1);
+                            continue;
+                        }
+
+                        // Check if already judged with same model
+                        if (quantQuestion.Judgment != null &&
+                            quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                            !_args.Force)
+                        {
+                            skippedCount++;
+                            task.Increment(1);
+                            continue;
+                        }
+
+                        task.Description = $"[magenta]Judging {quantResult.Tag}[/] [dim]{quantQuestion.Category} Q{quantQuestion.QuestionId}[/]";
+
+                        // Run judgment
+                        var judgment = await JudgeQuestionAsync(baseQuestion, quantQuestion);
+                        if (judgment != null)
+                        {
+                            quantQuestion.Judgment = judgment;
+                            judgedCount++;
+                        }
+
+                        task.Increment(1);
+                    }
+
+                    task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
+                });
+
+            AnsiConsole.MarkupLine($"[dim]Judged: {judgedCount}, Skipped: {skippedCount}[/]");
+            SaveResultsFile();
+        }
+
+        /// <summary>
+        /// Run judgment scoring for a quantization with per-question parallelism
+        /// All questions are judged concurrently with progress tracking
+        /// </summary>
+        private async Task RunJudgmentParallelAsync(QuantResult quantResult, QuantResult baseResult)
+        {
+            if (!_judgeEnabled || _judgeHttpClient == null || _judgeModelName == null)
+                return;
+
+            var questionsToJudge = new List<(QuestionResult quantQuestion, QuestionResult baseQuestion)>();
+            int skippedCount = 0;
+
+            foreach (var quantQuestion in quantResult.QuestionResults)
+            {
+                // Find corresponding base question
+                var baseQuestion = baseResult.QuestionResults
+                    .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                if (baseQuestion == null)
+                {
+                    skippedCount++;
+                    continue;
+                }
+
+                // Check if already judged with same model
+                if (quantQuestion.Judgment != null &&
+                    quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                    !_args.Force)
+                {
+                    skippedCount++;
+                    continue;
+                }
+
+                questionsToJudge.Add((quantQuestion, baseQuestion));
+            }
+
+            if (questionsToJudge.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[dim]All questions already judged for {quantResult.Tag}[/]");
+                return;
+            }
+
+            int completedCount = 0;
+
+            await AnsiConsole.Progress()
+                .AutoClear(false)
+                .Columns(new ProgressColumn[]
+                {
+                    new TaskDescriptionColumn(),
+                    new ProgressBarColumn(),
+                    new PercentageColumn(),
+                    new ElapsedTimeColumn(),
+                    new SpinnerColumn()
+                })
+                .StartAsync(async ctx =>
+                {
+                    var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: questionsToJudge.Count);
+
+                    var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                    {
+                        var judgment = await JudgeQuestionAsync(pair.baseQuestion, pair.quantQuestion);
+                        if (judgment != null)
+                        {
+                            pair.quantQuestion.Judgment = judgment;
+                        }
+                        Interlocked.Increment(ref completedCount);
+                        task.Increment(1);
+                    })).ToList();
+
+                    await Task.WhenAll(judgmentTasks);
+                    task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
+                });
+
+            AnsiConsole.MarkupLine($"[dim]Judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
+            SaveResultsFile();
+        }
+
+        /// <summary>
+        /// Wait for all background judgment tasks with progress tracking
+        /// </summary>
+        private async Task WaitForBackgroundJudgmentsAsync(ConcurrentDictionary<string, (List<Task> tasks, int totalQuestions)> allTasks)
+        {
+            if (allTasks.Count == 0)
+                return;
+
+            // Check if there are any pending tasks
+            var pendingCount = allTasks.Values.Sum(t => t.tasks.Count(task => !task.IsCompleted));
+            if (pendingCount == 0)
+            {
+                AnsiConsole.MarkupLine($"[green]✓ All background judgments already complete[/]");
+                return;
+            }
+
+            AnsiConsole.MarkupLine($"\n[magenta]Waiting for {pendingCount} background judgment task(s) to complete...[/]");
+
+            await AnsiConsole.Progress()
+                .AutoClear(false)
+                .Columns(new ProgressColumn[]
+                {
+                    new TaskDescriptionColumn(),
+                    new ProgressBarColumn(),
+                    new PercentageColumn(),
+                    new ElapsedTimeColumn(),
+                    new SpinnerColumn()
+                })
+                .StartAsync(async ctx =>
+                {
+                    // Create a progress task for each quantization's judgment
+                    var progressTasks = new Dictionary<string, ProgressTask>();
+                    foreach (var kvp in allTasks)
+                    {
+                        var tag = kvp.Key;
+                        var (tasks, total) = kvp.Value;
+                        var progressTask = ctx.AddTask($"[magenta]Judging {tag}[/]", maxValue: total);
+
+                        // Count already completed tasks and set initial progress
+                        var alreadyCompleted = tasks.Count(t => t.IsCompleted);
+                        if (alreadyCompleted > 0)
+                        {
+                            progressTask.Increment(alreadyCompleted);
+                        }
+
+                        // Track completion of remaining tasks
+                        foreach (var task in tasks.Where(t => !t.IsCompleted))
+                        {
+                            _ = task.ContinueWith(_ => progressTask.Increment(1), TaskContinuationOptions.ExecuteSynchronously);
+                        }
+                        progressTasks[tag] = progressTask;
+                    }
+
+                    // Wait for all tasks from all quantizations
+                    var allTasksList = allTasks.Values.SelectMany(t => t.tasks).ToList();
+                    await Task.WhenAll(allTasksList);
+
+                    // Mark all progress tasks as complete
+                    foreach (var kvp in progressTasks)
+                    {
+                        kvp.Value.Description = $"[green]✓ Judging {kvp.Key} complete[/]";
+                    }
+                });
+
+            AnsiConsole.MarkupLine($"[green]✓ All background judgments complete[/]");
+        }
+
+        /// <summary>
+        /// Judge a single question comparison (with retry)
+        /// </summary>
+        private Task<JudgmentResult?> JudgeQuestionAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
+                return Task.FromResult<JudgmentResult?>(null);
+
+            return ExecuteWithRetryAsync(
+                () => JudgeQuestionCoreAsync(baseQuestion, quantQuestion),
+                $"judgment Q{baseQuestion.QuestionId}");
+        }
+
+        /// <summary>
+        /// Core implementation for judging a single question
+        /// </summary>
+        private async Task<JudgmentResult?> JudgeQuestionCoreAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
+                return null;
+
+            // Build the judgment prompt
+            var userMessage = $@"Question: {baseQuestion.Question}
+
+Base answer:
+{baseQuestion.Answer}
+
+Quantized answer:
+{quantQuestion.Answer}
+
+Evaluate the similarity between these two answers.";
+
+            // Use /api/chat with structured output schema
+            var request = new
+            {
+                model = _judgeModelName,
+                messages = new[]
+                {
+                    new { role = "system", content = JUDGE_SYSTEM_PROMPT },
+                    new { role = "user", content = userMessage }
+                },
+                stream = false,
+                format = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        score = new
+                        {
+                            type = "integer",
+                            description = "Similarity score from 1 to 100"
+                        },
+                        reason = new
+                        {
+                            type = "string",
+                            description = "Brief explanation for the score"
+                        }
+                    },
+                    required = new[] { "score", "reason" }
+                },
+                options = new
+                {
+                    temperature = 0.0,
+                    seed = 42,
+                    num_predict = 200
+                }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(request);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            var response = await _judgeHttpClient.PostAsync($"{_judgeBaseUrl}/api/chat", content);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {errorBody}");
+            }
+
+            var responseJson = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+
+            // Chat API returns message.content instead of response
+            if (!root.TryGetProperty("message", out var messageElement))
+            {
+                throw new InvalidOperationException($"No 'message' field in API response: {responseJson}");
+            }
+
+            if (!messageElement.TryGetProperty("content", out var contentElement))
+            {
+                throw new InvalidOperationException($"No 'content' field in message: {responseJson}");
+            }
+
+            var responseText = contentElement.GetString() ?? "";
+
+            // Parse the structured JSON response
+            int score = 0;
+            string reason = "";
+
             try
             {
-                // Non-streaming request with logprobs enabled
-                var request = new OllamaGenerateRequest
+                using var scoreDoc = JsonDocument.Parse(responseText);
+                var scoreRoot = scoreDoc.RootElement;
+
+                // Try "score" field first, then "similarity" as fallback (some models use this)
+                if (scoreRoot.TryGetProperty("score", out var scoreElement))
                 {
-                    Model = modelName,
-                    Prompt = question.Text,
-                    Stream = false,  // Logprobs only work in non-streaming mode
-                    Logprobs = true,  // Enable logprobs at root level
-                    Options = new OllamaGenerateOptions
+                    if (scoreElement.ValueKind == JsonValueKind.Number)
                     {
-                        Temperature = _args.Temperature,
-                        Seed = _args.Seed,
-                        TopP = _args.TopP,
-                        TopK = _args.TopK,
-                        RepeatPenalty = _args.RepeatPenalty,
-                        FrequencyPenalty = _args.FrequencyPenalty,
-                        NumPredict = 4096
+                        score = (int)Math.Round(scoreElement.GetDouble());
                     }
-                };
-
-                var jsonContent = JsonSerializer.Serialize(request);
-                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-                var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content);
-                if (!response.IsSuccessStatusCode)
+                }
+                else if (scoreRoot.TryGetProperty("similarity", out var simElement))
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Failed to generate response for question {question.Id}[/]");
-                    return null;
+                    if (simElement.ValueKind == JsonValueKind.Number)
+                    {
+                        // Handle similarity as 0-1 range or 0-100 range
+                        var simValue = simElement.GetDouble();
+                        score = simValue <= 1.0 ? (int)Math.Round(simValue * 100) : (int)Math.Round(simValue);
+                    }
                 }
 
-                var responseJson = await response.Content.ReadAsStringAsync();
-                var result = JsonSerializer.Deserialize<OllamaGenerateResponse>(responseJson);
-
-                if (result == null)
+                // Try "reason" field first, then "response" as fallback
+                if (scoreRoot.TryGetProperty("reason", out var reasonElement))
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Failed to deserialize response for question {question.Id}[/]");
-                    return null;
+                    reason = reasonElement.GetString() ?? "";
                 }
-
-                // Verify logprobs were received
-                if (result.Logprobs == null || result.Logprobs.Count == 0)
+                else if (scoreRoot.TryGetProperty("response", out var respElement))
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: No logprobs received for question {question.Id}[/]");
-                    AnsiConsole.MarkupLine($"[yellow]Logprobs require Ollama v0.12.11 or later. Please update Ollama.[/]");
-                    AnsiConsole.MarkupLine($"[dim]Request JSON:[/]");
-                    Console.WriteLine(jsonContent);
-                    AnsiConsole.MarkupLine($"[dim]Response JSON:[/]");
-                    Console.WriteLine(responseJson);
-                    AnsiConsole.MarkupLine($"[yellow]Testing failed - cannot continue without logprobs.[/]");
-                    return null;
+                    reason = respElement.GetString() ?? "";
                 }
-
-                // Extract performance metrics
-                double evalTokensPerSecond = 0;
-                double promptTokensPerSecond = 0;
-
-                if (result.EvalDuration.HasValue && result.EvalCount.HasValue && result.EvalDuration.Value > 0)
-                {
-                    var evalSeconds = result.EvalDuration.Value / 1_000_000_000.0;
-                    evalTokensPerSecond = result.EvalCount.Value / evalSeconds;
-                }
-
-                if (result.PromptEvalDuration.HasValue && result.PromptEvalCount.HasValue && result.PromptEvalDuration.Value > 0)
-                {
-                    var promptSeconds = result.PromptEvalDuration.Value / 1_000_000_000.0;
-                    promptTokensPerSecond = result.PromptEvalCount.Value / promptSeconds;
-                }
-
-                // Convert logprobs to our format
-                var tokens = result.Logprobs.Select(lp => new TokenLogprob
-                {
-                    Token = lp.Token,
-                    Logprob = lp.Logprob,
-                    Bytes = lp.Bytes
-                }).ToList();
-
-                return new QuestionResult
-                {
-                    QuestionId = question.Id,
-                    Category = category.Name,
-                    Question = question.Text,
-                    Answer = result.Response ?? string.Empty,
-                    Tokens = tokens,
-                    EvalTokensPerSecond = evalTokensPerSecond,
-                    PromptTokensPerSecond = promptTokensPerSecond,
-                    TotalTokens = result.EvalCount ?? 0
-                };
             }
-            catch (Exception ex)
+            catch
             {
-                AnsiConsole.MarkupLine($"[red]Error testing question {question.Id}: {ex.Message}[/]");
-                AnsiConsole.MarkupLine($"[yellow]Testing failed - cannot continue.[/]");
-                return null;
+                // Try regex fallback for malformed JSON - check both score and similarity
+                var scoreMatch = Regex.Match(responseText, @"""?(?:score|similarity)""?\s*:\s*(\d+(?:\.\d+)?)");
+                if (scoreMatch.Success)
+                {
+                    if (double.TryParse(scoreMatch.Groups[1].Value, out var parsed))
+                    {
+                        score = parsed <= 1.0 ? (int)Math.Round(parsed * 100) : (int)Math.Round(parsed);
+                    }
+                }
+
+                var reasonMatch = Regex.Match(responseText, @"""?(?:reason|response)""?\s*:\s*""([^""]+)""");
+                if (reasonMatch.Success)
+                {
+                    reason = reasonMatch.Groups[1].Value;
+                }
+            }
+
+            // If score is 0 or negative, treat as minimum score (1) - some models ignore instructions
+            if (score <= 0)
+            {
+                score = 1;
+            }
+
+            // Validate score range
+            score = Math.Clamp(score, 1, 100);
+
+            return new JudgmentResult
+            {
+                JudgeModel = _judgeModelName,
+                Score = score,
+                Reason = reason,
+                JudgedAt = DateTime.UtcNow
+            };
+        }
+
+        /// <summary>
+        /// Verify judge model exists on the server (doesn't preload, just checks existence)
+        /// </summary>
+        private async Task<bool> VerifyJudgeModelExistsAsync()
+        {
+            if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
+                return false;
+
+            try
+            {
+                // Use /api/show to check if model exists
+                var request = new { name = _judgeModelName };
+                var response = await _judgeHttpClient.PostAsJsonAsync($"{_judgeBaseUrl}/api/show", request);
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
             }
         }
 

@@ -86,6 +86,18 @@ namespace osync
         public double EvalTokensPerSecond { get; set; }
         public double PromptTokensPerSecond { get; set; }
         public int TotalTokens { get; set; }
+        public JudgmentResult? Judgment { get; set; }
+    }
+
+    /// <summary>
+    /// Result from judge model evaluation
+    /// </summary>
+    public class JudgmentResult
+    {
+        public string JudgeModel { get; set; } = string.Empty;
+        public int Score { get; set; }  // 1-100
+        public string Reason { get; set; } = string.Empty;  // Judge's reasoning for the score
+        public DateTime JudgedAt { get; set; }
     }
 
     /// <summary>
@@ -233,6 +245,10 @@ namespace osync
         public string TestSuiteName { get; set; } = string.Empty;
         public int TotalQuestions { get; set; }
         public List<QuantScoreResult> QuantScores { get; set; } = new List<QuantScoreResult>();
+
+        // Judgment scoring info
+        public bool HasJudgmentScoring { get; set; }
+        public string? JudgeModel { get; set; }
     }
 
     /// <summary>
@@ -249,6 +265,13 @@ namespace osync
 
         // Overall confidence score (%)
         public double TotalConfidenceScore { get; set; }
+
+        // Judgment scoring (when judge model is used)
+        public double? AverageJudgmentScore { get; set; }
+        public bool HasJudgmentScoring { get; set; }
+
+        // Final combined score (50% metrics + 50% judgment when available)
+        public double FinalScore { get; set; }
 
         // Performance metrics
         public double EvalTokensPerSecond { get; set; }
@@ -272,5 +295,6 @@ namespace osync
         public double LengthConsistencyScore { get; set; }
         public double PerplexityScore { get; set; }
         public double OverallConfidenceScore { get; set; }
+        public double? JudgmentScore { get; set; }
     }
 }

@@ -523,48 +523,26 @@ osync qcview -F llama3.2.qc.json
 
 The 4-component scoring system provides comprehensive quality assessment:
 
-**1. Token Similarity (40% weight) - Exact Match Test:**
-```
-Purpose: Measures if quantization produces identical token sequences
-Calculation: (matching_tokens / max_length) × 100
-Range: 0-100%
-
-Example:
-  Base output:    "The capital of France is Paris."
-  Quant output:   "The capital of France is Paris."
-  Tokens match:   100% (all 7 tokens identical)
-
-  Base output:    "The capital of France is Paris."
-  Quant output:   "The capital of France is Lyon."
-  Tokens match:   85.7% (6 of 7 tokens match)
-
-Interpretation:
-  95-100%: Quantization produces virtually identical outputs
-  85-95%:  Minor word choice differences
-  70-85%:  Noticeable differences in phrasing
-  <70%:    Significant divergence in responses
-```
-
-**2. Logprobs Divergence (40% weight) - Confidence Test:**
+**1. Logprobs Divergence (70% weight) - Confidence Test:**
 ```
 Purpose: Measures how confident the model is in its token choices
-Calculation: 100 × exp(-average_KL_divergence)
-Uses: Kullback-Leibler divergence between probability distributions
+Calculation: 100 × exp(-confidence_difference × 2)
+Uses: Sequence-level average confidence (mean logprob)
 Range: 0-100%
 
 How it works:
-  - For matching tokens: Compares probability (confidence) levels
-  - For non-matching tokens: Applies maximum penalty
-  - KL divergence measures "distance" between probability distributions
+  - Calculates average confidence (mean logprob) for each sequence
+  - Compares base vs quantization confidence levels
+  - Higher weight because model confidence is the strongest quality indicator
 
 Example:
-  Base: "Paris" (logprob: -0.01, 99% confident)
-  Quant: "Paris" (logprob: -0.05, 95% confident)
+  Base: average logprob -0.5 (good confidence)
+  Quant: average logprob -0.6 (slightly lower confidence)
   → Small divergence, high score
 
-  Base: "Paris" (logprob: -0.01, 99% confident)
-  Quant: "Lyon" (logprob: -2.3, 10% confident)
-  → Large divergence, low score (different token + low confidence)
+  Base: average logprob -0.5
+  Quant: average logprob -2.0 (much lower confidence)
+  → Large divergence, low score
 
 Interpretation:
   95-100%: Quantization maintains very similar confidence levels
@@ -573,7 +551,59 @@ Interpretation:
   <70%:    Major confidence degradation or uncertainty
 ```
 
-**3. Length Consistency (10% weight) - Verbosity Test:**
+**2. Perplexity (20% weight) - Overall Confidence Test:**
+```
+Purpose: Measures model's overall confidence (lower perplexity = more confident)
+Calculation: 100 × exp(-0.5 × |1 - perplexity_ratio|)
+Perplexity: exp(-average_logprob)
+Range: 0-100%
+
+How perplexity works:
+  - Lower perplexity = model is more confident/certain
+  - Higher perplexity = model is confused/uncertain
+  - Ratio compares quant perplexity to base perplexity
+
+Example:
+  Base perplexity: 1.5 (confident)
+  Quant perplexity: 1.5 → Ratio: 1.0 → Score: 100%
+
+  Base perplexity: 1.5
+  Quant perplexity: 2.0 → Ratio: 1.33 → Score: 84.6%
+
+  Base perplexity: 1.5
+  Quant perplexity: 5.0 → Ratio: 3.33 → Score: 31.2%
+
+Interpretation:
+  95-100%: Quantization maintains similar overall confidence
+  85-95%:  Slightly less confident overall
+  70-85%:  Noticeably higher uncertainty
+  <70%:    Major confidence degradation
+```
+
+**3. Token Similarity (5% weight) - Sequence Match Test:**
+```
+Purpose: Measures if quantization produces similar token sequences
+Calculation: Uses Longest Common Subsequence (LCS)
+Formula: (LCS_length / max_length) × 100
+Range: 0-100%
+
+Example:
+  Base output:    "The capital of France is Paris."
+  Quant output:   "The capital of France is Paris."
+  LCS match:      100% (all tokens in common subsequence)
+
+  Base output:    "The capital of France is Paris."
+  Quant output:   "The capital of France is Lyon."
+  LCS match:      ~85% (most tokens match in sequence)
+
+Interpretation:
+  95-100%: Quantization produces virtually identical outputs
+  85-95%:  Minor word choice differences
+  70-85%:  Noticeable differences in phrasing
+  <70%:    Significant divergence in responses
+```
+
+**4. Length Consistency (5% weight) - Verbosity Test:**
 ```
 Purpose: Checks if quantization produces similar-length responses
 Calculation: 100 × exp(-2 × |1 - length_ratio|)
@@ -596,57 +626,28 @@ Interpretation:
   <70%:    Major verbosity changes (much shorter/longer)
 ```
 
-**4. Perplexity (10% weight) - Overall Confidence Test:**
-```
-Purpose: Measures model's overall confidence (lower perplexity = more confident)
-Calculation: 100 × exp(-|1 - perplexity_ratio|)
-Perplexity: exp(-average_logprob)
-Range: 0-100%
-
-How perplexity works:
-  - Lower perplexity = model is more confident/certain
-  - Higher perplexity = model is confused/uncertain
-  - Ratio compares quant perplexity to base perplexity
-
-Example:
-  Base perplexity: 1.5 (confident)
-  Quant perplexity: 1.5 → Ratio: 1.0 → Score: 100%
-
-  Base perplexity: 1.5
-  Quant perplexity: 2.0 → Ratio: 1.33 → Score: 71.6%
-
-  Base perplexity: 1.5
-  Quant perplexity: 5.0 → Ratio: 3.33 → Score: 3.4%
-
-Interpretation:
-  95-100%: Quantization maintains similar overall confidence
-  85-95%:  Slightly less confident overall
-  70-85%:  Noticeably higher uncertainty
-  <70%:    Major confidence degradation
-```
-
 **Overall Confidence Score:**
 ```
 Weighted average of all four components:
-  = (Token Similarity × 0.40) +
-    (Logprobs Divergence × 0.40) +
-    (Length Consistency × 0.10) +
-    (Perplexity × 0.10)
+  = (Logprobs Divergence × 0.70) +
+    (Perplexity × 0.20) +
+    (Token Similarity × 0.05) +
+    (Length Consistency × 0.05)
 
 Example calculation:
-  Token Similarity:     92.5% × 0.40 = 37.0%
-  Logprobs Divergence:  88.0% × 0.40 = 35.2%
-  Length Consistency:   95.0% × 0.10 =  9.5%
-  Perplexity:           90.0% × 0.10 =  9.0%
+  Logprobs Divergence:  88.0% × 0.70 = 61.6%
+  Perplexity:           90.0% × 0.20 = 18.0%
+  Token Similarity:     92.5% × 0.05 =  4.6%
+  Length Consistency:   95.0% × 0.05 =  4.8%
   ─────────────────────────────────────────
-  Overall Score:                      90.7%
+  Overall Score:                      89.0%
 
-Quality interpretation:
-  95-100% (Green):    Excellent - minimal quality loss
-  90-95%  (Lime):     Very good - acceptable for most uses
-  80-90%  (Yellow):   Good - noticeable but manageable degradation
-  70-80%  (Orange):   Moderate - quality loss may affect performance
-  <70%    (Red):      Poor - significant degradation
+Quality interpretation (color coding):
+  90-100% (Green):    Excellent - minimal quality loss
+  80-90%  (Lime):     Very good - acceptable for most uses
+  70-80%  (Yellow):   Good - noticeable but manageable degradation
+  50-70%  (Orange):   Moderate - quality loss may affect performance
+  <50%    (Red):      Poor - significant degradation
 ```
 
 **Practical Testing Example:**
@@ -662,7 +663,7 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0 -B f16
 #   q2_k:          70-80% (moderate loss, much smaller)
 
 # View results
-osync qcview -F llama3.2.qc.json
+osync qcview llama3.2.qc.json
 
 # Analyze component scores to understand where quality is lost:
 #   - High token similarity but low logprobs → same words, less confident
@@ -673,109 +674,263 @@ osync qcview -F llama3.2.qc.json
 
 ---
 
+#### 12b. Judge Model Scoring Tests
+
+**Serial Judge Mode (Default):**
+```bash
+# Local judge model - runs after each quantization
+osync qc -M llama3.2 -Q q4_k_m,q8_0 --judge mistral
+# Expected:
+#   - Testing q4_k_m...
+#   - ✓ Completed q4_k_m
+#   - Running judgment for: q4_k_m
+#   - Judging q4_k_m  [===       ] 30%
+#   - ✓ Judging q4_k_m complete
+#   - Testing q8_0...
+#   - (continues...)
+```
+
+**Parallel Judge Mode:**
+```bash
+# Parallel mode - judging happens after all testing completes
+osync qc -M llama3.2 -Q q4_k_m,q8_0 --judge mistral --mode parallel
+# Expected:
+#   - Testing q4_k_m...
+#   - Testing q8_0...
+#   - Running parallel judgment for 2 quantization(s)...
+#   - Judging all quantizations [=====     ] 50%
+#   - ✓ All judgments complete
+```
+
+**Remote Judge Model:**
+```bash
+# Judge on different server
+osync qc -M llama3.2 -Q q4_k_m --judge http://192.168.1.100:11434/mistral
+# Expected:
+#   - Judge model: mistral:latest @ http://192.168.1.100:11434
+#   - Tests run normally, judgment calls go to remote server
+```
+
+**Remote Test Models + Local Judge:**
+```bash
+# Test models on remote, judge locally
+osync qc -d http://192.168.1.100:11434/ -M llama3.2 -Q q4_k_m --judge mistral
+# Expected:
+#   - Model testing uses remote server
+#   - Judgment uses local server (localhost:11434)
+```
+
+**Judge Skip Logic:**
+```bash
+# First run with judge
+osync qc -M llama3.2 -Q q4_k_m --judge mistral
+# Second run - should skip existing judgments
+osync qc -M llama3.2 -Q q8_0 --judge mistral
+# Expected: q4_k_m judgment skipped (already exists), q8_0 judged
+
+# Force re-judgment
+osync qc -M llama3.2 -Q q4_k_m --judge mistral --force
+# Expected: q4_k_m re-judged even though judgment exists
+
+# Different judge model - should re-judge
+osync qc -M llama3.2 -Q q4_k_m --judge llama3.2
+# Expected: All questions re-judged because different model
+```
+
+**Judge Results Verification:**
+```bash
+# Run with judge
+osync qc -M llama3.2 -Q q4_k_m,q8_0 --judge mistral
+
+# View results with judgment
+osync qcview llama3.2.qc.json
+# Expected output:
+#   - Header shows "Judge Model: mistral:latest (50% metrics + 50% judgment)"
+#   - Table shows columns: Final Score, Metrics Score, Judge Score
+#   - Results sorted by Final Score (not just Metrics)
+
+# JSON output should include judgment data
+osync qcview llama3.2.qc.json -Fo json
+# Verify JSON contains:
+#   - "HasJudgmentScoring": true
+#   - "JudgeModel": "mistral:latest"
+#   - "AverageJudgmentScore" per quantization
+#   - "JudgmentScore" per question
+```
+
+**Partial Judgment Handling:**
+```bash
+# If only some quants have judgment, metrics-only mode is used
+# Create results with one judged quant
+osync qc -M llama3.2 -Q q4_k_m --judge mistral
+# Add another quant without judgment
+osync qc -M llama3.2 -Q q8_0
+# View results
+osync qcview llama3.2.qc.json
+# Expected: Uses metrics-only display (no Judge Score column)
+#   - Because not ALL quants have judgment scoring
+```
+
+**Judge Model Edge Cases:**
+```bash
+# Invalid judge URL format
+osync qc -M llama3.2 -Q q4_k_m --judge http://192.168.1.100
+# Expected: Warning about invalid format
+
+# Non-existent judge model
+osync qc -M llama3.2 -Q q4_k_m --judge nonexistent-model
+# Expected: Warning about failed to preload judge model, judgment skipped
+
+# Judge model without tag (should add :latest)
+osync qc -M llama3.2 -Q q4_k_m --judge mistral
+# Expected: Uses mistral:latest
+```
+
+**Judge Scoring Verification:**
+```bash
+# Run tests and check scoring
+osync qc -M llama3.2 -Q q4_k_m,q8_0 --judge mistral
+osync qcview llama3.2.qc.json
+
+# Verify scoring behavior:
+#   - Judge scores: 1-100 per question
+#   - AverageJudgmentScore: average of all question judge scores
+#   - FinalScore = (MetricsScore × 0.5) + (JudgeScore × 0.5)
+#   - Higher quality quants should have higher both metrics AND judge scores
+
+# Check JSON for detailed per-question judgment
+osync qcview llama3.2.qc.json -Fo json -O results.json
+# Each QuestionResult should have Judgment: { JudgeModel, Score, JudgedAt }
+```
+
+---
+
 #### 13. View Quantization Results Command (`qcview`)
 
-**Basic Table View:**
+**Basic Table View (Console):**
 ```bash
-# View results in table format
-osync qcview -F llama3.2.qc.json
+# View results in table format (file as positional argument)
+osync qcview llama3.2.qc.json
 # Expected output:
 #   - Header panel with model info, test suite, options
 #   - Base model info panel
 #   - Main results table with columns:
 #     - Tag, Quant, Size, Overall Score
 #     - Token Similarity, Logprobs Divergence, Length Consistency, Perplexity
-#     - Eval Speed, Speed vs Base
+#     - Eval Speed, Eval vs Base, Prompt Speed, Prompt vs Base
 #   - Category breakdown table
-#   - Color coding: green ≥95%, lime ≥90%, yellow ≥80%, orange ≥70%, red <70%
+#   - Color coding: green ≥90%, lime ≥80%, yellow ≥70%, orange ≥50%, red <50%
+```
+
+**Table Export to File (v1.1.9):**
+```bash
+# Export table to text file
+osync qcview llama3.2.qc.json -O report.txt
+# Expected output:
+#   - Message: "Table results saved to: report.txt (X.XX KB)"
+#   - File contains plain text table (no ANSI colors)
+#   - All columns properly aligned with correct values
+#   - Eval/Prompt speeds formatted as numbers (not "F1-12" bug)
 ```
 
 **JSON Output:**
 ```bash
 # View as JSON in console
-osync qcview -F llama3.2.qc.json -Fo json
-# Expected: JSON output to console with:
-#   - BaseModelName, BaseTag, BaseFamily, etc.
+osync qcview llama3.2.qc.json -Fo json
+# Expected:
+#   - "[yellow]JSON Results:[/]" header
+#   - JSON output without markup parsing errors (fixed in v1.1.9)
+#   - Contains: BaseModelName, BaseTag, BaseFamily, etc.
 #   - QuantScores array with all quantizations
 #   - CategoryScores for each quantization
 #   - QuestionScores array (detailed per-question breakdown)
 
 # Export to JSON file
-osync qcview -F llama3.2.qc.json -Fo json -O report.json
-# Expected: JSON written to report.json
+osync qcview llama3.2.qc.json -Fo json -O report.json
+# Expected:
+#   - Message: "JSON results saved to: report.json (X.XX KB)"
+#   - File contains valid, indented JSON
 ```
 
 **Results Validation:**
 ```bash
 # Test with valid results file
-osync qcview -F llama3.2.qc.json
+osync qcview llama3.2.qc.json
 # Verify:
 #   - Overall scores are 0-100%
 #   - Category scores are 0-100%
 #   - Performance percentages make sense (faster quants > 100%)
 #   - Disk sizes match model sizes
 #   - Quantization types are correct
+#   - Eval/Prompt speeds show actual numbers (not format strings)
 
-# Test score color coding
-# Green (95-100%): Excellent preservation
-# Lime (90-94%): Very good
-# Yellow (80-89%): Good
-# Orange (70-79%): Moderate loss
-# Red (<70%): Significant degradation
+# Test score color coding (v1.1.9 updated thresholds)
+# Green (90-100%): Excellent preservation
+# Lime (80-90%): Very good
+# Yellow (70-80%): Good
+# Orange (50-70%): Moderate loss
+# Red (<50%): Significant degradation
 ```
 
 **Edge Cases:**
 ```bash
 # File doesn't exist
-osync qcview -F nonexistent.json
+osync qcview nonexistent.json
 # Expected: "Error: Results file not found: nonexistent.json"
 
 # Invalid JSON file
 echo "invalid" > test.json
-osync qcview -F test.json
+osync qcview test.json
 # Expected: "Error: Failed to parse results file"
 
 # Empty results (no quantizations tested)
 # Create results file with empty Results array
-osync qcview -F empty-results.json
+osync qcview empty-results.json
 # Expected: "No results found in file"
 
 # Missing base quantization
 # Edit JSON to remove IsBase flag from all entries
-osync qcview -F no-base.json
+osync qcview no-base.json
 # Expected: "Error: No base quantization found in results"
 
 # Invalid format parameter
-osync qcview -F llama3.2.qc.json -Fo invalid
-# Expected: Fallback to table or error
+osync qcview llama3.2.qc.json -Fo invalid
+# Expected: Fallback to table format
+
+# JSON to console with special characters (v1.1.9 fix)
+osync qcview llama3.2.qc.json -Fo json
+# Expected: No "Malformed markup tag" error
+# JSON [ and ] characters not interpreted as Spectre.Console markup
 ```
 
 **Verification Tests:**
 ```bash
 # Compare table vs JSON output
-osync qcview -F llama3.2.qc.json > table.txt
-osync qcview -F llama3.2.qc.json -Fo json > output.json
+osync qcview llama3.2.qc.json -O table.txt
+osync qcview llama3.2.qc.json -Fo json -O output.json
 # Manually verify:
 #   - Scores match between table and JSON
 #   - All quantizations appear in both
 #   - Category breakdowns are consistent
+#   - File sizes displayed correctly in output messages
 ```
 
 **Performance Metrics Validation:**
 ```bash
 # Verify performance percentages
-osync qcview -F llama3.2.qc.json
+osync qcview llama3.2.qc.json
 # Check:
 #   - Smaller quants (q4_k_m) should have > 100% speed (faster)
 #   - Larger quants (q8_0) might have < 100% speed (slower)
 #   - f16/fp16 base should show 100% (baseline)
-#   - Prompt and eval speeds calculated correctly
+#   - Prompt and eval speeds show actual tok/s values
+#   - Arrows: ↑ for faster than base, ↓ for slower, = for same
 ```
 
 **Category Breakdown Tests:**
 ```bash
 # Verify category scores
-osync qcview -F llama3.2.qc.json
+osync qcview llama3.2.qc.json
 # Check category breakdown table shows:
 #   - All 5 categories: Reasoning, Math, Finance, Technology, Science
 #   - Scores per category for each quantization
@@ -783,31 +938,43 @@ osync qcview -F llama3.2.qc.json
 #   - Category scores average to overall score (weighted)
 ```
 
-**Table Formatting:**
+**Table Formatting (v1.1.9 fixes):**
 ```bash
-# Test table rendering
-osync qcview -F llama3.2.qc.json
+# Test table rendering to console
+osync qcview llama3.2.qc.json
 # Verify:
 #   - Columns align properly
 #   - Numbers formatted correctly (1 decimal place for %)
 #   - Color codes work in terminal
 #   - Unicode arrows (↑↓) display for performance
 #   - Sizes shown in human-readable format (GB, MB)
+
+# Test table export to file
+osync qcview llama3.2.qc.json -O report.txt
+# Verify:
+#   - Eval speed shows numbers like "122.8" (not "F1-12")
+#   - Prompt speed shows numbers like "1609.7" (not "F1-12")
+#   - All columns correctly formatted with values
 ```
 
 **Output File Tests:**
 ```bash
+# Table export to file (v1.1.9)
+osync qcview llama3.2.qc.json -O report.txt
+# Expected: "Table results saved to: report.txt (X.XX KB)"
+# Verify file exists and contains properly formatted table
+
 # JSON export to file
-osync qcview -F llama3.2.qc.json -Fo json -O report.json
-# Expected: "JSON results saved to: report.json"
+osync qcview llama3.2.qc.json -Fo json -O report.json
+# Expected: "JSON results saved to: report.json (X.XX KB)"
 # Verify file exists and contains valid JSON
 
 # Overwrite existing file
-osync qcview -F llama3.2.qc.json -Fo json -O report.json
-# Expected: Overwrites without warning
+osync qcview llama3.2.qc.json -Fo json -O report.json
+# Expected: Overwrites without warning, shows new size
 
 # Invalid output path
-osync qcview -F llama3.2.qc.json -Fo json -O /invalid/path/file.json
+osync qcview llama3.2.qc.json -Fo json -O /invalid/path/file.json
 # Expected: Error about invalid path or permissions
 ```
 

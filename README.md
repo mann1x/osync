@@ -491,6 +491,39 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
 - `-Fr <value>` - frequency_penalty parameter
 - `-T <file>` - External test suite JSON file (default: internal v1base)
 - `--force` - Force re-run testing for quantizations already present in results file
+- `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
+- `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
+
+**Judge Scoring:**
+
+Use a second LLM to evaluate similarity between base and quantized responses:
+
+```bash
+# Local judge model
+osync qc -M llama3.2 -Q 1b-instruct-q8_0,1b-instruct-q6_k --judge mistral
+
+# Remote test models, local judge
+osync qc -d http://192.168.1.100:11434/ -M llama3.2 -Q q4_k_m --judge mistral
+
+# Remote judge model (different server)
+osync qc -M llama3.2 -Q q4_k_m --judge http://192.168.1.200:11434/mistral
+
+# Parallel mode (judge runs concurrently with testing)
+osync qc -M llama3.2 -Q q4_k_m --judge mistral --mode parallel
+```
+
+When judgment scoring is enabled:
+- The judge model evaluates each quantized response against the base response
+- Returns a similarity score from 1-100 for each question with reasoning
+- Final score is calculated as: **50% metrics + 50% judgment**
+- Results display shows separate columns for Final Score, Metrics Score, and Judge Score
+- Existing judgments are skipped unless `--force` is used or a different judge model is specified
+
+**Judge Execution Modes:**
+
+- **Serial mode (default):** After testing each quantization, all questions are judged sequentially before moving to the next quantization. Simple and predictable execution.
+
+- **Parallel mode:** Testing and judgment run concurrently at the question level. As each question is tested, it is immediately passed to the judge model in a background task. This allows the test model to continue generating answers while the judge evaluates previous questions. Significantly reduces total execution time when using a remote judge or when the judge model is faster than the test model.
 
 **External Test Suite Format:**
 
@@ -523,30 +556,34 @@ A reference `v1base.json` file is included in the osync directory.
 Display quantization comparison results in formatted tables or export as JSON.
 
 ```bash
-# View results in table format
-osync qcview -F llama3.2.qc.json
+# View results in table format (console)
+osync qcview llama3.2.qc.json
 
-# Export as JSON
-osync qcview -F llama3.2.qc.json -Fo json -O report.json
+# Export table to text file
+osync qcview llama3.2.qc.json -O report.txt
+
+# Export as JSON to file
+osync qcview llama3.2.qc.json -Fo json -O report.json
 
 # View in console as JSON
-osync qcview -F llama3.2.qc.json -Fo json
+osync qcview llama3.2.qc.json -Fo json
 ```
 
 **Table Output:**
 
 Displays color-coded results with:
 - Overall confidence scores (0-100%) for each quantization
+- Component scores: Token Similarity, Logprobs Divergence, Length Consistency, Perplexity
 - Category-by-category breakdown
-- Performance metrics (tokens/sec, speed vs base)
+- Performance metrics (eval/prompt tokens per second)
 - Model metadata (quantization type, disk size)
 
 **Color Coding:**
-- 🟢 Green (95-100%): Excellent quality preservation
-- 🟡 Lime (90-94%): Very good quality
-- 🟡 Yellow (80-89%): Good quality
-- 🟠 Orange (70-79%): Moderate quality loss
-- 🔴 Red (<70%): Significant quality degradation
+- 🟢 Green (90-100%): Excellent quality preservation
+- 🟢 Lime (80-90%): Very good quality
+- 🟡 Yellow (70-80%): Good quality
+- 🟠 Orange (50-70%): Moderate quality loss
+- 🔴 Red (<50%): Significant quality degradation
 
 **JSON Output:**
 
@@ -558,9 +595,9 @@ Complete results including:
 
 **Options:**
 
-- `-F <file>` - Results file to view (required)
+- `<file>` - Results file to view (required, positional argument)
 - `-Fo <format>` - Output format: table or json (default: table)
-- `-O <file>` - Output filename (default: console)
+- `-O <file>` - Output filename (default: console, shows file size on success)
 
 #### Manage (`manage`)
 
@@ -731,6 +768,41 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.1.9
+- **Judge Model Scoring** - Use a second LLM to evaluate quantization quality
+  - `--judge <model>` - Specify local or remote judge model
+  - `--mode serial|parallel` - Serial (after each quant) or parallel (concurrent) execution
+  - Judge evaluates similarity between base and quantized responses (score 1-100)
+  - Final score: 50% metrics + 50% judgment when enabled
+  - Supports local and remote judge models with auto-completion
+  - Results display shows separate Final, Metrics, and Judge scores
+- **True Parallel Judgment Mode** - Testing and judgment now run concurrently at the question level
+  - In `--mode parallel`, each question is immediately judged in the background as soon as testing completes
+  - Test model continues generating answers while judge evaluates previous questions
+  - Significantly reduces total execution time when using a remote judge or fast judge model
+  - Parallel judgment also applies to existing quantizations that need re-judging
+- **Improved Judge Response Handling**
+  - Changed to `/api/chat` endpoint with structured JSON output schema
+  - Added `Reason` field to capture judge's reasoning for each score
+  - Robust parsing with fallbacks for different model response formats
+  - Treats score 0 as score 1 (minimum) for models that ignore instructions
+- **Enhanced Retry Logic**
+  - Fixed retry display to show "Attempt 2/5", "Attempt 3/5" etc. after failures
+  - Added detailed error messages for judge API failures
+  - 5 retry attempts with exponential backoff
+- **Improved qcview Output** - Enhanced file export functionality
+  - Fixed table file output with correct eval/prompt speed formatting
+  - Fixed JSON console output avoiding Spectre.Console markup parsing errors
+  - Added file size display on successful file creation
+  - Positional argument for results file (e.g., `osync qcview results.json`)
+  - Displays judge model info when judgment scoring is available
+- **Bug Fixes**
+  - Fixed judgment skip logic: existing quantizations without judgments or with different judge model are now properly re-judged
+  - Fixed parallel mode not executing judgment concurrently with testing
+- **Documentation Updates**
+  - Updated color coding documentation to match actual thresholds
+  - Clarified qcview command usage and options
 
 v1.1.8
 - **External Test Suite Support** - Load custom test suites from JSON files using `-T path/to/suite.json`

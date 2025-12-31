@@ -217,6 +217,12 @@ namespace osync
 
         [ArgDescription("Force re-run testing for quantizations already present in results file"), ArgShortcut("--force")]
         public bool Force { get; set; }
+
+        [ArgDescription("Judge model for similarity scoring (local model name or http://host:port/model for remote)"), ArgShortcut("--judge")]
+        public string Judge { get; set; }
+
+        [ArgDescription("Judge execution mode: serial (default) or parallel"), ArgShortcut("--mode")]
+        public string JudgeMode { get; set; } = "serial";
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
