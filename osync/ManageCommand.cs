@@ -2444,7 +2444,7 @@ namespace osync
                     modelName += ":latest";
                 }
 
-                // Validate model exists on ollama.com before pulling
+                // Validate model exists using Ollama registry API
                 try
                 {
                     using var httpClient = new HttpClient
@@ -2452,23 +2452,30 @@ namespace osync
                         Timeout = TimeSpan.FromSeconds(10)
                     };
 
-                    // Build the URL based on whether model has a path (user/model) or not (library/model)
-                    string checkUrl;
-                    if (modelName.Contains('/'))
+                    // Parse model name and tag
+                    var parts = modelName.Split(':');
+                    var model = parts[0];
+                    var tag = parts.Length > 1 ? parts[1] : "latest";
+
+                    // Build the registry URL based on whether model has a path (user/model) or not (library/model)
+                    string registryUrl;
+                    if (model.Contains('/'))
                     {
-                        // User model: https://ollama.com/user/model:tag
-                        checkUrl = $"https://ollama.com/{modelName}";
+                        // User model: https://registry.ollama.ai/v2/user/model/manifests/tag
+                        registryUrl = $"https://registry.ollama.ai/v2/{model}/manifests/{tag}";
                     }
                     else
                     {
-                        // Library model: https://ollama.com/library/model:tag
-                        checkUrl = $"https://ollama.com/library/{modelName}";
+                        // Library model: https://registry.ollama.ai/v2/library/model/manifests/tag
+                        registryUrl = $"https://registry.ollama.ai/v2/library/{model}/manifests/{tag}";
                     }
 
-                    Console.WriteLine($"Validating model exists at {checkUrl}...");
-                    var checkResponse = httpClient.GetAsync(checkUrl).Result;
+                    Console.WriteLine($"Validating model exists...");
+                    var checkResponse = httpClient.GetAsync(registryUrl).Result;
+                    var responseContent = checkResponse.Content.ReadAsStringAsync().Result;
 
-                    if (checkResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    // Check for manifest unknown error in JSON response
+                    if (responseContent.Contains("MANIFEST_UNKNOWN") || checkResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
                     {
                         MessageBox.ErrorQuery("Error", $"Model '{modelName}' not found on Ollama.\n\nPlease check the model name and try again.", "OK");
                         return;
@@ -2477,6 +2484,13 @@ namespace osync
                     if (!checkResponse.IsSuccessStatusCode)
                     {
                         MessageBox.ErrorQuery("Error", $"Failed to validate model (HTTP {(int)checkResponse.StatusCode}).\n\nPlease check your internet connection.", "OK");
+                        return;
+                    }
+
+                    // Verify response contains valid manifest (has schemaVersion field)
+                    if (!responseContent.Contains("schemaVersion"))
+                    {
+                        MessageBox.ErrorQuery("Error", $"Invalid response from Ollama registry.\n\nPlease try again later.", "OK");
                         return;
                     }
                 }

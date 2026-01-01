@@ -16,6 +16,8 @@ namespace osync
 
         public int TotalQuestions => _data.Categories.Sum(c => c.Questions.Count);
 
+        public int NumPredict => _data.NumPredict;
+
         public List<TestCategory> GetCategories()
         {
             return _data.Categories;

@@ -223,6 +223,9 @@ namespace osync
 
         [ArgDescription("Judge execution mode: serial (default) or parallel"), ArgShortcut("--mode")]
         public string JudgeMode { get; set; } = "serial";
+
+        [ArgDescription("API timeout in seconds for testing and judgment calls (default: 600)"), ArgShortcut("--timeout")]
+        public int Timeout { get; set; } = 600;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]

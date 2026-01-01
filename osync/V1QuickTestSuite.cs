@@ -9,6 +9,8 @@ namespace osync
 
         public int TotalQuestions => 10;
 
+        public int NumPredict => 4096;
+
         public List<TestCategory> GetCategories()
         {
             return new List<TestCategory>

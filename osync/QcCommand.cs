@@ -25,6 +25,13 @@ namespace osync
         private string? _judgeModelName;
         private bool _judgeEnabled;
 
+        // Cancellation support for graceful shutdown
+        private CancellationTokenSource _cts = new CancellationTokenSource();
+        private bool _cancellationRequested;
+
+        // Track partial quantization being tested (for saving on cancellation)
+        private QuantResult? _currentPartialResult;
+
         // Retry configuration for API calls
         private const int MAX_RETRY_ATTEMPTS = 5;
         private const int RETRY_DELAY_MS = 1000;
@@ -57,9 +64,14 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
         {
             _args = args;
             _baseUrl = baseUrl.TrimEnd('/');
+
+            // Apply default timeout if not set (PowerArgs may not apply default value)
+            if (_args.Timeout <= 0)
+                _args.Timeout = 600;
+
             _httpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromMinutes(10)
+                Timeout = TimeSpan.FromSeconds(_args.Timeout)
             };
 
             // Apply default values if not set (PowerArgs doesn't use property initializers)
@@ -117,7 +129,7 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
 
             _judgeHttpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromMinutes(5)
+                Timeout = TimeSpan.FromSeconds(_args.Timeout)
             };
 
             _judgeEnabled = true;
@@ -174,6 +186,9 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
         /// </summary>
         public async Task<int> ExecuteAsync()
         {
+            // Set up Ctrl+C/Ctrl+Break handler for graceful shutdown
+            Console.CancelKeyPress += OnCancelKeyPress;
+
             try
             {
                 // Initialize test suite
@@ -238,6 +253,12 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 // Test each quantization
                 foreach (var tag in quantTags)
                 {
+                    // Check for cancellation at the start of each quantization
+                    if (_cancellationRequested)
+                    {
+                        _cts.Token.ThrowIfCancellationRequested();
+                    }
+
                     // Construct full model name: use tag as-is if it contains ":", otherwise append to ModelName
                     string modelFullName;
                     string tagForTracking;
@@ -256,13 +277,16 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                         tagForTracking = tag;
                     }
 
-                    // Check if already tested
+                    // Check if already tested (complete or partial)
                     var existingResult = _resultsFile.Results.FirstOrDefault(r => r?.Tag == tagForTracking);
                     if (existingResult != null)
                     {
-                        if (!_args.Force)
+                        // Check if this is a complete result
+                        var isComplete = existingResult.QuestionResults.Count >= _testSuite.TotalQuestions;
+
+                        if (isComplete && !_args.Force)
                         {
-                            AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (already tested, use -force to re-run)[/]");
+                            AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (already tested, use --force to re-run)[/]");
 
                             // Check if this existing result needs judgment
                             if (_judgeEnabled && !existingResult.IsBase && NeedsJudgment(existingResult))
@@ -271,12 +295,26 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                             }
                             continue;
                         }
-                        // Remove existing result to re-run
-                        _resultsFile.Results.Remove(existingResult);
-                        AnsiConsole.MarkupLine($"[yellow]Re-running {modelFullName} (forced)[/]");
+                        else if (!isComplete && !_args.Force)
+                        {
+                            // Partial result - resume testing
+                            var answeredCount = existingResult.QuestionResults.Count;
+                            AnsiConsole.MarkupLine($"[cyan]Resuming {modelFullName} ({answeredCount}/{_testSuite.TotalQuestions} questions completed)[/]");
+                        }
+                        else if (_args.Force)
+                        {
+                            // Remove existing result to re-run
+                            _resultsFile.Results.Remove(existingResult);
+                            existingResult = null;
+                            AnsiConsole.MarkupLine($"[yellow]Re-running {modelFullName} (forced)[/]");
+                        }
                     }
 
-                    AnsiConsole.MarkupLine($"[cyan]Testing quantization: {modelFullName}[/]");
+                    // Only print "Testing quantization" if not resuming
+                    if (existingResult == null)
+                    {
+                        AnsiConsole.MarkupLine($"[cyan]Testing quantization: {modelFullName}[/]");
+                    }
 
                     // Get model metadata
                     var modelInfo = await GetModelInfoAsync(modelFullName);
@@ -319,10 +357,17 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                         baseResultForParallel = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
                     }
 
-                    var (quantResult, judgmentTasks) = await RunTestSuiteAsync(modelFullName, tagForTracking, modelInfo, baseResultForParallel);
+                    // Pass existing partial result for resume functionality
+                    var (quantResult, judgmentTasks) = await RunTestSuiteAsync(modelFullName, tagForTracking, modelInfo, baseResultForParallel, existingResult);
                     if (quantResult != null)
                     {
                         quantResult.IsBase = (tagForTracking == _args.BaseTag);
+
+                        // If resuming, remove old partial result before adding the completed one
+                        if (existingResult != null)
+                        {
+                            _resultsFile.Results.Remove(existingResult);
+                        }
                         _resultsFile.Results.Add(quantResult);
 
                         // Save after each quantization (testing complete, judgment may still be running)
@@ -400,11 +445,106 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                     return 1;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                // Graceful shutdown requested (includes TaskCanceledException)
+                AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                SavePartialResults();
+                return 2;
+            }
+            catch (Exception ex) when (ex.InnerException is OperationCanceledException)
+            {
+                // Cancellation wrapped in another exception (e.g., from Spectre.Console Progress)
+                AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                SavePartialResults();
+                return 2;
+            }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+                SavePartialResults();
                 return 1;
             }
+            finally
+            {
+                Console.CancelKeyPress -= OnCancelKeyPress;
+            }
+        }
+
+        /// <summary>
+        /// Handle Ctrl+C/Ctrl+Break for graceful shutdown
+        /// </summary>
+        private void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs e)
+        {
+            if (_cancellationRequested)
+            {
+                // Second Ctrl+C - force exit
+                AnsiConsole.MarkupLine($"\n[red]Force exiting...[/]");
+                return;
+            }
+
+            // First Ctrl+C - request graceful cancellation
+            e.Cancel = true;
+            _cancellationRequested = true;
+            _cts.Cancel();
+            AnsiConsole.MarkupLine($"\n[yellow]Cancellation requested. Saving partial results... (press Ctrl+C again to force exit)[/]");
+        }
+
+        /// <summary>
+        /// Save partial results if any exist
+        /// </summary>
+        private void SavePartialResults()
+        {
+            if (_resultsFile == null)
+                return;
+
+            // Add partial quantization if it has any results
+            if (_currentPartialResult != null && _currentPartialResult.QuestionResults.Count > 0)
+            {
+                // Check if this quantization is already in results (shouldn't happen, but be safe)
+                var existing = _resultsFile.Results.FirstOrDefault(r => r.Tag == _currentPartialResult.Tag);
+                if (existing == null)
+                {
+                    _resultsFile.Results.Add(_currentPartialResult);
+                }
+                else
+                {
+                    // Merge question results - keep the ones we have
+                    foreach (var qr in _currentPartialResult.QuestionResults)
+                    {
+                        if (!existing.QuestionResults.Any(eq => eq.QuestionId == qr.QuestionId))
+                        {
+                            existing.QuestionResults.Add(qr);
+                        }
+                    }
+                }
+            }
+
+            // Check if we have any results to save
+            if (_resultsFile.Results.Count > 0)
+            {
+                SaveResultsFile();
+                var testedCount = _resultsFile.Results.Count;
+                var partialCount = _resultsFile.Results.Count(r => r.QuestionResults.Count < _testSuite.TotalQuestions);
+                AnsiConsole.MarkupLine($"[dim]Partial results saved to: {GetOutputFilePath()}[/]");
+                if (partialCount > 0)
+                {
+                    AnsiConsole.MarkupLine($"[dim]{testedCount} quantization(s) saved ({partialCount} incomplete)[/]");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"[dim]{testedCount} quantization(s) saved[/]");
+                }
+                AnsiConsole.MarkupLine($"[dim]Resume with the same command to continue from where you left off.[/]");
+            }
+        }
+
+        /// <summary>
+        /// Check if there's a partial quantization being tested (not yet added to Results)
+        /// </summary>
+        private bool HasPartialQuantization()
+        {
+            return _currentPartialResult != null && _currentPartialResult.QuestionResults.Count > 0;
         }
 
         /// <summary>
@@ -416,7 +556,7 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
             {
                 // Use internal v1base (default)
                 _testSuite = new V1BaseTestSuite();
-                AnsiConsole.MarkupLine($"[dim]Using test suite: {_testSuite.Name} ({_testSuite.TotalQuestions} questions)[/]");
+                PrintTestSuiteInfo();
                 return true;
             }
 
@@ -424,14 +564,21 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
             if (_args.TestSuite.Equals("v1quick", StringComparison.OrdinalIgnoreCase))
             {
                 _testSuite = new V1QuickTestSuite();
-                AnsiConsole.MarkupLine($"[dim]Using test suite: {_testSuite.Name} ({_testSuite.TotalQuestions} questions)[/]");
+                PrintTestSuiteInfo();
                 return true;
             }
 
             if (_args.TestSuite.Equals("v1base", StringComparison.OrdinalIgnoreCase))
             {
                 _testSuite = new V1BaseTestSuite();
-                AnsiConsole.MarkupLine($"[dim]Using test suite: {_testSuite.Name} ({_testSuite.TotalQuestions} questions)[/]");
+                PrintTestSuiteInfo();
+                return true;
+            }
+
+            if (_args.TestSuite.Equals("v1code", StringComparison.OrdinalIgnoreCase))
+            {
+                _testSuite = new V1CodeTestSuite();
+                PrintTestSuiteInfo();
                 return true;
             }
 
@@ -467,7 +614,7 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 }
 
                 _testSuite = new ExternalTestSuite(externalData);
-                AnsiConsole.MarkupLine($"[dim]Using external test suite: {_testSuite.Name} ({_testSuite.TotalQuestions} questions)[/]");
+                PrintTestSuiteInfo(isExternal: true);
                 return true;
             }
             catch (Exception ex)
@@ -475,6 +622,16 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 AnsiConsole.MarkupLine($"[red]Error loading test suite: {ex.Message}[/]");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Print test suite information
+        /// </summary>
+        private void PrintTestSuiteInfo(bool isExternal = false)
+        {
+            var prefix = isExternal ? "Using external test suite" : "Using test suite";
+            var numPredictInfo = _testSuite.NumPredict != 4096 ? $", max tokens: {_testSuite.NumPredict}" : "";
+            AnsiConsole.MarkupLine($"[dim]{prefix}: {_testSuite.Name} ({_testSuite.TotalQuestions} questions{numPredictInfo})[/]");
         }
 
         /// <summary>
@@ -649,21 +806,38 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
         /// </summary>
         private async Task<QuantResult?> RunTestSuiteAsync(string modelFullName, string tag, ModelMetadata metadata)
         {
-            var (result, _) = await RunTestSuiteAsync(modelFullName, tag, metadata, null);
+            var (result, _) = await RunTestSuiteAsync(modelFullName, tag, metadata, null, null);
             return result;
         }
 
         /// <summary>
-        /// Run complete test suite on a quantization with optional parallel judgment
+        /// Run complete test suite on a quantization with optional parallel judgment and resume support
         /// Returns tuple of (result, backgroundJudgmentTasks) - caller must await the tasks
         /// </summary>
-        private async Task<(QuantResult? result, List<Task> judgmentTasks)> RunTestSuiteAsync(string modelFullName, string tag, ModelMetadata metadata, QuantResult? baseResult)
+        private async Task<(QuantResult? result, List<Task> judgmentTasks)> RunTestSuiteAsync(string modelFullName, string tag, ModelMetadata metadata, QuantResult? baseResult, QuantResult? existingPartialResult = null)
         {
             var categories = _testSuite.GetCategories();
             var totalQuestions = _testSuite.TotalQuestions;
-            var questionResults = new List<QuestionResult>();
             var parallelJudgmentTasks = new List<Task>();
             int judgmentCompletedCount = 0;
+
+            // Start with existing question results if resuming, otherwise empty list
+            var questionResults = existingPartialResult?.QuestionResults.ToList() ?? new List<QuestionResult>();
+
+            // Build a set of already-answered question IDs for quick lookup
+            var answeredQuestionIds = new HashSet<string>(questionResults.Select(q => q.QuestionId));
+            var skippedCount = answeredQuestionIds.Count;
+
+            // Track current partial result for cancellation save
+            _currentPartialResult = new QuantResult
+            {
+                Tag = tag,
+                DiskSizeBytes = metadata.SizeBytes,
+                Family = metadata.Family,
+                ParameterSize = metadata.ParameterSize,
+                QuantizationType = metadata.QuantizationType,
+                QuestionResults = questionResults
+            };
 
             await AnsiConsole.Progress()
                 .AutoClear(false)
@@ -679,17 +853,43 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 {
                     var testTask = ctx.AddTask($"[cyan]Testing {tag}[/]", maxValue: totalQuestions);
 
+                    // If resuming, set initial progress to already-answered count
+                    if (skippedCount > 0)
+                    {
+                        testTask.Increment(skippedCount);
+                    }
+
                     // Add judgment progress bar in parallel mode with base result
                     ProgressTask? judgeTask = null;
                     if (_judgeEnabled && IsParallelMode() && baseResult != null)
                     {
                         judgeTask = ctx.AddTask($"[magenta]Judging {tag}[/]", maxValue: totalQuestions);
+                        // Also set initial progress for judgment if resuming
+                        if (skippedCount > 0)
+                        {
+                            // Count how many already have judgments
+                            var judgedCount = questionResults.Count(q => q.Judgment != null);
+                            judgeTask.Increment(judgedCount);
+                        }
                     }
 
                     foreach (var category in categories)
                     {
                         foreach (var question in category.Questions)
                         {
+                            // Check for cancellation
+                            if (_cancellationRequested)
+                            {
+                                testTask.Description = $"[yellow]Cancelled {tag}[/]";
+                                _cts.Token.ThrowIfCancellationRequested();
+                            }
+
+                            // Skip already-answered questions
+                            if (answeredQuestionIds.Contains(question.Id))
+                            {
+                                continue;
+                            }
+
                             testTask.Description = $"[cyan]{tag}[/] [dim]{category.Name} {question.QuestionId}/{category.Questions.Count}[/]";
 
                             var result = await RunSingleQuestionAsync(modelFullName, category, question);
@@ -741,6 +941,9 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                         judgeTask.Description = $"[magenta]Judging {tag}[/] [dim]({judgmentCompletedCount}/{parallelJudgmentTasks.Count} running in background)[/]";
                     }
                 });
+
+            // Clear partial result tracking since we're done
+            _currentPartialResult = null;
 
             if (questionResults.Count == 0)
                 return (null, parallelJudgmentTasks);
@@ -835,20 +1038,23 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                     TopK = _args.TopK,
                     RepeatPenalty = _args.RepeatPenalty,
                     FrequencyPenalty = _args.FrequencyPenalty,
-                    NumPredict = 4096
+                    NumPredict = _testSuite.NumPredict
                 }
             };
 
             var jsonContent = JsonSerializer.Serialize(request);
             var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-            var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content);
+            // Check for cancellation before making the request
+            _cts.Token.ThrowIfCancellationRequested();
+
+            var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content, _cts.Token);
             if (!response.IsSuccessStatusCode)
             {
                 return null; // Will trigger retry
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync();
+            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
             var result = JsonSerializer.Deserialize<OllamaGenerateResponse>(responseJson);
 
             if (result == null)
@@ -1186,14 +1392,17 @@ Evaluate the similarity between these two answers.";
             var jsonContent = JsonSerializer.Serialize(request);
             var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-            var response = await _judgeHttpClient.PostAsync($"{_judgeBaseUrl}/api/chat", content);
+            // Check for cancellation before making the request
+            _cts.Token.ThrowIfCancellationRequested();
+
+            var response = await _judgeHttpClient.PostAsync($"{_judgeBaseUrl}/api/chat", content, _cts.Token);
             if (!response.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync();
+                var errorBody = await response.Content.ReadAsStringAsync(_cts.Token);
                 throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {errorBody}");
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync();
+            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
             using var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
 

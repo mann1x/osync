@@ -476,6 +476,23 @@ osync qc -M llama3.2 -Q q8_0,q6_k
 osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
 ```
 
+**Resume Support:**
+
+Testing can be interrupted with Ctrl+C and resumed later:
+```bash
+# Start testing (press Ctrl+C to save partial results and exit)
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0
+
+# Resume from where you left off
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0
+```
+
+When resuming:
+- Already-completed quantizations are skipped
+- Partially-tested quantizations continue from the last saved question
+- Missing judgments are automatically detected and run
+- Progress bars show resumed position
+
 **Options:**
 
 - `-M <name>` - Model name without tag (required)
@@ -493,6 +510,7 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
 - `--force` - Force re-run testing for quantizations already present in results file
 - `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
 - `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
+- `--timeout <seconds>` - API timeout in seconds for testing and judgment calls (default: 600)
 
 **Judge Scoring:**
 
@@ -525,12 +543,18 @@ When judgment scoring is enabled:
 
 - **Parallel mode:** Testing and judgment run concurrently at the question level. As each question is tested, it is immediately passed to the judge model in a background task. This allows the test model to continue generating answers while the judge evaluates previous questions. Significantly reduces total execution time when using a remote judge or when the judge model is faster than the test model.
 
+**Built-in Test Suites:**
+- `v1base` (default) - 50 questions across Reasoning, Math, Finance, Technology, Science
+- `v1quick` - 10 questions (subset of v1base for quick testing)
+- `v1code` - 50 coding questions across Python, C++, C#, TypeScript, Rust (8192 max tokens)
+
 **External Test Suite Format:**
 
 Create custom test suites using JSON files with the following structure:
 ```json
 {
   "name": "my-custom-suite",
+  "numPredict": 4096,
   "categories": [
     {
       "id": 1,
@@ -547,9 +571,11 @@ Create custom test suites using JSON files with the following structure:
 }
 ```
 
+The `numPredict` property controls the maximum tokens generated per response (default: 4096). Use higher values for coding or detailed answers.
+
 Use with: `osync qc -M model -Q q4_k_m -T my-custom-suite.json`
 
-A reference `v1base.json` file is included in the osync directory.
+Reference files `v1base.json` and `v1code.json` are included in the osync directory.
 
 #### View Quantization Results (`qcview`)
 
@@ -768,6 +794,42 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.0
+- **Coding Test Suite** - New `v1code` test suite for evaluating code generation quality
+  - 50 challenging coding questions across 5 languages: Python, C++, C#, TypeScript, Rust
+  - Double token output limit (8192) for longer code responses
+  - Questions include instruction to limit response size
+  - Available as `-T v1code` or via external `v1code.json` file
+- **Configurable Token Output** - Test suites now support custom `numPredict` values
+  - Each test suite can specify its own maximum token output
+  - External JSON test suites support `numPredict` property (default: 4096)
+  - Displayed in test suite info when non-default value is used
+- **Improved Model Existence Check** - Pull command now uses Ollama registry API for faster, more reliable model validation
+  - Uses `registry.ollama.ai/v2/` manifest endpoint instead of HTML scraping
+  - Properly handles both library models and user models
+  - Faster response times and more accurate error messages
+- **True Independent Parallel Judgment** - Testing continues to next quantization while judgment runs in background
+  - Testing no longer waits for judgment to complete before moving to next quantization
+  - Background judgment tasks tracked and awaited at the end with progress display
+  - Progress bars show real-time status for both testing and judgment
+- **Improved Progress Display** - Better visibility into parallel operations
+  - Dual progress bars during testing (Testing + Judging) in parallel mode
+  - Background judgment status shown after each quantization completes
+  - Final wait screen shows progress for all pending judgment tasks
+- **Configurable API Timeout** - Added `--timeout` argument for testing and judgment API calls
+  - Default increased from 300 to 600 seconds for longer code generation
+  - Configurable via `--timeout <seconds>` argument
+  - Applies to both test model and judge model API calls
+- **Resume Support** - Gracefully handle interruptions and resume from where you left off
+  - Press Ctrl+C to save partial results and exit cleanly
+  - Re-run the same command to resume testing from the last saved question
+  - Partial quantization results are preserved in the JSON file
+  - Progress bar shows resumed position when continuing
+  - Missing judgments are automatically detected and re-run on resume
+- **UI Improvements**
+  - Unified color scheme: lime for good scores (80%+) and performance above 100%
+  - Orange color for performance below 100%
 
 v1.1.9
 - **Judge Model Scoring** - Use a second LLM to evaluate quantization quality

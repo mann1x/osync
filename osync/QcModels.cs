@@ -32,6 +32,7 @@ namespace osync
     public class ExternalTestSuiteJson
     {
         public string Name { get; set; } = string.Empty;
+        public int NumPredict { get; set; } = 4096;
         public List<TestCategory> Categories { get; set; } = new List<TestCategory>();
     }
 

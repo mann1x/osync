@@ -1,5 +1,6 @@
 {
   "name": "v1base",
+  "numPredict": 8192,
   "categories": [
     {
       "id": 1,
