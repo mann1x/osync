@@ -511,6 +511,7 @@ When resuming:
 - `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
 - `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
 - `--timeout <seconds>` - API timeout in seconds for testing and judgment calls (default: 600)
+- `--verbose` - Show judgment details (question ID, score, reason) for each judged question
 
 **Judge Scoring:**
 
@@ -576,6 +577,26 @@ The `numPredict` property controls the maximum tokens generated per response (de
 Use with: `osync qc -M model -Q q4_k_m -T my-custom-suite.json`
 
 Reference files `v1base.json` and `v1code.json` are included in the osync directory.
+
+The recommended model to use as a judge is `gemma3:12b`, it is advisable to use a large context size (6k for `v1base` and 12k for `v1code`).
+It's also recommended to run the `qc` command with the `--verbose` argument to verify the scoring and reason given corresponds to the expected beahviour:
+```
+Judging UD-IQ3_XXS Q1-1 Score: 92% (1/50 2%)
+    A and B match: Both responses provide a complete, thread-safe LRU cache implementation in Python using `OrderedDict` and `threading.RLock`. They both include comprehensive docstrings, error
+    handling, and a full set of methods (get, put, delete, clear, size, etc.). The core logic for managing the cache, including eviction and thread safety, is nearly identical. The primary differences
+    are in the formatting of the docstrings and some minor wording variations in the explanations. Both responses also include example usage and testing code. The code itself is very similar, with
+    only minor differences in variable names and comments. Overall, the responses demonstrate a very high degree of similarity in terms of content, approach, and functionality.
+Judging UD-IQ3_XXS Q1-2 Score: 75% (2/50 4%)
+    A and B match: Both responses provide a Python async web scraper using aiohttp, incorporating concurrent crawling, rate limiting, retries, and CSS selector-based data extraction. They both utilize
+    asyncio, aiohttp, logging, and dataclasses. Both include comprehensive error handling and logging. However, they differ in their implementation details. Response A uses a semaphore for concurrency
+    control and a class-based structure for the scraper, while Response B introduces a separate RateLimiter class and a more streamlined approach to data extraction. Response A's retry logic is more
+    detailed, including random jitter, while Response B's is simpler. Response B also includes an advanced scraper with custom selectors.
+Judging UD-IQ3_XXS Q1-3 Score: 75% (3/50 6%)
+    A and B differ: Both responses implement a retry decorator factory with similar functionality (configurable max attempts, delay strategies, exception filtering, and support for both sync and async
+    functions). However, they differ significantly in their implementation details and structure. Response A uses a class-based approach with a `RetryError` exception and separate `_calculate_delay`
+    function. It also includes convenience decorators for common retry patterns. Response B uses a dataclass for configuration and an Enum for delay strategies, making it more structured. It also has
+    separate functions for sync and async decorators. While both achieve the same goal, the code organization and specific techniques used are quite different, leading to a noticeable difference in
+```
 
 #### View Quantization Results (`qcview`)
 
@@ -794,6 +815,25 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.2
+- **Improved Judgment Prompt Format** - Better compatibility with more models
+  - Instructions now in both system prompt and user message for redundancy
+  - Clear text markers for RESPONSE A and RESPONSE B instead of JSON encoding
+  - Question included for context with clear delimiters
+  - Explicit rules to prevent models from judging quality/correctness instead of similarity
+- **Verbose Judgment Output** - New `--verbose` flag to show judgment details
+  - Displays question ID, score (color-coded), and first 4 lines of reason
+  - Works with both serial and parallel judgment modes
+  - Helps debug and understand judge model scoring
+- **Fixed Parallel Verbose Output** - Verbose output now displays during parallel judgment execution
+  - Previously showed all results after completion; now shows each result as it completes
+- **Fixed Serial Verbose Progress** - Progress bar now displays alongside verbose output in serial mode
+- **Improved Cancellation Handling** - Ctrl+C now immediately stops judgment without retrying
+  - Cancellation exceptions are no longer retried 5 times
+  - Judgment loop checks for cancellation before each question
+- **Missing Reason Retry** - Judge API retries up to 5 times when response contains score but no reason
+  - Warning displayed if reason still missing after all retries
 
 v1.2.1
 - **Bug Fix: Base Model Detection** - Fixed issue where base model wasn't correctly identified when using full model names

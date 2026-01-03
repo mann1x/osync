@@ -36,29 +36,43 @@ namespace osync
         private const int MAX_RETRY_ATTEMPTS = 5;
         private const int RETRY_DELAY_MS = 1000;
 
-        // System prompt for the judge model
-        private const string JUDGE_SYSTEM_PROMPT = @"You are evaluating the similarity between two LLM responses to the same question.
+        // System prompt for the judge model - includes full instructions for redundancy
+        private const string JUDGE_SYSTEM_PROMPT = @"You are a SIMILARITY JUDGE. You compare two AI-generated responses (A and B) and measure how SIMILAR they are to each other.
 
-Compare the ""quantized"" response against the ""base"" response and provide a similarity score.
+YOUR TASK: Score how much RESPONSE A and RESPONSE B match each other (1-100).
 
-CRITICAL: Your score MUST be an integer between 1 and 100. Never use 0 or negative numbers.
+SCORING SCALE:
+100 = Identical content and approach
+95-99 = Nearly identical content and approach
+90-94 = Very similar content, nearly identical approach
+85-89 = Very similar, minor differences
+80-84 = Very similar, noticeable differences
+75-79 = Very similar, significant differences
+70-74 = Moderately similar, minor differences
+65-69 = Moderately similar, noticeable differences
+60-64 = Moderately similar, significant differences
+51-59 = Some overlap, minor differences
+41-50 = Some overlap, noticeable differences
+30-40 = Some overlap, significant differences
+21-29 = Completely different responses, similar content
+11-20 = Completely different responses
+1-10 = Completely different responses, gibberish content
 
-Scoring criteria:
-- 90-100: Responses are essentially identical in meaning and correctness
-- 70-89: Minor differences but same core answer and logic
-- 50-69: Noticeable differences but still reasonably similar
-- 30-49: Significant differences in answer or approach
-- 10-29: Fundamentally different or incorrect compared to base
-- 1-9: Completely unrelated or nonsensical responses
+CRITICAL RULES:
+- You are measuring SIMILARITY between A and B, NOT quality or correctness
+- If A and B both contain the same code/content = HIGH score (they match!)
+- If A and B contain different code/content = LOW score (they differ)
+- Do NOT judge if the responses are correct, well-written, or valid
+- Do NOT mention JSON, language proficiency, or format compliance
 
-Important:
-- Do NOT evaluate correctness of the base answer - only compare similarity
-- Verbosity differences are acceptable if the core answer is the same
-- Focus on whether the quantized version provides equivalent information
-- Even if both responses are poor quality, rate their SIMILARITY to each other
-- If responses are identical gibberish, they are still 90-100 similar
+REASON FORMAT: Start with 'A and B match:' or 'A and B differ:' then explain what each contains and why they are similar or different.";
 
-Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluation.";
+        private const string JUDGE_USER_INSTRUCTIONS = @"Compare RESPONSE A and RESPONSE B below. Score their SIMILARITY (1-100).
+
+Remember:
+- HIGH score = A and B contain similar content
+- LOW score = A and B contain different content
+- Do NOT judge quality, correctness, or format";
 
         public QcCommand(QcArgs args, string baseUrl = "http://localhost:11434")
         {
@@ -960,7 +974,6 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                                     var questionToJudge = result;
                                     var baseToCompare = baseQuestion;
                                     var capturedJudgeTask = judgeTask;
-
                                     var judgmentTask = Task.Run(async () =>
                                     {
                                         var judgment = await JudgeQuestionAsync(baseToCompare, questionToJudge);
@@ -1017,6 +1030,12 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
 
             for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++)
             {
+                // Check for cancellation before each attempt
+                if (_cancellationRequested)
+                {
+                    _cts.Token.ThrowIfCancellationRequested();
+                }
+
                 try
                 {
                     var result = await operation();
@@ -1025,6 +1044,16 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
 
                     // Result was null, will retry
                     lastException = null;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Don't retry on cancellation - rethrow immediately
+                    throw;
+                }
+                catch (Exception ex) when (ex.InnerException is OperationCanceledException)
+                {
+                    // Don't retry on wrapped cancellation - rethrow immediately
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1156,6 +1185,76 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
         }
 
         /// <summary>
+        /// Write verbose judgment output to console with progress indicator
+        /// </summary>
+        private static readonly object _verboseOutputLock = new object();
+        private int _verboseCompletedCount = 0;
+        private int _verboseTotalCount = 0;
+
+        private string _verboseCurrentTag = "";
+
+        private void WriteVerboseJudgment(string questionId, JudgmentResult judgment)
+        {
+            var scoreColor = judgment.Score >= 80 ? "lime" : judgment.Score >= 50 ? "yellow" : "red";
+
+            lock (_verboseOutputLock)
+            {
+                var completed = Interlocked.Increment(ref _verboseCompletedCount);
+                var total = _verboseTotalCount;
+                var percent = total > 0 ? (completed * 100 / total) : 0;
+
+                AnsiConsole.Markup($"[magenta]Judging {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Score: [{scoreColor}]{judgment.Score}%[/] [dim]({completed}/{total} {percent}%)[/]");
+                AnsiConsole.WriteLine();
+
+                if (string.IsNullOrWhiteSpace(judgment.Reason))
+                {
+                    AnsiConsole.MarkupLine("[dim]    (no reason provided)[/]");
+                }
+                else
+                {
+                    // Word-wrap the reason into 4 lines at console width (minus indent)
+                    var consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+                    var lineWidth = consoleWidth - 4; // 4 chars for indent
+                    var words = judgment.Reason.Replace("\r", "").Replace("\n", " ").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var lines = new List<string>();
+                    var currentLine = new StringBuilder();
+
+                    foreach (var word in words)
+                    {
+                        if (currentLine.Length + word.Length + 1 > lineWidth)
+                        {
+                            if (currentLine.Length > 0)
+                            {
+                                lines.Add(currentLine.ToString());
+                                if (lines.Count >= 4) break;
+                                currentLine.Clear();
+                            }
+                        }
+                        if (currentLine.Length > 0) currentLine.Append(' ');
+                        currentLine.Append(word);
+                    }
+
+                    if (currentLine.Length > 0 && lines.Count < 4)
+                    {
+                        lines.Add(currentLine.ToString());
+                    }
+
+                    foreach (var line in lines)
+                    {
+                        AnsiConsole.MarkupLine($"[dim]    {Markup.Escape(line)}[/]");
+                    }
+                }
+            }
+        }
+
+        private void ResetVerboseProgress(int total, string tag)
+        {
+            _verboseCompletedCount = 0;
+            _verboseTotalCount = total;
+            _verboseCurrentTag = tag;
+        }
+
+        /// <summary>
         /// Run judgment scoring for a quantization (serial mode)
         /// </summary>
         private async Task RunJudgmentSerialAsync(QuantResult quantResult, QuantResult baseResult)
@@ -1168,57 +1267,114 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
             var judgedCount = 0;
             var skippedCount = 0;
 
-            await AnsiConsole.Progress()
-                .AutoClear(false)
-                .Columns(new ProgressColumn[]
+            // In verbose mode, skip progress bar and just show verbose output with text progress
+            if (_args.Verbose)
+            {
+                // Count questions that need judging
+                var questionsToJudge = quantResult.QuestionResults.Count(q =>
                 {
-                    new TaskDescriptionColumn(),
-                    new ProgressBarColumn(),
-                    new PercentageColumn(),
-                    new ElapsedTimeColumn(),
-                    new SpinnerColumn()
-                })
-                .StartAsync(async ctx =>
-                {
-                    var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: quantResult.QuestionResults.Count);
+                    var baseQ = baseResult.QuestionResults.FirstOrDefault(b => b.QuestionId == q.QuestionId);
+                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModel != _judgeModelName || _args.Force);
+                });
+                ResetVerboseProgress(questionsToJudge, quantResult.Tag);
 
-                    foreach (var quantQuestion in quantResult.QuestionResults)
+                foreach (var quantQuestion in quantResult.QuestionResults)
+                {
+                    // Check for cancellation
+                    if (_cancellationRequested)
                     {
-                        // Find corresponding base question
-                        var baseQuestion = baseResult.QuestionResults
-                            .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
-
-                        if (baseQuestion == null)
-                        {
-                            task.Increment(1);
-                            continue;
-                        }
-
-                        // Check if already judged with same model
-                        if (quantQuestion.Judgment != null &&
-                            quantQuestion.Judgment.JudgeModel == _judgeModelName &&
-                            !_args.Force)
-                        {
-                            skippedCount++;
-                            task.Increment(1);
-                            continue;
-                        }
-
-                        task.Description = $"[magenta]Judging {quantResult.Tag}[/] [dim]{quantQuestion.Category} Q{quantQuestion.QuestionId}[/]";
-
-                        // Run judgment
-                        var judgment = await JudgeQuestionAsync(baseQuestion, quantQuestion);
-                        if (judgment != null)
-                        {
-                            quantQuestion.Judgment = judgment;
-                            judgedCount++;
-                        }
-
-                        task.Increment(1);
+                        _cts.Token.ThrowIfCancellationRequested();
                     }
 
-                    task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
-                });
+                    // Find corresponding base question
+                    var baseQuestion = baseResult.QuestionResults
+                        .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                    if (baseQuestion == null)
+                        continue;
+
+                    // Check if already judged with same model
+                    if (quantQuestion.Judgment != null &&
+                        quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                        !_args.Force)
+                    {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    // Run judgment
+                    var judgment = await JudgeQuestionAsync(baseQuestion, quantQuestion);
+                    if (judgment != null)
+                    {
+                        quantQuestion.Judgment = judgment;
+                        judgedCount++;
+                        WriteVerboseJudgment(quantQuestion.QuestionId, judgment);
+                    }
+                }
+
+                AnsiConsole.MarkupLine($"[green]✓ Judging {quantResult.Tag} complete[/]");
+            }
+            else
+            {
+                await AnsiConsole.Progress()
+                    .AutoClear(false)
+                    .Columns(new ProgressColumn[]
+                    {
+                        new TaskDescriptionColumn(),
+                        new ProgressBarColumn(),
+                        new PercentageColumn(),
+                        new ElapsedTimeColumn(),
+                        new SpinnerColumn()
+                    })
+                    .StartAsync(async ctx =>
+                    {
+                        var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: quantResult.QuestionResults.Count);
+
+                        foreach (var quantQuestion in quantResult.QuestionResults)
+                        {
+                            // Check for cancellation
+                            if (_cancellationRequested)
+                            {
+                                task.Description = $"[yellow]Cancelled {quantResult.Tag}[/]";
+                                _cts.Token.ThrowIfCancellationRequested();
+                            }
+
+                            // Find corresponding base question
+                            var baseQuestion = baseResult.QuestionResults
+                                .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                            if (baseQuestion == null)
+                            {
+                                task.Increment(1);
+                                continue;
+                            }
+
+                            // Check if already judged with same model
+                            if (quantQuestion.Judgment != null &&
+                                quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                                !_args.Force)
+                            {
+                                skippedCount++;
+                                task.Increment(1);
+                                continue;
+                            }
+
+                            task.Description = $"[magenta]Judging {quantResult.Tag}[/] [dim]{quantQuestion.Category} Q{quantQuestion.QuestionId}[/]";
+
+                            // Run judgment
+                            var judgment = await JudgeQuestionAsync(baseQuestion, quantQuestion);
+                            if (judgment != null)
+                            {
+                                quantQuestion.Judgment = judgment;
+                                judgedCount++;
+                            }
+
+                            task.Increment(1);
+                        }
+
+                        task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
+                    });
+            }
 
             AnsiConsole.MarkupLine($"[dim]Judged: {judgedCount}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
@@ -1268,34 +1424,56 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
 
             int completedCount = 0;
 
-            await AnsiConsole.Progress()
-                .AutoClear(false)
-                .Columns(new ProgressColumn[]
-                {
-                    new TaskDescriptionColumn(),
-                    new ProgressBarColumn(),
-                    new PercentageColumn(),
-                    new ElapsedTimeColumn(),
-                    new SpinnerColumn()
-                })
-                .StartAsync(async ctx =>
-                {
-                    var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: questionsToJudge.Count);
+            // In verbose mode, skip progress bar and just show verbose output with text progress
+            if (_args.Verbose)
+            {
+                ResetVerboseProgress(questionsToJudge.Count, quantResult.Tag);
 
-                    var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                {
+                    var judgment = await JudgeQuestionAsync(pair.baseQuestion, pair.quantQuestion);
+                    if (judgment != null)
                     {
-                        var judgment = await JudgeQuestionAsync(pair.baseQuestion, pair.quantQuestion);
-                        if (judgment != null)
-                        {
-                            pair.quantQuestion.Judgment = judgment;
-                        }
-                        Interlocked.Increment(ref completedCount);
-                        task.Increment(1);
-                    })).ToList();
+                        pair.quantQuestion.Judgment = judgment;
+                        WriteVerboseJudgment(pair.quantQuestion.QuestionId, judgment);
+                    }
+                    Interlocked.Increment(ref completedCount);
+                })).ToList();
 
-                    await Task.WhenAll(judgmentTasks);
-                    task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
-                });
+                await Task.WhenAll(judgmentTasks);
+                AnsiConsole.MarkupLine($"[green]✓ Judging {quantResult.Tag} complete[/]");
+            }
+            else
+            {
+                await AnsiConsole.Progress()
+                    .AutoClear(false)
+                    .Columns(new ProgressColumn[]
+                    {
+                        new TaskDescriptionColumn(),
+                        new ProgressBarColumn(),
+                        new PercentageColumn(),
+                        new ElapsedTimeColumn(),
+                        new SpinnerColumn()
+                    })
+                    .StartAsync(async ctx =>
+                    {
+                        var task = ctx.AddTask($"[magenta]Judging {quantResult.Tag}[/]", maxValue: questionsToJudge.Count);
+
+                        var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                        {
+                            var judgment = await JudgeQuestionAsync(pair.baseQuestion, pair.quantQuestion);
+                            if (judgment != null)
+                            {
+                                pair.quantQuestion.Judgment = judgment;
+                            }
+                            Interlocked.Increment(ref completedCount);
+                            task.Increment(1);
+                        })).ToList();
+
+                        await Task.WhenAll(judgmentTasks);
+                        task.Description = $"[green]✓ Judging {quantResult.Tag} complete[/]";
+                    });
+            }
 
             AnsiConsole.MarkupLine($"[dim]Judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
@@ -1389,22 +1567,62 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
             if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
                 return null;
 
-            // Build the judgment prompt
-            var userMessage = $@"Question: {baseQuestion.Question}
+            const int maxReasonRetries = 5;
 
-Base answer:
+            for (int attempt = 1; attempt <= maxReasonRetries; attempt++)
+            {
+                var result = await JudgeQuestionSingleAttemptAsync(baseQuestion, quantQuestion);
+                if (result == null)
+                    return null;
+
+                // Check if reason is present
+                if (!string.IsNullOrWhiteSpace(result.Reason))
+                    return result;
+
+                // Reason is missing, retry if we have attempts left
+                if (attempt < maxReasonRetries)
+                {
+                    await Task.Delay(500, _cts.Token); // Brief delay before retry
+                    continue;
+                }
+
+                // After all retries, return result with warning
+                AnsiConsole.MarkupLine($"[yellow]Warning: Judge returned score without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
+                return result;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Single attempt at judging a question (called by retry wrapper)
+        /// </summary>
+        private async Task<JudgmentResult?> JudgeQuestionSingleAttemptAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
+                return null;
+
+            // Build the judgment prompt with clear text markers (not JSON - models understand this better)
+            var userMessage = $@"{JUDGE_USER_INSTRUCTIONS}
+
+--- QUESTION (for context only) ---
+{baseQuestion.Question}
+--- END QUESTION ---
+
+--- RESPONSE A ---
 {baseQuestion.Answer}
+--- END RESPONSE A ---
 
-Quantized answer:
+--- RESPONSE B ---
 {quantQuestion.Answer}
+--- END RESPONSE B ---
 
-Evaluate the similarity between these two answers.";
+How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
 
-            // Use /api/chat with structured output schema
             var request = new
             {
                 model = _judgeModelName,
-                messages = new[]
+                messages = new object[]
                 {
                     new { role = "system", content = JUDGE_SYSTEM_PROMPT },
                     new { role = "user", content = userMessage }
@@ -1423,7 +1641,7 @@ Evaluate the similarity between these two answers.";
                         reason = new
                         {
                             type = "string",
-                            description = "Brief explanation for the score"
+                            description = "Comparison explanation starting with 'A and B match:' or 'A and B differ:'"
                         }
                     },
                     required = new[] { "score", "reason" }
@@ -1493,7 +1711,7 @@ Evaluate the similarity between these two answers.";
                     }
                 }
 
-                // Try "reason" field first, then "response" as fallback
+                // Try "reason" field first, then "response" or "explanation" as fallback
                 if (scoreRoot.TryGetProperty("reason", out var reasonElement))
                 {
                     reason = reasonElement.GetString() ?? "";
@@ -1501,6 +1719,10 @@ Evaluate the similarity between these two answers.";
                 else if (scoreRoot.TryGetProperty("response", out var respElement))
                 {
                     reason = respElement.GetString() ?? "";
+                }
+                else if (scoreRoot.TryGetProperty("explanation", out var explElement))
+                {
+                    reason = explElement.GetString() ?? "";
                 }
             }
             catch
@@ -1515,10 +1737,15 @@ Evaluate the similarity between these two answers.";
                     }
                 }
 
-                var reasonMatch = Regex.Match(responseText, @"""?(?:reason|response)""?\s*:\s*""([^""]+)""");
+                // Try to match reason with escaped quotes and newlines
+                var reasonMatch = Regex.Match(responseText, @"""?(?:reason|response|explanation)""?\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
                 if (reasonMatch.Success)
                 {
-                    reason = reasonMatch.Groups[1].Value;
+                    reason = reasonMatch.Groups[1].Value
+                        .Replace("\\n", "\n")
+                        .Replace("\\r", "\r")
+                        .Replace("\\\"", "\"")
+                        .Replace("\\\\", "\\");
                 }
             }
 

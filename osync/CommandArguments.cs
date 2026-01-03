@@ -226,6 +226,9 @@ namespace osync
 
         [ArgDescription("API timeout in seconds for testing and judgment calls (default: 600)"), ArgShortcut("--timeout")]
         public int Timeout { get; set; } = 600;
+
+        [ArgDescription("Verbose output: show judgment details (question ID, score, reason)"), ArgShortcut("--verbose")]
+        public bool Verbose { get; set; }
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
