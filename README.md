@@ -795,6 +795,19 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.2.1
+- **Bug Fix: Base Model Detection** - Fixed issue where base model wasn't correctly identified when using full model names
+  - Base tag is now properly normalized when specified with full path (e.g., `user/model:tag`)
+  - Existing results files with missing `IsBase` flag are automatically repaired on load
+  - Judgment now correctly runs for quantizations that need it
+- **Bug Fix: Output Filename Sanitization** - Model names with `/` or `\` are now converted to `-` in default output filename
+  - Prevents file path issues when model name contains directory separators
+- **Improved Startup Output** - Output file path is now displayed early in the execution
+  - Shows right after loading test suite, before judge model verification
+- **Cancellation Improvements** - Better handling of Ctrl+C during API calls
+  - Cancellation token now passed to HTTP requests for immediate cancellation
+  - Wrapped cancellation exceptions are properly detected
+
 v1.2.0
 - **Coding Test Suite** - New `v1code` test suite for evaluating code generation quality
   - 50 challenging coding questions across 5 languages: Python, C++, C#, TypeScript, Rust

@@ -199,6 +199,9 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 if (!await InitializeResultsFileAsync())
                     return 1;
 
+                // Print output file path
+                AnsiConsole.MarkupLine($"[dim]Output file: {GetOutputFilePath()}[/]");
+
                 // Parse quantization tags to test
                 var quantTags = _args.Quants.Split(',', StringSplitOptions.RemoveEmptyEntries)
                     .Select(q => q.Trim())
@@ -236,6 +239,11 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                 {
                     // No base in results and no -B specified, default to fp16
                     _args.BaseTag = "fp16";
+                }
+                else if (_args.BaseTag.Contains(':'))
+                {
+                    // BaseTag contains a full model name, extract just the tag portion for comparison
+                    _args.BaseTag = _args.BaseTag.Substring(_args.BaseTag.LastIndexOf(':') + 1);
                 }
 
                 // Ensure base tag is included if not already present and no base exists yet
@@ -548,6 +556,39 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
         }
 
         /// <summary>
+        /// Repair IsBase flag for existing results files that may have incorrect base marking
+        /// </summary>
+        private void RepairBaseFlag()
+        {
+            if (_resultsFile == null || _resultsFile.Results.Count == 0)
+                return;
+
+            // Check if there's already a base marked
+            var existingBase = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
+            if (existingBase != null)
+                return; // Already have a base, no repair needed
+
+            // No base marked - try to identify and fix
+            // Extract the base tag from _args.BaseTag (normalize if it contains full model name)
+            var baseTag = _args.BaseTag;
+            if (!string.IsNullOrEmpty(baseTag) && baseTag.Contains(':'))
+            {
+                baseTag = baseTag.Substring(baseTag.LastIndexOf(':') + 1);
+            }
+
+            if (string.IsNullOrEmpty(baseTag))
+                return;
+
+            // Find the matching result and mark it as base
+            var matchingResult = _resultsFile.Results.FirstOrDefault(r => r.Tag == baseTag);
+            if (matchingResult != null)
+            {
+                matchingResult.IsBase = true;
+                AnsiConsole.MarkupLine($"[dim]Repaired base flag for: {matchingResult.Tag}[/]");
+            }
+        }
+
+        /// <summary>
         /// Load test suite (internal v1base or external JSON)
         /// </summary>
         private bool LoadTestSuite()
@@ -666,6 +707,10 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
                     }
 
                     AnsiConsole.MarkupLine($"[dim]Loaded existing results file ({_resultsFile.Results.Count} quantizations tested)[/]");
+
+                    // Repair IsBase flag if needed (for files created before this fix)
+                    RepairBaseFlag();
+
                     return true;
                 }
                 catch (Exception ex)
@@ -703,7 +748,9 @@ Provide your score (1-100, NEVER 0) and a brief reason explaining your evaluatio
             if (!string.IsNullOrEmpty(_args.OutputFile))
                 return _args.OutputFile;
 
-            return $"{_args.ModelName}.qc.json";
+            // Sanitize model name for filename - replace / and \ with -
+            var sanitizedName = _args.ModelName.Replace('/', '-').Replace('\\', '-');
+            return $"{sanitizedName}.qc.json";
         }
 
         /// <summary>

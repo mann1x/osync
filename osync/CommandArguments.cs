@@ -194,7 +194,7 @@ namespace osync
         [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated)"), ArgShortcut("-Q")]
         public string Quants { get; set; }
 
-        [ArgDescription("Test suite: v1base (50 questions), v1quick (10 questions), or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
+        [ArgDescription("Test suite: v1base (50 questions), v1quick (v1base with 10 questions), v1code (50 questions coding-focused) or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
         public string TestSuite { get; set; }
 
         [ArgDescription("Model temperature (default: 0.0)"), ArgShortcut("-Te")]
