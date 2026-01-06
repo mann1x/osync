@@ -343,4 +343,3 @@ healthchecksdb
 *.bak
 /osync/.claude
 .claude
-CLAUDE.MD
