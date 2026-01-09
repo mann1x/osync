@@ -18,6 +18,8 @@ namespace osync
 
         public int NumPredict => _data.NumPredict;
 
+        public int ContextLength => _data.ContextLength;
+
         public List<TestCategory> GetCategories()
         {
             return _data.Categories;

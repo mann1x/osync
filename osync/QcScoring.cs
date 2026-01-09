@@ -90,6 +90,7 @@ namespace osync
 
             // Calculate per-question scores
             var categoryScores = new Dictionary<string, List<double>>();
+            var categoryJudgmentScores = new Dictionary<string, List<double>>();
             double totalConfidence = 0;
             double totalJudgment = 0;
             int questionCount = 0;
@@ -106,7 +107,7 @@ namespace osync
                 var questionScore = CalculateQuestionScore(baseQuestion, quantQuestion);
                 scoreResult.QuestionScores.Add(questionScore);
 
-                // Accumulate category scores
+                // Accumulate category scores (metrics)
                 if (!categoryScores.ContainsKey(questionScore.Category))
                     categoryScores[questionScore.Category] = new List<double>();
 
@@ -114,18 +115,30 @@ namespace osync
                 totalConfidence += questionScore.OverallConfidenceScore;
                 questionCount++;
 
-                // Accumulate judgment scores if available
+                // Accumulate judgment scores if available (both total and per-category)
                 if (questionScore.JudgmentScore.HasValue)
                 {
                     totalJudgment += questionScore.JudgmentScore.Value;
                     judgmentCount++;
+
+                    // Accumulate per-category judgment scores
+                    if (!categoryJudgmentScores.ContainsKey(questionScore.Category))
+                        categoryJudgmentScores[questionScore.Category] = new List<double>();
+
+                    categoryJudgmentScores[questionScore.Category].Add(questionScore.JudgmentScore.Value);
                 }
             }
 
-            // Calculate category averages
+            // Calculate category averages (metrics)
             foreach (var category in categoryScores)
             {
                 scoreResult.CategoryScores[category.Key] = category.Value.Average();
+            }
+
+            // Calculate category averages (judgment)
+            foreach (var category in categoryJudgmentScores)
+            {
+                scoreResult.CategoryJudgmentScores[category.Key] = category.Value.Average();
             }
 
             // Calculate overall confidence score (metrics only)

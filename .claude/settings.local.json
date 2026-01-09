@@ -1,11 +1,21 @@
 {
-  "model": "opus",
   "permissions": {
     "allow": [
       "Bash(dotnet build:*)",
       "WebFetch(domain:github.com)",
       "WebSearch",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(git config:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(git add:*)",
+      "Bash(dotnet publish:*)",
+      "Bash(dotnet package search:*)",
+      "WebFetch(domain:www.nuget.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:adamabdelhamed2.blob.core.windows.net)",
+      "WebFetch(domain:api.github.com)"
     ]
-  }
+  },
+  "model": "opus"
 }

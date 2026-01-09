@@ -10,6 +10,12 @@ namespace osync
         public int Id { get; set; }
         public string Name { get; set; } = string.Empty;
         public List<TestQuestion> Questions { get; set; } = new List<TestQuestion>();
+
+        /// <summary>
+        /// Optional context length override for all questions in this category
+        /// If set, overrides the test suite's default context length
+        /// </summary>
+        public int? ContextLength { get; set; }
     }
 
     /// <summary>
@@ -24,6 +30,12 @@ namespace osync
         public string Id => $"{CategoryId}-{QuestionId}";
 
         public string Text { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Optional context length override for this specific question
+        /// If set, overrides both suite and category context length settings
+        /// </summary>
+        public int? ContextLength { get; set; }
     }
 
     /// <summary>
@@ -33,6 +45,13 @@ namespace osync
     {
         public string Name { get; set; } = string.Empty;
         public int NumPredict { get; set; } = 4096;
+
+        /// <summary>
+        /// Context length (num_ctx) for testing. Default is 4096.
+        /// Can be overridden at category or question level.
+        /// </summary>
+        public int ContextLength { get; set; } = 4096;
+
         public List<TestCategory> Categories { get; set; } = new List<TestCategory>();
     }
 
@@ -66,11 +85,17 @@ namespace osync
     public class QuantResult
     {
         public string Tag { get; set; } = string.Empty;
+        public string ModelName { get; set; } = string.Empty;
         public long DiskSizeBytes { get; set; }
         public string Family { get; set; } = string.Empty;
         public string ParameterSize { get; set; } = string.Empty;
         public string QuantizationType { get; set; } = string.Empty;
         public bool IsBase { get; set; }
+        /// <summary>
+        /// Indicates this model was pulled on-demand and should be removed after testing completes.
+        /// Used for resume scenarios to track which models need cleanup.
+        /// </summary>
+        public bool PulledOnDemand { get; set; }
         public List<QuestionResult> QuestionResults { get; set; } = new List<QuestionResult>();
     }
 
@@ -99,6 +124,11 @@ namespace osync
         public int Score { get; set; }  // 1-100
         public string Reason { get; set; } = string.Empty;  // Judge's reasoning for the score
         public DateTime JudgedAt { get; set; }
+        /// <summary>
+        /// Raw JSON response from judge, only populated when reason parsing failed (for debugging)
+        /// </summary>
+        [JsonIgnore]
+        public string? RawResponse { get; set; }
     }
 
     /// <summary>
@@ -157,6 +187,9 @@ namespace osync
 
         [JsonPropertyName("num_predict")]
         public int? NumPredict { get; set; }
+
+        [JsonPropertyName("num_ctx")]
+        public int? NumCtx { get; set; }
     }
 
     /// <summary>
@@ -261,8 +294,11 @@ namespace osync
         public long DiskSizeBytes { get; set; }
         public string QuantizationType { get; set; } = string.Empty;
 
-        // Category confidence scores (%)
+        // Category confidence scores (%) - metrics only
         public Dictionary<string, double> CategoryScores { get; set; } = new Dictionary<string, double>();
+
+        // Category judgment scores (%) - when judge model is used
+        public Dictionary<string, double> CategoryJudgmentScores { get; set; } = new Dictionary<string, double>();
 
         // Overall confidence score (%)
         public double TotalConfidenceScore { get; set; }

@@ -197,7 +197,7 @@ namespace osync
 
                 Application.Init();
             }
-            catch (Exception ex)
+            catch
             {
                 // If Terminal.Gui fails to initialize (e.g., after console resize or state issues),
                 // this is likely because Application.Shutdown() didn't fully clean up.
@@ -235,7 +235,7 @@ namespace osync
 
                     Application.Init();
                 }
-                catch (Exception initEx)
+                catch
                 {
                     Console.WriteLine($"\nTerminal.Gui failed to reinitialize after the previous operation.");
                     Console.WriteLine($"This is a known limitation when returning to manage view.");
@@ -630,6 +630,11 @@ namespace osync
         {
             _allModels = new List<ManageModelInfo>();
 
+            if (string.IsNullOrEmpty(_destination))
+            {
+                throw new Exception("Destination server not specified");
+            }
+
             try
             {
                 using var httpClient = new HttpClient
@@ -668,9 +673,9 @@ namespace osync
 
                         _allModels.Add(new ManageModelInfo
                         {
-                            Name = model.name,
+                            Name = model.name ?? "",
                             ShortId = modelId,
-                            FullDigest = model.digest,
+                            FullDigest = model.digest ?? "",
                             Size = model.size,
                             SizeFormatted = sizeFormatted,
                             ModifiedAt = model.modified_at,
@@ -1999,16 +2004,16 @@ namespace osync
                 {
                     var runArgs = new RunArgs
                     {
-                        ModelName = model.Name,
-                        Destination = _destination,
-                        Format = format,
-                        KeepAlive = keepAlive,
+                        ModelName = model.Name ?? "",
+                        Destination = _destination ?? "",
+                        Format = format ?? "",
+                        KeepAlive = keepAlive ?? "",
                         NoWordWrap = noWordWrapCheck.Checked,
                         Verbose = verboseCheck.Checked,
                         Dimensions = dimensions,
                         HideThinking = hideThinkingCheck.Checked,
                         Insecure = insecureCheck.Checked,
-                        Think = thinkCombo.SelectedItem > 0 ? thinkOptions[thinkCombo.SelectedItem] : null,
+                        Think = thinkCombo.SelectedItem > 0 ? thinkOptions[thinkCombo.SelectedItem] ?? "" : "",
                         Truncate = truncateCheck.Checked
                     };
 
@@ -2354,7 +2359,7 @@ namespace osync
                     {
                         try
                         {
-                            _program.ActionUpdate(model.Name, _destination);
+                            _program.ActionUpdate(model.Name ?? "", _destination ?? "");
                         }
                         catch (Exception ex)
                         {
@@ -2511,7 +2516,7 @@ namespace osync
                 {
                     Console.WriteLine($"\nPulling model '{modelName}'...\n");
 
-                    _program.ActionPull(modelName, _destination);
+                    _program.ActionPull(modelName, _destination ?? "");
 
                     Console.WriteLine("\nPress any key to return to manage view...");
                     Console.ReadKey(true);

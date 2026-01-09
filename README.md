@@ -509,9 +509,11 @@ When resuming:
 - `-T <file>` - External test suite JSON file (default: internal v1base)
 - `--force` - Force re-run testing for quantizations already present in results file
 - `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
+- `--judge-ctxsize <value>` - Context length for judge model (default: 12288)
 - `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
 - `--timeout <seconds>` - API timeout in seconds for testing and judgment calls (default: 600)
 - `--verbose` - Show judgment details (question ID, score, reason) for each judged question
+- `--ondemand` - Pull models on-demand if not available, then remove after testing (see On-Demand Mode below)
 
 **Judge Scoring:**
 
@@ -544,6 +546,26 @@ When judgment scoring is enabled:
 
 - **Parallel mode:** Testing and judgment run concurrently at the question level. As each question is tested, it is immediately passed to the judge model in a background task. This allows the test model to continue generating answers while the judge evaluates previous questions. Significantly reduces total execution time when using a remote judge or when the judge model is faster than the test model.
 
+**On-Demand Mode:**
+
+Use `--ondemand` to automatically pull models that aren't available and remove them after testing. This is ideal for testing large models or many quantizations without consuming permanent storage:
+
+```bash
+# Test many quantizations without keeping them all
+osync qc -M llama3.2 -Q q2_k,q3_k_s,q3_k_m,q4_k_s,q4_k_m,q5_k_s,q5_k_m,q6_k,q8_0 --ondemand
+
+# Test on remote server with on-demand
+osync qc -M llama3.2 -Q q4_k_m,q8_0 -D http://192.168.1.100:11434 --ondemand
+```
+
+When on-demand mode is enabled:
+- Before testing each quantization, osync checks if the model exists on the Ollama instance
+- If the model is missing, it is automatically pulled from the registry
+- Models that were already present are NOT removed after testing (only on-demand pulled models)
+- After testing and judgment complete, on-demand pulled models are removed to free disk space
+- The on-demand state is saved in the results file, so interrupted tests can properly clean up on resume
+- Works with both local and remote Ollama servers
+
 **Built-in Test Suites:**
 - `v1base` (default) - 50 questions across Reasoning, Math, Finance, Technology, Science
 - `v1quick` - 10 questions (subset of v1base for quick testing)
@@ -556,15 +578,18 @@ Create custom test suites using JSON files with the following structure:
 {
   "name": "my-custom-suite",
   "numPredict": 4096,
+  "contextLength": 4096,
   "categories": [
     {
       "id": 1,
       "name": "Category Name",
+      "contextLength": 8192,
       "questions": [
         {
           "categoryId": 1,
           "questionId": 1,
-          "text": "Your question text here"
+          "text": "Your question text here",
+          "contextLength": 16384
         }
       ]
     }
@@ -572,7 +597,11 @@ Create custom test suites using JSON files with the following structure:
 }
 ```
 
-The `numPredict` property controls the maximum tokens generated per response (default: 4096). Use higher values for coding or detailed answers.
+- `numPredict` - Maximum tokens generated per response (default: 4096). Use higher values for coding or detailed answers.
+- `contextLength` - Context length (num_ctx) for the model during testing. Can be specified at:
+  - **Suite level** (default: 4096) - applies to all questions
+  - **Category level** - overrides suite default for all questions in that category
+  - **Question level** - overrides both suite and category settings for that specific question
 
 Use with: `osync qc -M model -Q q4_k_m -T my-custom-suite.json`
 
@@ -815,6 +844,36 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.3
+- **On-Demand Mode for QC Command** - Pull models automatically and remove after testing
+  - New `--ondemand` argument to enable on-demand model management
+  - Models missing from the Ollama instance are automatically pulled from the registry
+  - Models that were already present are NOT removed (only on-demand pulled models)
+  - After testing and judgment complete, on-demand models are removed to free disk space
+  - State is persisted in results file for proper cleanup on resume
+  - Works with both local and remote Ollama servers
+  - Ideal for testing large models or many quantizations without consuming permanent storage
+- **Context Length Support for QC Command** - Configure context length (num_ctx) for testing and judgment
+  - Default test context length: 4096, default judge context length: 12288
+  - Suite-level `contextLength` property in built-in test suites (v1base, v1quick, v1code)
+  - External JSON test suites support `contextLength` at suite, category, and question levels
+  - Hierarchical override system: question > category > suite
+  - Console output displays context length at startup and when overridden
+  - New `--judge-ctxsize` argument to configure judge model context length
+- **Improved Console Output** - Context length settings displayed during test execution
+  - Shows test and judge context lengths at the beginning of testing
+  - Displays override notifications when context length changes (e.g., "Context length changed to 8192 (from category Code)")
+- **Fixed Linux Terminal Display Issues** - Resolved ANSI color rendering problems
+  - Fixed white box display issue in interactive REPL mode on Linux terminals
+  - Downgraded PrettyConsole (3.1.0 → 2.0.0) and Spectre.Console (0.54.0 → 0.49.1) for compatibility
+- **Improved Installer** - Streamlined installation process
+  - Installer now only copies the main executable (no longer copies all directory files)
+  - Added mechanism for platform-specific optional dependencies
+  - Removed unnecessary libuv.dylib dependency for macOS (not needed in .NET 8+)
+- **Fixed Bash Completion on Linux**
+  - Fixed tab completion for model names containing colons (e.g., `osync ls qwen2:`)
+  - Fixed file tab completion for qcview command
 
 v1.2.2
 - **Improved Judgment Prompt Format** - Better compatibility with more models

@@ -6,23 +6,23 @@ namespace osync
     public class CopyArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Source model (e.g., llama3:latest or http://server:port/model:tag)")]
-        public string Source { get; set; }
+        public string Source { get; set; } = string.Empty;
 
         [ArgRequired, ArgPosition(2), ArgDescription("Destination (e.g., newmodel:tag or http://server:port/model:tag)")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Buffer size for remote-to-remote copy (default: 512MB, e.g., 1GB, 256MB)")]
-        public string BufferSize { get; set; }
+        public string BufferSize { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class ListArgs
     {
         [ArgPosition(1), ArgDescription("Model pattern to filter (supports * wildcard, e.g., llama*, *:7b)")]
-        public string Pattern { get; set; }
+        public string Pattern { get; set; } = string.Empty;
 
         [ArgDescription("Remote server URL (e.g., http://192.168.1.100:11434)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Sort by size descending"), ArgShortcut("--size")]
         public bool SortBySize { get; set; }
@@ -41,50 +41,50 @@ namespace osync
     public class RemoveArgs
     {
         [ArgPosition(1), ArgDescription("Model pattern to remove (supports * wildcard)")]
-        public string Pattern { get; set; }
+        public string Pattern { get; set; } = string.Empty;
 
         [ArgDescription("Remote server URL"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class RenameArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Source model name")]
-        public string Source { get; set; }
+        public string Source { get; set; } = string.Empty;
 
         [ArgRequired, ArgPosition(2), ArgDescription("New model name")]
-        public string NewName { get; set; }
+        public string NewName { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class UpdateArgs
     {
         [ArgPosition(1), ArgDescription("Model pattern to update (supports * wildcard, default: *)")]
-        public string Pattern { get; set; }
+        public string Pattern { get; set; } = string.Empty;
 
         [ArgDescription("Remote server URL"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class PullArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Model name or HuggingFace URL (e.g., llama3:latest or https://huggingface.co/...)")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class ShowArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Model name to show information")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Show license information"), ArgShortcut("--license")]
         public bool License { get; set; }
@@ -109,16 +109,16 @@ namespace osync
     public class RunArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Model name to run/chat with")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Response format (json)"), ArgShortcut("--format")]
-        public string Format { get; set; }
+        public string Format { get; set; } = string.Empty;
 
         [ArgDescription("Keep alive duration (e.g., 5m, 1h, default: server default)"), ArgShortcut("--keepalive")]
-        public string KeepAlive { get; set; }
+        public string KeepAlive { get; set; } = string.Empty;
 
         [ArgDescription("Disable word wrap"), ArgShortcut("--nowordwrap")]
         public bool NoWordWrap { get; set; }
@@ -136,7 +136,7 @@ namespace osync
         public bool Insecure { get; set; }
 
         [ArgDescription("Enable extended thinking (reasoning) mode"), ArgShortcut("--think")]
-        public string Think { get; set; }
+        public string Think { get; set; } = string.Empty;
 
         [ArgDescription("Truncate long context (default: server setting)"), ArgShortcut("--truncate")]
         public bool? Truncate { get; set; }
@@ -146,56 +146,56 @@ namespace osync
     public class PsArgs
     {
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d"), ArgPosition(1)]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class LoadArgs
     {
         [ArgRequired, ArgPosition(1), ArgDescription("Model name to load into memory")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class UnloadArgs
     {
         [ArgPosition(1), ArgDescription("Model name to unload from memory (optional - if not specified, unloads all models)")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class ManageArgs
     {
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d"), ArgPosition(1)]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class QcArgs
     {
         [ArgRequired, ArgDescription("Model name without tag"), ArgShortcut("-M")]
-        public string ModelName { get; set; }
+        public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Remote server URL"), ArgShortcut("-D")]
-        public string Destination { get; set; }
+        public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Results output file (default: modelname.qc.json)"), ArgShortcut("-O")]
-        public string OutputFile { get; set; }
+        public string OutputFile { get; set; } = string.Empty;
 
         [ArgDescription("Base quantization tag for comparison (default: fp16, or existing base from results file)"), ArgShortcut("-B")]
-        public string BaseTag { get; set; }
+        public string BaseTag { get; set; } = string.Empty;
 
         [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated)"), ArgShortcut("-Q")]
-        public string Quants { get; set; }
+        public string Quants { get; set; } = string.Empty;
 
         [ArgDescription("Test suite: v1base (50 questions), v1quick (v1base with 10 questions), v1code (50 questions coding-focused) or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
-        public string TestSuite { get; set; }
+        public string TestSuite { get; set; } = string.Empty;
 
         [ArgDescription("Model temperature (default: 0.0)"), ArgShortcut("-Te")]
         public double Temperature { get; set; } = 0.0;
@@ -219,7 +219,7 @@ namespace osync
         public bool Force { get; set; }
 
         [ArgDescription("Judge model for similarity scoring (local model name or http://host:port/model for remote)"), ArgShortcut("--judge")]
-        public string Judge { get; set; }
+        public string Judge { get; set; } = string.Empty;
 
         [ArgDescription("Judge execution mode: serial (default) or parallel"), ArgShortcut("--mode")]
         public string JudgeMode { get; set; } = "serial";
@@ -229,18 +229,24 @@ namespace osync
 
         [ArgDescription("Verbose output: show judgment details (question ID, score, reason)"), ArgShortcut("--verbose")]
         public bool Verbose { get; set; }
+
+        [ArgDescription("Context length for judge model (default: 12288)"), ArgShortcut("--judge-ctxsize")]
+        public int JudgeCtxSize { get; set; } = 12288;
+
+        [ArgDescription("Pull models on-demand if not available, then remove after testing"), ArgShortcut("--ondemand")]
+        public bool OnDemand { get; set; }
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class QcViewArgs
     {
-        [ArgRequired, ArgPosition(1), ArgDescription("Results file to view")]
-        public string FileName { get; set; }
+        [ArgRequired, ArgPosition(1), ArgDescription("Results file to view"), ArgShortcut("-F")]
+        public string FileName { get; set; } = string.Empty;
 
         [ArgDescription("Output format: table, json (default: table)"), ArgShortcut("-Fo")]
         public string Format { get; set; } = "table";
 
         [ArgDescription("Output filename (default: console)"), ArgShortcut("-O")]
-        public string OutputFile { get; set; }
+        public string OutputFile { get; set; } = string.Empty;
     }
 }

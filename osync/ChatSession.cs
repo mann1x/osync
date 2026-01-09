@@ -20,7 +20,7 @@ namespace osync
         private bool _isRunning;
         private MultilineMode _multilineMode = MultilineMode.None;
         private readonly StringBuilder _multilineBuffer = new StringBuilder();
-        private CancellationTokenSource _cancellationTokenSource;
+        private CancellationTokenSource _cancellationTokenSource = null!;
         private readonly List<string> _commandHistory = new List<string>();
         private int _historyIndex = -1;
 
@@ -59,7 +59,7 @@ namespace osync
             System.Console.InputEncoding = Encoding.UTF8;
         }
 
-        private object ParseThinkArgument(string think)
+        private object? ParseThinkArgument(string think)
         {
             if (string.IsNullOrEmpty(think)) return null;
 
@@ -110,7 +110,7 @@ namespace osync
             System.Console.CancelKeyPress -= OnCancelKeyPress;
         }
 
-        private void OnCancelKeyPress(object sender, ConsoleCancelEventArgs e)
+        private void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs e)
         {
             if (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
             {
@@ -215,7 +215,7 @@ namespace osync
 
                 case "/?":
                 case "/help":
-                    ShowHelp(args.Length > 0 ? args[0] : null);
+                    ShowHelp(args.Length > 0 ? args[0] : string.Empty);
                     break;
 
                 case "/set":
@@ -477,7 +477,7 @@ namespace osync
             else
             {
                 System.Console.Write("Enter file path to save session: ");
-                filePath = System.Console.ReadLine();
+                filePath = System.Console.ReadLine() ?? string.Empty;
             }
 
             if (string.IsNullOrWhiteSpace(filePath))
@@ -509,7 +509,7 @@ namespace osync
             else
             {
                 System.Console.Write("Enter file path to load session: ");
-                filePath = System.Console.ReadLine();
+                filePath = System.Console.ReadLine() ?? string.Empty;
             }
 
             if (string.IsNullOrWhiteSpace(filePath))
@@ -528,6 +528,12 @@ namespace osync
             {
                 var json = await File.ReadAllTextAsync(filePath);
                 var loadedState = SessionState.FromJson(json);
+
+                if (loadedState == null)
+                {
+                    System.Console.WriteLine("Error: Failed to parse session file");
+                    return;
+                }
 
                 // Merge loaded state
                 _state.ModelName = loadedState.ModelName;
@@ -557,7 +563,7 @@ namespace osync
         {
             if (string.IsNullOrEmpty(topic))
             {
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("Available Commands:");
                 System.Console.WriteLine("  /set            Set session variables");
                 System.Console.WriteLine("  /show           Show model information");
@@ -567,14 +573,14 @@ namespace osync
                 System.Console.WriteLine("  /load <path>    Load a session from file");
                 System.Console.WriteLine("  /save <path>    Save current session to file");
                 System.Console.WriteLine("  /stats          Display performance statistics");
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("Use /help <command> for more information on a specific command.");
                 System.Console.WriteLine("Use /help shortcuts for keyboard shortcuts.");
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
             }
             else if (topic == "shortcuts")
             {
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("Keyboard Shortcuts:");
                 System.Console.WriteLine("  Ctrl + a / Home    Move to beginning of line");
                 System.Console.WriteLine("  Ctrl + e / End     Move to end of line");
@@ -585,13 +591,13 @@ namespace osync
                 System.Console.WriteLine("  Ctrl + c           Cancel current generation");
                 System.Console.WriteLine("  Ctrl + d           Exit (when line is empty)");
                 System.Console.WriteLine("  Up / Down arrows   Navigate command history");
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("Multiline Input:");
                 System.Console.WriteLine("  Type \"\"\" (triple quotes) to begin multiline message");
                 System.Console.WriteLine("  - Can be alone or followed by text: \"\"\" or \"\"\"your message");
                 System.Console.WriteLine("  Type \"\"\" to end multiline message");
                 System.Console.WriteLine("  - Can be alone or at end of text: \"\"\" or your message\"\"\"");
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
             }
             else if (topic == "set")
             {
@@ -599,7 +605,7 @@ namespace osync
             }
             else if (topic == "show")
             {
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("/show command usage:");
                 System.Console.WriteLine("  /show                Show all model information");
                 System.Console.WriteLine("  /show info           Show model details");
@@ -608,7 +614,7 @@ namespace osync
                 System.Console.WriteLine("  /show parameters     Show model and user parameters");
                 System.Console.WriteLine("  /show system         Show system message");
                 System.Console.WriteLine("  /show template       Show prompt template");
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
             }
             else
             {
@@ -618,7 +624,7 @@ namespace osync
 
         private void ShowSetHelp()
         {
-            System.Console.WriteLine();
+            System.Console.WriteLine("");
             System.Console.WriteLine("/set command usage:");
             System.Console.WriteLine("  /set verbose              Enable verbose output with timings");
             System.Console.WriteLine("  /set quiet                Disable verbose output");
@@ -630,7 +636,7 @@ namespace osync
             System.Console.WriteLine("  /set nothink              Disable thinking mode");
             System.Console.WriteLine("  /set system               Set system message (starts multiline input)");
             System.Console.WriteLine("  /set parameter <n> <v>    Set model parameter (e.g., temperature 0.8)");
-            System.Console.WriteLine();
+            System.Console.WriteLine("");
             System.Console.WriteLine("Common parameters:");
             System.Console.WriteLine("  temperature              Randomness (0.0-2.0, default: 0.8)");
             System.Console.WriteLine("  top_p                    Nucleus sampling (0.0-1.0)");
@@ -638,14 +644,14 @@ namespace osync
             System.Console.WriteLine("  num_ctx                  Context window size");
             System.Console.WriteLine("  repeat_penalty           Repetition penalty (default: 1.1)");
             System.Console.WriteLine("  num_predict              Max tokens to generate");
-            System.Console.WriteLine();
+            System.Console.WriteLine("");
         }
 
         #endregion
 
         #region Keyboard Input
 
-        private string ReadLineWithShortcuts()
+        private string? ReadLineWithShortcuts()
         {
             var buffer = new StringBuilder();
             int cursorPosition = 0;
@@ -657,13 +663,13 @@ namespace osync
                 switch (key.Key)
                 {
                     case ConsoleKey.Enter:
-                        System.Console.WriteLine();
+                        System.Console.WriteLine("");
                         return buffer.ToString();
 
                     case ConsoleKey.D when (key.Modifiers & ConsoleModifiers.Control) != 0:
                         if (buffer.Length == 0)
                         {
-                            System.Console.WriteLine(); // Move to new line before exit
+                            System.Console.WriteLine(""); // Move to new line before exit
                             return null; // Exit signal
                         }
                         // If buffer is not empty, don't insert the Ctrl+D character
@@ -917,7 +923,7 @@ namespace osync
                     return;
                 }
 
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
                 System.Console.WriteLine("Loaded Models:");
                 System.Console.WriteLine(new string('-', 135));
                 System.Console.WriteLine($"{"NAME",-30} {"ID",-15} {"SIZE",-25} {"VRAM USAGE",-15} {"CONTEXT",-10} {"UNTIL",-30}");
@@ -936,7 +942,7 @@ namespace osync
                 }
 
                 System.Console.WriteLine(new string('-', 135));
-                System.Console.WriteLine();
+                System.Console.WriteLine("");
             }
             catch (Exception ex)
             {
@@ -944,7 +950,7 @@ namespace osync
             }
         }
 
-        private string FormatModelSize(long sizeBytes, string parameterSize)
+        private string FormatModelSize(long sizeBytes, string? parameterSize)
         {
             var diskSize = FormatBytes(sizeBytes);
             if (!string.IsNullOrEmpty(parameterSize))
@@ -1068,7 +1074,7 @@ namespace osync
             finally
             {
                 _cancellationTokenSource?.Dispose();
-                _cancellationTokenSource = null;
+                _cancellationTokenSource = null!;
             }
 
             return true;
@@ -1102,7 +1108,7 @@ namespace osync
             var assistantMessage = new StringBuilder();
             var thinkingMessage = new StringBuilder();
             bool isThinking = false;
-            ChatResponse lastResponse = null;
+            ChatResponse? lastResponse = null;
 
             while (!reader.EndOfStream && !_cancellationTokenSource.IsCancellationRequested)
             {
@@ -1169,7 +1175,7 @@ namespace osync
                 }
             }
 
-            System.Console.WriteLine(); // Final newline
+            System.Console.WriteLine(""); // Final newline
 
             // Store assistant message in history
             if (assistantMessage.Length > 0)
@@ -1204,7 +1210,7 @@ namespace osync
             {
                 if (ch == '\n')
                 {
-                    System.Console.WriteLine();
+                    System.Console.WriteLine("");
                     currentColumn = 0;
                 }
                 else if (ch == '\r')
@@ -1220,7 +1226,7 @@ namespace osync
                     // Wrap at console width
                     if (currentColumn >= consoleWidth - 1)
                     {
-                        System.Console.WriteLine();
+                        System.Console.WriteLine("");
                         currentColumn = 0;
                     }
                 }
@@ -1229,7 +1235,7 @@ namespace osync
 
         private void DisplayVerboseStats(ChatResponse response)
         {
-            System.Console.WriteLine();
+            System.Console.WriteLine("");
 
             var totalDuration = response.TotalDuration.HasValue
                 ? TimeSpan.FromMilliseconds(response.TotalDuration.Value / 1_000_000.0)

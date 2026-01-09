@@ -18,47 +18,47 @@ namespace osync
     public class ChatMessage
     {
         [JsonPropertyName("role")]
-        public string Role { get; set; }
+        public string Role { get; set; } = string.Empty;
 
         [JsonPropertyName("content")]
-        public string Content { get; set; }
+        public string Content { get; set; } = string.Empty;
 
         [JsonPropertyName("thinking")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string Thinking { get; set; }
+        public string? Thinking { get; set; }
 
         [JsonPropertyName("images")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public List<byte[]> Images { get; set; }
+        public List<byte[]>? Images { get; set; }
     }
 
     // Chat request DTO
     public class ChatRequest
     {
         [JsonPropertyName("model")]
-        public string Model { get; set; }
+        public string Model { get; set; } = string.Empty;
 
         [JsonPropertyName("messages")]
-        public List<ChatMessage> Messages { get; set; }
+        public List<ChatMessage> Messages { get; set; } = new();
 
         [JsonPropertyName("stream")]
         public bool Stream { get; set; } = true;
 
         [JsonPropertyName("format")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string Format { get; set; }
+        public string? Format { get; set; }
 
         [JsonPropertyName("keep_alive")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public string KeepAlive { get; set; }
+        public string? KeepAlive { get; set; }
 
         [JsonPropertyName("options")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public Dictionary<string, object> Options { get; set; }
+        public Dictionary<string, object>? Options { get; set; }
 
         [JsonPropertyName("think")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-        public object Think { get; set; }
+        public object? Think { get; set; }
 
         [JsonPropertyName("truncate")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -69,19 +69,19 @@ namespace osync
     public class ChatResponse
     {
         [JsonPropertyName("model")]
-        public string Model { get; set; }
+        public string Model { get; set; } = string.Empty;
 
         [JsonPropertyName("created_at")]
         public DateTime CreatedAt { get; set; }
 
         [JsonPropertyName("message")]
-        public ChatMessage Message { get; set; }
+        public ChatMessage Message { get; set; } = new();
 
         [JsonPropertyName("done")]
         public bool Done { get; set; }
 
         [JsonPropertyName("done_reason")]
-        public string DoneReason { get; set; }
+        public string? DoneReason { get; set; }
 
         [JsonPropertyName("total_duration")]
         public long? TotalDuration { get; set; }
@@ -105,15 +105,15 @@ namespace osync
     // Session state for save/load
     public class SessionState
     {
-        public string ModelName { get; set; }
-        public string SystemMessage { get; set; }
+        public string ModelName { get; set; } = string.Empty;
+        public string SystemMessage { get; set; } = string.Empty;
         public List<ChatMessage> Messages { get; set; } = new();
         public Dictionary<string, object> Options { get; set; } = new();
         public bool WordWrap { get; set; } = true;
         public bool Verbose { get; set; }
         public bool HideThinking { get; set; }
-        public string Format { get; set; }
-        public object Think { get; set; }
+        public string? Format { get; set; }
+        public object? Think { get; set; }
         public bool? Truncate { get; set; }
         public DateTime SessionStartTime { get; set; }
 
@@ -125,7 +125,7 @@ namespace osync
             });
         }
 
-        public static SessionState FromJson(string json)
+        public static SessionState? FromJson(string json)
         {
             return JsonSerializer.Deserialize<SessionState>(json);
         }
@@ -135,25 +135,25 @@ namespace osync
     public class ProcessStatusResponse
     {
         [JsonPropertyName("models")]
-        public List<RunningModel> Models { get; set; }
+        public List<RunningModel> Models { get; set; } = new();
     }
 
     public class RunningModel
     {
         [JsonPropertyName("name")]
-        public string Name { get; set; }
+        public string Name { get; set; } = string.Empty;
 
         [JsonPropertyName("model")]
-        public string Model { get; set; }
+        public string Model { get; set; } = string.Empty;
 
         [JsonPropertyName("size")]
         public long Size { get; set; }
 
         [JsonPropertyName("digest")]
-        public string Digest { get; set; }
+        public string Digest { get; set; } = string.Empty;
 
         [JsonPropertyName("details")]
-        public ModelDetails Details { get; set; }
+        public ModelDetails Details { get; set; } = new();
 
         [JsonPropertyName("expires_at")]
         public DateTime ExpiresAt { get; set; }
@@ -168,22 +168,22 @@ namespace osync
     public class ModelDetails
     {
         [JsonPropertyName("parent_model")]
-        public string ParentModel { get; set; }
+        public string ParentModel { get; set; } = string.Empty;
 
         [JsonPropertyName("format")]
-        public string Format { get; set; }
+        public string Format { get; set; } = string.Empty;
 
         [JsonPropertyName("family")]
-        public string Family { get; set; }
+        public string Family { get; set; } = string.Empty;
 
         [JsonPropertyName("families")]
-        public List<string> Families { get; set; }
+        public List<string> Families { get; set; } = new();
 
         [JsonPropertyName("parameter_size")]
-        public string ParameterSize { get; set; }
+        public string ParameterSize { get; set; } = string.Empty;
 
         [JsonPropertyName("quantization_level")]
-        public string QuantizationLevel { get; set; }
+        public string QuantizationLevel { get; set; } = string.Empty;
     }
 
     // Performance statistics tracker
@@ -269,7 +269,7 @@ namespace osync
                 }
             }
 
-            System.Console.WriteLine();
+            System.Console.WriteLine("");
         }
 
         public void Clear()

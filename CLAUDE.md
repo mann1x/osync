@@ -63,3 +63,7 @@ BDD tests using SpecFlow + xUnit in `osync.Tests/`:
 
 Core: PowerArgs (CLI), Spectre.Console (formatting), Terminal.Gui (TUI), TqdmSharp (progress bars)
 Test: xUnit, SpecFlow, FluentAssertions
+
+## Important Guidelines
+
+- **Never change the program version** unless explicitly asked by the user. When updating the changelog in README.md, add new entries under the existing version - do not create a new version number.

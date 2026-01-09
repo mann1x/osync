@@ -12,6 +12,8 @@ namespace osync
 
         public int NumPredict => 8192;
 
+        public int ContextLength => 4096;
+
         public List<TestCategory> GetCategories()
         {
             return new List<TestCategory>

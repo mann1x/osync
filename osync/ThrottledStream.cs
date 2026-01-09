@@ -270,7 +270,7 @@ namespace Born2Code.Net
         /// </returns>
         public override string ToString()
         {
-            return _baseStream.ToString();
+            return _baseStream.ToString() ?? "";
         }
         #endregion
 

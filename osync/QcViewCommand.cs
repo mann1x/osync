@@ -1,3 +1,5 @@
+// Ignore Spelling: osync
+
 using System.Text;
 using System.Text.Json;
 using ByteSizeLib;
@@ -157,28 +159,63 @@ namespace osync
                 }
 
                 sb.AppendLine();
-                sb.AppendLine("=== Scores by Category ===");
+                if (results.HasJudgmentScoring)
+                {
+                    sb.AppendLine("=== Scores by Category (Metrics & Judgment) ===");
+                }
+                else
+                {
+                    sb.AppendLine("=== Scores by Category ===");
+                }
                 sb.AppendLine();
 
                 // Category breakdown
                 if (results.QuantScores.Count > 0 && results.QuantScores[0].CategoryScores.Count > 0)
                 {
                     var categories = results.QuantScores[0].CategoryScores.Keys.ToList();
-                    var catHeader = $"{"Tag",-25}";
-                    foreach (var cat in categories)
-                        catHeader += $" {cat,-12}";
-                    sb.AppendLine(catHeader);
-                    sb.AppendLine(new string('-', 25 + categories.Count * 13));
 
-                    foreach (var quant in sortedResults)
+                    if (results.HasJudgmentScoring)
                     {
-                        var row = $"{quant.Tag,-25}";
+                        // Header with Metrics and Judge sub-columns for each category
+                        var catHeader = $"{"Tag",-25}";
                         foreach (var cat in categories)
                         {
-                            var score = quant.CategoryScores.TryGetValue(cat, out var s) ? s : 0;
-                            row += $" {score:F1}%{"",-7}";
+                            catHeader += $" {cat + " M",-10} {cat + " J",-10}";
                         }
-                        sb.AppendLine(row);
+                        sb.AppendLine(catHeader);
+                        sb.AppendLine(new string('-', 25 + categories.Count * 21));
+
+                        foreach (var quant in sortedResults)
+                        {
+                            var row = $"{quant.Tag,-25}";
+                            foreach (var cat in categories)
+                            {
+                                var metricsScore = quant.CategoryScores.TryGetValue(cat, out var ms) ? ms : 0;
+                                var judgeScore = quant.CategoryJudgmentScores.TryGetValue(cat, out var js) ? js : 0;
+                                row += $" {metricsScore:F1}%{"",-5} {judgeScore:F1}%{"",-5}";
+                            }
+                            sb.AppendLine(row);
+                        }
+                    }
+                    else
+                    {
+                        // Simple header without judgment
+                        var catHeader = $"{"Tag",-25}";
+                        foreach (var cat in categories)
+                            catHeader += $" {cat,-12}";
+                        sb.AppendLine(catHeader);
+                        sb.AppendLine(new string('-', 25 + categories.Count * 13));
+
+                        foreach (var quant in sortedResults)
+                        {
+                            var row = $"{quant.Tag,-25}";
+                            foreach (var cat in categories)
+                            {
+                                var score = quant.CategoryScores.TryGetValue(cat, out var s) ? s : 0;
+                                row += $" {score:F1}%{"",-7}";
+                            }
+                            sb.AppendLine(row);
+                        }
                     }
                 }
 
@@ -216,7 +253,7 @@ namespace osync
                 Padding = new Padding(1, 0)
             };
             AnsiConsole.Write(panel);
-            AnsiConsole.WriteLine();
+            AnsiConsole.WriteLine("");
 
             // Base model info
             var baseInfo = new Panel($"[bold]Base Quantization:[/] [cyan]{Markup.Escape(results.BaseTag)}[/]\n" +
@@ -228,11 +265,11 @@ namespace osync
                 Border = BoxBorder.Rounded
             };
             AnsiConsole.Write(baseInfo);
-            AnsiConsole.WriteLine();
+            AnsiConsole.WriteLine("");
 
             // Test options
             DisplayTestOptions(results.Options);
-            AnsiConsole.WriteLine();
+            AnsiConsole.WriteLine("");
 
             // Main results table
             var table = new Table();
@@ -354,7 +391,7 @@ namespace osync
             }
 
             AnsiConsole.Write(table);
-            AnsiConsole.WriteLine();
+            AnsiConsole.WriteLine("");
 
             // Category breakdown table
             DisplayCategoryBreakdown(results);
@@ -375,17 +412,33 @@ namespace osync
 
             var table = new Table();
             table.Border = TableBorder.Rounded;
-            table.Title = new TableTitle("[bold yellow]Scores by Category[/]");
 
-            // Add columns
+            // Update title based on judgment availability
+            var tableTitle = results.HasJudgmentScoring
+                ? "[bold yellow]Scores by Category (Metrics & Judgment)[/]"
+                : "[bold yellow]Scores by Category[/]";
+            table.Title = new TableTitle(tableTitle);
+
+            // Add Tag column
             table.AddColumn(new TableColumn("[bold]Tag[/]").LeftAligned());
+
+            // Add category columns - with sub-columns for Metrics and Judge when judgment is available
             foreach (var category in categories)
             {
-                table.AddColumn(new TableColumn($"[bold]{category}[/]").Centered());
+                if (results.HasJudgmentScoring)
+                {
+                    // Add two columns per category: Metrics and Judge
+                    table.AddColumn(new TableColumn($"[bold]{category}[/]\n[dim]Metrics[/]").Centered());
+                    table.AddColumn(new TableColumn($"[bold]{category}[/]\n[dim]Judge[/]").Centered());
+                }
+                else
+                {
+                    table.AddColumn(new TableColumn($"[bold]{category}[/]").Centered());
+                }
             }
 
-            // Sort by overall score
-            var sortedResults = results.QuantScores.OrderByDescending(q => q.TotalConfidenceScore).ToList();
+            // Sort by final score (which considers both metrics and judgment when available)
+            var sortedResults = results.QuantScores.OrderByDescending(q => q.FinalScore).ToList();
 
             foreach (var quant in sortedResults)
             {
@@ -393,13 +446,27 @@ namespace osync
 
                 foreach (var category in categories)
                 {
-                    if (quant.CategoryScores.TryGetValue(category, out var score))
+                    // Add metrics score
+                    if (quant.CategoryScores.TryGetValue(category, out var metricsScore))
                     {
-                        row.Add(FormatScore(score));
+                        row.Add(FormatScore(metricsScore));
                     }
                     else
                     {
                         row.Add("N/A");
+                    }
+
+                    // Add judgment score if judgment scoring is available
+                    if (results.HasJudgmentScoring)
+                    {
+                        if (quant.CategoryJudgmentScores.TryGetValue(category, out var judgmentScore))
+                        {
+                            row.Add(FormatScore(judgmentScore));
+                        }
+                        else
+                        {
+                            row.Add("N/A");
+                        }
                     }
                 }
 

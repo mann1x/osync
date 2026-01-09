@@ -27,5 +27,12 @@ namespace osync
         /// Default is 4096 for most test suites
         /// </summary>
         int NumPredict { get; }
+
+        /// <summary>
+        /// Context length (num_ctx) for the model during testing
+        /// Default is 4096 for most test suites
+        /// Can be overridden at category or question level
+        /// </summary>
+        int ContextLength { get; }
     }
 }

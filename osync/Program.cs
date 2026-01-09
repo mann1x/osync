@@ -1,11 +1,10 @@
-﻿// Ignore Spelling: osync
+﻿// Ignore Spelling: osync ollama modelfile statusline versionline
 
 using PowerArgs.Samples;
 using PowerArgs;
 using System;
 using System.Net;
 using System.Diagnostics;
-using UrlCombineLib;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text;
@@ -36,7 +35,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.2.2";
+        static string version = "1.2.3";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -49,6 +48,41 @@ namespace osync
         public static string GetAppVersion()
         {
             return version;
+        }
+
+        public static string GetBuildVersion()
+        {
+            // Get build timestamp from executable file
+            // Use AppContext.BaseDirectory for single-file apps (Assembly.Location returns empty string)
+            try
+            {
+                string exePath = Path.Combine(AppContext.BaseDirectory,
+                    OperatingSystem.IsWindows() ? "osync.exe" : "osync");
+                if (System.IO.File.Exists(exePath))
+                {
+                    var fileInfo = new FileInfo(exePath);
+                    var buildTime = fileInfo.LastWriteTime;
+                    return $"b{buildTime:yyyyMMdd-HHmm}";
+                }
+                // Fallback: try to get from any dll in the directory
+                var dllPath = Path.Combine(AppContext.BaseDirectory, "osync.dll");
+                if (System.IO.File.Exists(dllPath))
+                {
+                    var fileInfo = new FileInfo(dllPath);
+                    var buildTime = fileInfo.LastWriteTime;
+                    return $"b{buildTime:yyyyMMdd-HHmm}";
+                }
+                return "b00000000-0000";
+            }
+            catch
+            {
+                return "b00000000-0000";
+            }
+        }
+
+        public static string GetFullVersion()
+        {
+            return $"v{version} ({GetBuildVersion()})";
         }
 
         [HelpHook, ArgShortcut("-?"), ArgShortcut("-h"), ArgDescription("Shows this help")]
@@ -210,7 +244,7 @@ namespace osync
                     return;
                 }
 
-                Console.WriteLine();
+                Console.WriteLine("");
                 Console.WriteLine("Loaded Models:");
                 Console.WriteLine(new string('-', 135));
                 Console.WriteLine($"{"NAME",-30} {"ID",-15} {"SIZE",-25} {"VRAM USAGE",-15} {"CONTEXT",-10} {"UNTIL",-30}");
@@ -241,7 +275,7 @@ namespace osync
                 }
 
                 Console.WriteLine(new string('-', 135));
-                Console.WriteLine();
+                Console.WriteLine("");
             }
             catch (HttpRequestException ex)
             {
@@ -278,7 +312,7 @@ namespace osync
             return digest.Length >= 12 ? digest.Substring(0, 12) : digest;
         }
 
-        private string FormatModelSize(long sizeBytes, string parameterSize)
+        private string FormatModelSize(long sizeBytes, string? parameterSize)
         {
             var diskSize = FormatBytes(sizeBytes);
             if (!string.IsNullOrEmpty(parameterSize))
@@ -599,8 +633,8 @@ namespace osync
             }
 
             Console.Clear();
-            Console.WriteLine($"osync v{GetAppVersion()}");
-            Console.WriteLine();
+            Console.WriteLine($"osync {GetFullVersion()}");
+            Console.WriteLine("");
         }
 
         [ArgActionMethod, ArgDescription("Exit interactive mode"), ArgShortcut("exit")]
@@ -618,7 +652,7 @@ namespace osync
         }
 
         [ArgShortcut("-bt"), ArgDescription("Bandwidth throttling (B, KB, MB, GB)"), ArgExample("-bt 10MB", "Throttle bandwidth to 10MB"), ArgDefaultValue(0)]
-        public string BandwidthThrottling { get; set; }
+        public string BandwidthThrottling { get; set; } = string.Empty;
 
         public long ParseBandwidthThrottling(string value)
         {
@@ -794,10 +828,10 @@ namespace osync
                     if (!silent)
                     {
                         string versionjson = response.Content.ReadAsStringAsync().Result;
-                        RootVersion _version = VersionReader.Read<RootVersion>(versionjson);
-                        Console.WriteLine();
+                        RootVersion? _version = VersionReader.Read<RootVersion>(versionjson);
+                        Console.WriteLine("");
 
-                        Console.WriteLine($"The remote ollama server is active and running v{_version.version}");
+                        Console.WriteLine($"The remote ollama server is active and running v{_version?.version ?? "unknown"}");
                     }
                 }
                 else if (statusCode >= 500 && statusCode <= 510)
@@ -1018,7 +1052,7 @@ namespace osync
                             string? statusline = await streamReader.ReadLineAsync();
                             if (statusline != null)
                             {
-                                RootStatus status = StatusReader.Read<RootStatus>(statusline);
+                                RootStatus? status = StatusReader.Read<RootStatus>(statusline);
                                 if (status?.status != null)
                                 {
                                     laststatus = status.status;
@@ -1347,7 +1381,7 @@ namespace osync
             // Parse modelfile to extract template, system, and parameters
             var templateBuilder = new StringBuilder();
             var parameters = new List<string>();
-            string system = null;
+            string? system = null;
             bool inTemplate = false;
 
             var p = new Process();
@@ -1440,7 +1474,13 @@ namespace osync
 
             string? template = templateBuilder.Length > 0 ? templateBuilder.ToString() : null;
 
-            RootManifest manifest = ManifestReader.Read<RootManifest>(modelDir);
+            RootManifest? manifest = ManifestReader.Read<RootManifest>(modelDir);
+            if (manifest?.layers == null)
+            {
+                Console.WriteLine("Error: Invalid manifest file");
+                System.Environment.Exit(1);
+                return;
+            }
 
             // Build files dictionary and upload blobs
             var files = new Dictionary<string, string>();
@@ -1651,7 +1691,7 @@ namespace osync
             }
         }
 
-        private async Task<RootManifest> GetRemoteModelManifest(string modelName)
+        private async Task<RootManifest?> GetRemoteModelManifest(string modelName)
         {
             try
             {
@@ -1672,6 +1712,7 @@ namespace osync
                 try
                 {
                     var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+                    if (showResponse == null) return null;
 
                     // Check if there's a model_info section with layers
                     if (showResponse.RootElement.TryGetProperty("model_info", out var modelInfo))
@@ -1691,8 +1732,8 @@ namespace osync
                             {
                                 var layerObj = new Layer
                                 {
-                                    mediaType = layer.TryGetProperty("media_type", out var mt) ? mt.GetString() : "application/vnd.ollama.image.model",
-                                    digest = layer.TryGetProperty("digest", out var d) ? d.GetString() : "",
+                                    mediaType = layer.TryGetProperty("media_type", out var mt) ? mt.GetString() ?? "application/vnd.ollama.image.model" : "application/vnd.ollama.image.model",
+                                    digest = layer.TryGetProperty("digest", out var d) ? d.GetString() ?? "" : "",
                                     size = layer.TryGetProperty("size", out var s) ? s.GetInt64() : 0
                                 };
                                 manifest.layers.Add(layerObj);
@@ -1720,7 +1761,7 @@ namespace osync
             }
         }
 
-        private async Task<(string template, string system, List<string> parameters)> GetRemoteModelfile(string modelName)
+        private async Task<(string? template, string? system, List<string>? parameters)> GetRemoteModelfile(string modelName)
         {
             try
             {
@@ -1737,9 +1778,10 @@ namespace osync
 
                 string json = await response.Content.ReadAsStringAsync();
                 var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+                if (showResponse == null) return (null, null, null);
 
-                string template = null;
-                string system = null;
+                string? template = null;
+                string? system = null;
                 List<string> parameters = new List<string>();
 
                 if (showResponse.RootElement.TryGetProperty("template", out var templateElement))
@@ -1790,12 +1832,12 @@ namespace osync
             }
         }
 
-        private async Task<(string modelfile, string error)> GetRemoteModelfileString(string modelName)
+        private async Task<(string? modelfile, string? error)> GetRemoteModelfileString(string modelName)
         {
             return await GetRemoteModelfileStringWithClient(client, modelName);
         }
 
-        private async Task<(string modelfile, string error)> GetRemoteModelfileStringWithClient(HttpClient httpClient, string modelName)
+        private async Task<(string? modelfile, string? error)> GetRemoteModelfileStringWithClient(HttpClient httpClient, string modelName)
         {
             try
             {
@@ -1813,6 +1855,7 @@ namespace osync
 
                 string json = await response.Content.ReadAsStringAsync();
                 var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+                if (showResponse == null) return (null, "Failed to parse response");
 
                 // Get the modelfile string
                 if (showResponse.RootElement.TryGetProperty("modelfile", out var modelfileElement))
@@ -1828,7 +1871,7 @@ namespace osync
             }
         }
 
-        private async Task<(string template, string system, List<string> parameters)> GetRemoteModelfileWithClient(HttpClient httpClient, string modelName)
+        private async Task<(string? template, string? system, List<string>? parameters)> GetRemoteModelfileWithClient(HttpClient httpClient, string modelName)
         {
             try
             {
@@ -1845,9 +1888,13 @@ namespace osync
 
                 string json = await response.Content.ReadAsStringAsync();
                 var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+                if (showResponse == null)
+                {
+                    return (null, null, null);
+                }
 
-                string template = null;
-                string system = null;
+                string? template = null;
+                string? system = null;
                 List<string> parameters = new List<string>();
 
                 if (showResponse.RootElement.TryGetProperty("template", out var templateElement))
@@ -1898,7 +1945,7 @@ namespace osync
             }
         }
 
-        private async Task RunCreateModelWithClient(HttpClient httpClient, string Modelname, Dictionary<string, string> files, string template = null, string system = null, List<string> parameters = null)
+        private async Task RunCreateModelWithClient(HttpClient httpClient, string Modelname, Dictionary<string, string> files, string? template = null, string? system = null, List<string>? parameters = null)
         {
             try
             {
@@ -1940,7 +1987,7 @@ namespace osync
                         string? statusline = await streamReader.ReadLineAsync();
                         if (statusline != null)
                         {
-                            RootStatus status = StatusReader.Read<RootStatus>(statusline);
+                            RootStatus? status = StatusReader.Read<RootStatus>(statusline);
                             if (status?.status != null)
                             {
                                 laststatus = status.status;
@@ -2162,8 +2209,8 @@ namespace osync
                     $"https://registry.ollama.com/v2/blobs/{digest}"
                 };
 
-                HttpResponseMessage downloadResponse = null;
-                string successUrl = null;
+                HttpResponseMessage? downloadResponse = null;
+                string? successUrl = null;
 
                 foreach (var url in registryUrls)
                 {
@@ -2189,12 +2236,12 @@ namespace osync
 
                 if (downloadResponse == null || !downloadResponse.IsSuccessStatusCode)
                 {
-                    Console.WriteLine();
+                    Console.WriteLine("");
                     Console.WriteLine($"  Error: Blob not found in Ollama registry after trying all URLs");
                     Console.WriteLine($"  Last HTTP status: {downloadResponse?.StatusCode}");
                     Console.WriteLine($"  Digest: {digest}");
                     Console.WriteLine($"  Source model: {sourceModel}");
-                    Console.WriteLine();
+                    Console.WriteLine("");
                     Console.WriteLine($"  Note: This model was likely created locally and is not available in the registry.");
                     Console.WriteLine($"  Remote-to-remote copy only works for models originally from the Ollama registry.");
                     throw new Exception("Blob not available in registry. Cannot complete remote-to-remote copy.");
@@ -2379,7 +2426,6 @@ namespace osync
                         Stream destFileStream = new ThrottledStream(sourceStream, btvalue);
 
                         long totalSize = downloadResponse.Content.Headers.ContentLength ?? 0;
-                        int block_size = 1024;
                         var blob_size = ByteSize.FromBytes(totalSize);
                         var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
                         bool finished = false;
@@ -2454,7 +2500,7 @@ namespace osync
             }
         }
 
-        public void ActionList(string Pattern, string Destination, string sortMode = "name")
+        public void ActionList(string? Pattern, string Destination, string sortMode = "name")
         {
             Init();
 
@@ -2472,7 +2518,7 @@ namespace osync
                 Pattern = Pattern + "*";
             }
 
-            Debug.WriteLine("List: you entered pattern '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Pattern, Destination, ollama_models);
+            Debug.WriteLine("List: you entered pattern '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Pattern ?? "*", Destination, ollama_models);
 
             bool localList = string.IsNullOrEmpty(Destination);
 
@@ -2483,7 +2529,7 @@ namespace osync
                     Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
-                ListLocalModels(Pattern, sortMode);
+                ListLocalModels(Pattern ?? "*", sortMode);
             }
             else
             {
@@ -2491,7 +2537,7 @@ namespace osync
                 {
                     System.Environment.Exit(1);
                 }
-                ListRemoteModels(Destination, Pattern, sortMode).GetAwaiter().GetResult();
+                ListRemoteModels(Destination, Pattern ?? "*", sortMode).GetAwaiter().GetResult();
             }
         }
 
@@ -2591,7 +2637,7 @@ namespace osync
 
                                 try
                                 {
-                                    RootManifest manifest = ManifestReader.Read<RootManifest>(tagFile);
+                                    RootManifest? manifest = ManifestReader.Read<RootManifest>(tagFile);
                                     if (manifest?.layers != null)
                                     {
                                         totalSize = manifest.layers.Sum(l => l.size);
@@ -2725,7 +2771,7 @@ namespace osync
             return $"{(int)(timeSpan.TotalDays / 365)} years ago";
         }
 
-        public void ActionRemove(string Pattern, string Destination)
+        public void ActionRemove(string? Pattern, string Destination)
         {
             Init();
 
@@ -2740,6 +2786,7 @@ namespace osync
             {
                 Console.WriteLine("Error: pattern is required for remove command");
                 System.Environment.Exit(1);
+                return;
             }
 
             Debug.WriteLine("Remove: you entered pattern '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Pattern, Destination, ollama_models);
@@ -3401,9 +3448,9 @@ namespace osync
                 using var stream = await response.Content.ReadAsStreamAsync();
                 using var reader = new StreamReader(stream);
 
-                string lastDigest = null;
-                string lastStatus = null;
-                string lastDisplayedProgress = null;
+                string? lastDigest = null;
+                string? lastStatus = null;
+                string? lastDisplayedProgress = null;
                 var completedDigests = new HashSet<string>();
 
                 while (!reader.EndOfStream)
@@ -3424,10 +3471,12 @@ namespace osync
 
                         if (root.TryGetProperty("status", out var statusProp))
                         {
-                            string status = statusProp.GetString();
-                            string digest = root.TryGetProperty("digest", out var digestProp) ? digestProp.GetString() : null;
+                            string? status = statusProp.GetString();
+                            string? digest = root.TryGetProperty("digest", out var digestProp) ? digestProp.GetString() : null;
                             long total = root.TryGetProperty("total", out var totalProp) ? totalProp.GetInt64() : 0;
                             long completed = root.TryGetProperty("completed", out var completedProp) ? completedProp.GetInt64() : 0;
+
+                            if (status == null) continue;
 
                             // Check if this is a new digest or different status
                             bool isNewDigest = digest != null && digest != lastDigest;
@@ -3439,7 +3488,7 @@ namespace osync
                                 // Print newline if we were showing progress
                                 if (lastDisplayedProgress != null)
                                 {
-                                    Console.WriteLine();
+                                    Console.WriteLine("");
                                     lastDisplayedProgress = null;
                                 }
 
@@ -3494,7 +3543,7 @@ namespace osync
                 // Clean up any remaining progress line
                 if (lastDisplayedProgress != null)
                 {
-                    Console.WriteLine();
+                    Console.WriteLine("");
                 }
 
                 Console.WriteLine($"\n✓ Successfully pulled '{modelName}' to remote server");
@@ -3600,58 +3649,58 @@ namespace osync
 
                 if (license && root.TryGetProperty("license", out var licenseElement))
                 {
-                    Console.WriteLine(licenseElement.GetString());
+                    Console.WriteLine(licenseElement.GetString() ?? "");
                 }
                 else if (modelfile && root.TryGetProperty("modelfile", out var modelfileElement))
                 {
-                    Console.WriteLine(modelfileElement.GetString());
+                    Console.WriteLine(modelfileElement.GetString() ?? "");
                 }
                 else if (parameters && root.TryGetProperty("parameters", out var parametersElement))
                 {
-                    Console.WriteLine(parametersElement.GetString());
+                    Console.WriteLine(parametersElement.GetString() ?? "");
                 }
                 else if (system && root.TryGetProperty("system", out var systemElement))
                 {
-                    Console.WriteLine(systemElement.GetString());
+                    Console.WriteLine(systemElement.GetString() ?? "");
                 }
                 else if (template && root.TryGetProperty("template", out var templateElement))
                 {
-                    Console.WriteLine(templateElement.GetString());
+                    Console.WriteLine(templateElement.GetString() ?? "");
                 }
                 else if (!hasSpecificFlag)
                 {
                     // Show default information (similar to ollama show without flags)
                     if (root.TryGetProperty("modelfile", out var mf))
                     {
-                        Console.WriteLine(mf.GetString());
+                        Console.WriteLine(mf.GetString() ?? "");
                     }
 
                     if (verbose)
                     {
                         // Show detailed information
-                        Console.WriteLine();
+                        Console.WriteLine("");
                         if (root.TryGetProperty("license", out var lic))
                         {
                             Console.WriteLine("License:");
-                            Console.WriteLine(lic.GetString());
-                            Console.WriteLine();
+                            Console.WriteLine(lic.GetString() ?? "");
+                            Console.WriteLine("");
                         }
                         if (root.TryGetProperty("parameters", out var param))
                         {
                             Console.WriteLine("Parameters:");
-                            Console.WriteLine(param.GetString());
-                            Console.WriteLine();
+                            Console.WriteLine(param.GetString() ?? "");
+                            Console.WriteLine("");
                         }
                         if (root.TryGetProperty("system", out var sys))
                         {
                             Console.WriteLine("System:");
-                            Console.WriteLine(sys.GetString());
-                            Console.WriteLine();
+                            Console.WriteLine(sys.GetString() ?? "");
+                            Console.WriteLine("");
                         }
                         if (root.TryGetProperty("template", out var tmpl))
                         {
                             Console.WriteLine("Template:");
-                            Console.WriteLine(tmpl.GetString());
+                            Console.WriteLine(tmpl.GetString() ?? "");
                         }
                     }
                 }
@@ -3840,8 +3889,8 @@ namespace osync
                 var modelsToUpdate = new List<string>();
                 foreach (var model in models.EnumerateArray())
                 {
-                    string modelName = model.GetProperty("name").GetString();
-                    if (MatchesPattern(modelName, pattern))
+                    string? modelName = model.GetProperty("name").GetString();
+                    if (modelName != null && MatchesPattern(modelName, pattern))
                     {
                         modelsToUpdate.Add(modelName);
                     }
@@ -3918,7 +3967,7 @@ namespace osync
 
                         if (root.TryGetProperty("status", out var statusProp))
                         {
-                            lastStatus = statusProp.GetString();
+                            lastStatus = statusProp.GetString() ?? "";
                             Console.WriteLine(lastStatus);
 
                             string statusLower = lastStatus.ToLower();
@@ -4036,6 +4085,19 @@ namespace osync
                 Console.WriteLine($"Created directory: {installDir}");
             }
 
+            // Platform-specific optional dependencies (add files here if needed in future)
+            // These are only copied if they exist in the source directory
+            var optionalDependencies = new Dictionary<string, string[]>
+            {
+                // Example: { "osx", new[] { "libuv.dylib" } }
+                // Currently no extra dependencies needed for any platform
+                { "win", Array.Empty<string>() },
+                { "linux", Array.Empty<string>() },
+                { "osx", Array.Empty<string>() }
+            };
+
+            string platformKey = isWindows ? "win" : (isMacOS ? "osx" : "linux");
+
             try
             {
                 // Check if we're already running from the install directory
@@ -4045,27 +4107,35 @@ namespace osync
                 }
                 else
                 {
-                    // Copy all files from the application directory
-                    // This includes the exe, dlls, and all dependencies
-                    int filesCopied = 0;
+                    // Copy the main executable
+                    string sourceExePath = Path.Combine(currentExeDir, exeName);
+                    string targetExePath = Path.Combine(installDir, exeName);
 
-                    foreach (string sourceFile in Directory.GetFiles(currentExeDir, "*", SearchOption.TopDirectoryOnly))
+                    if (!System.IO.File.Exists(sourceExePath))
                     {
-                        string fileName = Path.GetFileName(sourceFile);
-
-                        // Skip unnecessary files
-                        if (fileName.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase) ||
-                            fileName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
-
-                        string targetFile = Path.Combine(installDir, fileName);
-                        System.IO.File.Copy(sourceFile, targetFile, true);
-                        filesCopied++;
+                        Console.WriteLine($"Error: Cannot find executable at {sourceExePath}");
+                        System.Environment.Exit(1);
                     }
 
-                    Console.WriteLine($"✓ Copied osync and {filesCopied - 1} dependency files to: {installDir}");
+                    System.IO.File.Copy(sourceExePath, targetExePath, true);
+                    Console.WriteLine($"✓ Copied osync to: {installDir}");
+
+                    // Copy platform-specific optional dependencies if they exist
+                    int depsCopied = 0;
+                    if (optionalDependencies.TryGetValue(platformKey, out string[]? deps) && deps.Length > 0)
+                    {
+                        foreach (string depFile in deps)
+                        {
+                            string sourceDep = Path.Combine(currentExeDir, depFile);
+                            if (System.IO.File.Exists(sourceDep))
+                            {
+                                string targetDep = Path.Combine(installDir, depFile);
+                                System.IO.File.Copy(sourceDep, targetDep, true);
+                                depsCopied++;
+                                Console.WriteLine($"  + Copied dependency: {depFile}");
+                            }
+                        }
+                    }
 
                     // On Unix systems, make the executable file executable
                     if (isLinux || isMacOS)
@@ -4077,7 +4147,7 @@ namespace osync
                                 StartInfo = new ProcessStartInfo
                                 {
                                     FileName = "chmod",
-                                    Arguments = $"+x \"{Path.Combine(installDir, exeName)}\"",
+                                    Arguments = $"+x \"{targetExePath}\"",
                                     RedirectStandardOutput = true,
                                     RedirectStandardError = true,
                                     UseShellExecute = false,
@@ -4113,7 +4183,7 @@ namespace osync
             }
 
             // Check if shell completion is available before asking
-            Console.WriteLine();
+            Console.WriteLine("");
             bool completionAvailable = true;
             string completionWarning = "";
 
@@ -4141,11 +4211,11 @@ namespace osync
             if (completionAvailable)
             {
                 Console.Write("Would you like to install shell completion? (y/n): ");
-                string response = Console.ReadLine()?.Trim().ToLower();
+                string? response = Console.ReadLine()?.Trim().ToLower();
 
                 if (response == "y" || response == "yes")
                 {
-                    Console.WriteLine();
+                    Console.WriteLine("");
                     if (isWindows)
                     {
                         InstallPowerShellCompletion();
@@ -4319,7 +4389,6 @@ namespace osync
                 }
 
                 string pathLine = $"\nexport PATH=\"{directory}:$PATH\"\n";
-                bool addedToAny = false;
 
                 foreach (string rcFile in rcFiles)
                 {
@@ -4371,7 +4440,7 @@ namespace osync
                 completionScript = completionScript.Replace("\r\n", "\n");
 
                 // Determine installation path
-                string installPath = null;
+                string? installPath = null;
                 string[] possiblePaths = new[]
                 {
                     "/etc/bash_completion.d/osync",
@@ -4384,8 +4453,8 @@ namespace osync
                 {
                     try
                     {
-                        string directory = Path.GetDirectoryName(path);
-                        if (!Directory.Exists(directory))
+                        string? directory = Path.GetDirectoryName(path);
+                        if (directory != null && !Directory.Exists(directory))
                         {
                             Directory.CreateDirectory(directory);
                         }
@@ -4478,8 +4547,8 @@ namespace osync
                 Console.WriteLine($"PowerShell profile: {profilePath}");
 
                 // Create profile directory if it doesn't exist
-                string profileDir = Path.GetDirectoryName(profilePath);
-                if (!Directory.Exists(profileDir))
+                string? profileDir = Path.GetDirectoryName(profilePath);
+                if (profileDir != null && !Directory.Exists(profileDir))
                 {
                     Directory.CreateDirectory(profileDir);
                     Console.WriteLine($"Created profile directory: {profileDir}");
@@ -4586,13 +4655,13 @@ namespace osync
                     if (parentName == "pwsh")
                     {
                         Debug.WriteLine("Detected parent as pwsh (PowerShell Core)");
-                        return parentProcess.MainModule.FileName; // Return full path to the actual executable
+                        return parentProcess.MainModule?.FileName ?? "pwsh"; // Return full path to the actual executable
                     }
                     // Check if parent is powershell (Windows PowerShell 5.x)
                     else if (parentName == "powershell")
                     {
                         Debug.WriteLine("Detected parent as powershell (Windows PowerShell)");
-                        return parentProcess.MainModule.FileName; // Return full path to the actual executable
+                        return parentProcess.MainModule?.FileName ?? "powershell"; // Return full path to the actual executable
                     }
                     else
                     {
@@ -4637,7 +4706,7 @@ namespace osync
             return "powershell";
         }
 
-        private Process GetParentProcess(Process process)
+        private Process? GetParentProcess(Process process)
         {
             try
             {
@@ -4778,39 +4847,13 @@ namespace osync
 # osync bash completion script
 
 _osync_completions() {
-    local cur prev opts commands
+    local cur prev
     COMPREPLY=()
     cur=""${COMP_WORDS[COMP_CWORD]}""
     prev=""${COMP_WORDS[COMP_CWORD-1]}""
 
     # Available commands
-    commands=""cp copy ls list rm remove del delete update show run chat ps load unload""
-
-    # Global options
-    opts=""-bt -BufferSize --size --sizeasc --time --timeasc --license --modelfile --parameters --system --template -v --verbose -h -? -d --format --keepalive --dimensions --think --hide-thinking --insecure --truncate --no-wordwrap""
-
-    # Get list of models using osync (supports both local and remote)
-    _get_models() {
-        local server_url=""$1""
-
-        # Build command and filter output
-        # Skip version line, blank lines, and header (NAME/Model)
-        if [[ -n ""$server_url"" ]]; then
-            osync ls -d ""$server_url"" 2>/dev/null | \
-                grep -v ""^osync"" | \
-                grep -v ""^NAME"" | \
-                grep -v ""^Model"" | \
-                grep -v ""^$"" | \
-                awk '{print $1}' 2>/dev/null
-        else
-            osync ls 2>/dev/null | \
-                grep -v ""^osync"" | \
-                grep -v ""^NAME"" | \
-                grep -v ""^Model"" | \
-                grep -v ""^$"" | \
-                awk '{print $1}' 2>/dev/null
-        fi
-    }
+    local commands=""cp copy ls list rm remove del delete mv ren rename update pull show run chat ps load unload manage qc qcview install quit""
 
     # First argument - complete commands
     if [[ ${COMP_CWORD} -eq 1 ]]; then
@@ -4818,91 +4861,147 @@ _osync_completions() {
         return 0
     fi
 
-    # Get the command (first argument)
-    local command=""${COMP_WORDS[1]}""
+    # Get the command - use word splitting on COMP_LINE to handle colons
+    local cmd_line=""${COMP_LINE}""
+    local command
+    read -ra cmd_words <<< ""${cmd_line}""
+    if [[ ${#cmd_words[@]} -ge 2 ]]; then
+        command=""${cmd_words[1]}""
+    else
+        return 0
+    fi
 
-    # Extract remote server URL from the raw command line
-    # COMP_WORDS splits on colons, so we use COMP_LINE instead
+    # Get the real current word from COMP_LINE (handles colons)
+    local line_to_point=""${COMP_LINE:0:COMP_POINT}""
+    local realcur=""${line_to_point##* }""
+
+    # Extract remote server URL from the command line
     local server_url=""""
-
-    # Look for -d flag followed by URL in the raw command line
-    if [[ ""$COMP_LINE"" =~ -d[[:space:]]+(https?://[^[:space:]]+) ]]; then
+    if [[ ""${COMP_LINE}"" =~ -d[[:space:]]+(https?://[^[:space:]]+) ]]; then
         server_url=""${BASH_REMATCH[1]}""
     fi
 
-    # Get models for completion (from local or remote server)
-    local models=$(_get_models ""$server_url"")
+    # Handle qcview file completion first (simple case)
+    if [[ ""${command}"" == ""qcview"" ]]; then
+        if [[ ""${cur}"" == -* ]]; then
+            COMPREPLY=( $(compgen -W ""-F -Fo -O"" -- ""${cur}"") )
+        else
+            # File completion
+            COMPREPLY=( $(compgen -f -- ""${cur}"") )
+        fi
+        return 0
+    fi
+
+    # Get models for completion
+    local models
+    if [[ -n ""${server_url}"" ]]; then
+        models=$(osync ls -d ""${server_url}"" 2>/dev/null | grep -v ""^osync"" | grep -v ""^NAME"" | grep -v ""^Model"" | grep -v ""^$"" | awk '{print $1}')
+    else
+        models=$(osync ls 2>/dev/null | grep -v ""^osync"" | grep -v ""^NAME"" | grep -v ""^Model"" | grep -v ""^$"" | awk '{print $1}')
+    fi
+
+    # Function to complete models with colon support
+    _do_model_completion() {
+        # Generate completions using the real current word (may contain colons)
+        COMPREPLY=( $(compgen -W ""${models}"" -- ""${realcur}"") )
+
+        # If realcur contains a colon, strip the prefix from completions
+        if [[ ""${realcur}"" == *:* && ${#COMPREPLY[@]} -gt 0 ]]; then
+            local prefix=""${realcur%:*}:""
+            local i
+            for i in ""${!COMPREPLY[@]}""; do
+                COMPREPLY[$i]=""${COMPREPLY[$i]#${prefix}}""
+            done
+        fi
+    }
 
     # Complete based on command
     case ""${command}"" in
         cp|copy)
-            # Complete model names or options
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-bt -BufferSize -d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
             fi
             ;;
         ls|list)
-            # Complete model name patterns or options
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""--size --sizeasc --time --timeasc -d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
             fi
             ;;
         rm|remove|del|delete)
-            # Complete model names or options
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
+            fi
+            ;;
+        mv|ren|rename)
+            if [[ ""${cur}"" == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            else
+                _do_model_completion
             fi
             ;;
         update)
-            # Complete model names or options
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
+            fi
+            ;;
+        pull)
+            if [[ ""${cur}"" == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            else
+                _do_model_completion
             fi
             ;;
         show)
-            # Complete model names and flags
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""--license --modelfile --parameters --system --template -v --verbose -d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
             fi
             ;;
         run|chat)
-            # Complete model names and flags
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d --verbose --no-wordwrap --format --keepalive --dimensions --think --hide-thinking --insecure --truncate"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
             fi
             ;;
         ps)
-            # Complete flags only (no model names for ps)
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             fi
             ;;
         load)
-            # Complete model names and flags
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
             fi
             ;;
         unload)
-            # Complete model names and flags
-            if [[ ${cur} == -* ]]; then
+            if [[ ""${cur}"" == -* ]]; then
                 COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
             else
-                COMPREPLY=( $(compgen -W ""${models}"" -- ""${cur}"") )
+                _do_model_completion
+            fi
+            ;;
+        manage)
+            if [[ ""${cur}"" == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-d"" -- ""${cur}"") )
+            fi
+            ;;
+        qc)
+            if [[ ""${cur}"" == -* ]]; then
+                COMPREPLY=( $(compgen -W ""-M -D -O -B -Q -T -Te -S -To -Top -R -Fr --force --judge --mode --timeout --verbose --judge-ctxsize --ondemand"" -- ""${cur}"") )
+            elif [[ ""${prev}"" == ""-M"" ]]; then
+                _do_model_completion
             fi
             ;;
         *)
@@ -4910,7 +5009,7 @@ _osync_completions() {
     esac
 }
 
-complete -F _osync_completions osync";
+complete -o filenames -o noquote -F _osync_completions osync";
         }
 
         private string GetPowerShellCompletionScript()
@@ -5156,25 +5255,22 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         {
             try
             {
-                Console.WriteLine($"osync v{OsyncProgram.GetAppVersion()}");
+                Console.WriteLine($"osync {OsyncProgram.GetFullVersion()}");
                 System.Console.WriteLine();
                 Console.ResetColors();
 
-                // Reorder arguments for PowerArgs compatibility on Linux
-                // PowerArgs has issues on Linux when flags come before positional arguments
                 args = ReorderArguments(args);
 
-                // If no arguments provided, enter interactive REPL mode
                 if (args.Length == 0)
                 {
                     OsyncProgram.isInteractiveMode = true;
-                    Args.InvokeAction<OsyncProgram>(args);
                 }
                 else
                 {
                     OsyncProgram.isInteractiveMode = false;
-                    Args.InvokeAction<OsyncProgram>(args);
                 }
+
+                Args.InvokeAction<OsyncProgram>(args);
             }
             catch (ArgException ex)
             {
@@ -5227,7 +5323,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 p.BeginOutputReadLine();
                 p.WaitForExit();
             }
-            catch (Exception e)
+            catch
             {
                 models = new string[] { "" };
             }
@@ -5273,11 +5369,42 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             }
         }
 
-        public bool TryComplete(TabCompletionContext context, out string? completion)
+        // Commands and flags that expect file arguments instead of model names
+        private static readonly HashSet<string> FileArgumentCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "qcview",           // qcview command takes a file as first argument
+            "-F", "/F",         // qcview -F flag
+            "-T",               // qc -T (test suite file)
+            "-O",               // qc -O (output file), qcview -O (output file)
+            "--testsuite",      // qc --testsuite
+            "--output"          // output file flags
+        };
+
+        public bool TryComplete(TabCompletionContext context, out string completion)
         {
             try
             {
                 string candidate = context.CompletionCandidate ?? "";
+                string previousToken = context.PreviousToken ?? "";
+
+                // Check if the previous token indicates we should do file completion
+                bool isFileCommand = FileArgumentCommands.Contains(previousToken);
+
+                // Check if this looks like a file path (contains path separators or file extensions)
+                bool looksLikeFilePath = candidate.Contains('/') || candidate.Contains('\\') ||
+                                         candidate.Contains('.') || candidate.StartsWith("~");
+
+                // If we're in a file command context, ONLY do file completion (skip model completion entirely)
+                if (isFileCommand)
+                {
+                    return TryCompleteFile(candidate, out completion);
+                }
+
+                // If it looks like a file path, try file completion first
+                if (looksLikeFilePath && TryCompleteFile(candidate, out completion))
+                {
+                    return true;
+                }
 
                 // Try to find matches starting with the candidate
                 var match = from m in models where m.StartsWith(candidate, StringComparison.OrdinalIgnoreCase) select m;
@@ -5331,14 +5458,14 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                         ClearPreviousOptions();
 
                         // Display all available options
-                        System.Console.WriteLine();
+                        System.Console.WriteLine("");
                         var sortedMatches = match.OrderBy(x => x).ToList();
 
                         foreach (var item in sortedMatches)
                         {
                             System.Console.WriteLine("  " + item);
                         }
-                        System.Console.WriteLine();
+                        System.Console.WriteLine("");
 
                         // Track how many lines we displayed (1 blank + items + 1 blank)
                         lastDisplayedLines = sortedMatches.Count + 2;
@@ -5363,19 +5490,160 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                     }
                     else
                     {
-                        completion = null;
+                        completion = "";
                         return false;
                     }
                 }
                 else
                 {
-                    completion = null;
+                    // No model matches - try file completion as fallback
+                    if (TryCompleteFile(candidate, out completion))
+                    {
+                        return true;
+                    }
+                    completion = "";
                     return false;
                 }
             }
-            catch(Exception e)
+            catch
             {
-                completion = null;
+                completion = "";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Try to complete a file path from the file system
+        /// </summary>
+        private bool TryCompleteFile(string candidate, out string completion)
+        {
+            completion = "";
+            try
+            {
+                // Track if original candidate was empty (for path formatting)
+                bool wasEmpty = string.IsNullOrEmpty(candidate);
+                string originalCandidate = candidate;
+
+                if (wasEmpty)
+                {
+                    // Empty candidate - list files in current directory
+                    candidate = ".";
+                }
+
+                // Expand ~ to home directory on Linux/macOS
+                if (candidate.StartsWith("~"))
+                {
+                    string home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+                    candidate = home + candidate.Substring(1);
+                }
+
+                string directory;
+                string filePrefix;
+
+                // Determine directory and file prefix
+                if (Directory.Exists(candidate) && !wasEmpty)
+                {
+                    // Candidate is a directory - list its contents
+                    directory = candidate;
+                    filePrefix = "";
+                }
+                else if (wasEmpty)
+                {
+                    // Empty candidate - use current directory, return just filenames
+                    directory = ".";
+                    filePrefix = "";
+                }
+                else
+                {
+                    // Candidate might be a partial path
+                    directory = Path.GetDirectoryName(candidate) ?? ".";
+                    filePrefix = Path.GetFileName(candidate);
+
+                    if (string.IsNullOrEmpty(directory))
+                        directory = ".";
+                }
+
+                if (!Directory.Exists(directory))
+                {
+                    return false;
+                }
+
+                // Get matching files and directories
+                var entries = new List<string>();
+
+                // Add directories (with trailing separator)
+                foreach (var dir in Directory.GetDirectories(directory))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (string.IsNullOrEmpty(filePrefix) || name.StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // If original was empty, return just the name; otherwise include path
+                        string entryPath = wasEmpty ? name : Path.Combine(directory, name);
+                        // Add trailing separator for directories
+                        entries.Add(entryPath + Path.DirectorySeparatorChar);
+                    }
+                }
+
+                // Add files
+                foreach (var file in Directory.GetFiles(directory))
+                {
+                    string name = Path.GetFileName(file);
+                    if (string.IsNullOrEmpty(filePrefix) || name.StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // If original was empty, return just the name; otherwise include path
+                        string entryPath = wasEmpty ? name : Path.Combine(directory, name);
+                        entries.Add(entryPath);
+                    }
+                }
+
+                if (entries.Count == 0)
+                {
+                    return false;
+                }
+                else if (entries.Count == 1)
+                {
+                    ClearPreviousOptions();
+                    completion = entries[0];
+                    return true;
+                }
+                else
+                {
+                    var sortedEntries = entries.OrderBy(x => x).ToList();
+
+                    // Multiple matches - find common prefix
+                    var minimumLength = sortedEntries.Min(x => x.Length);
+                    int commonChars;
+                    for (commonChars = 0; commonChars < minimumLength; commonChars++)
+                    {
+                        if (sortedEntries.Select(x => x[commonChars]).Distinct().Count() > 1)
+                        {
+                            break;
+                        }
+                    }
+
+                    string commonPrefix = sortedEntries[0].Substring(0, commonChars);
+
+                    // If candidate matches common prefix or is empty, show all options
+                    if (commonChars == originalCandidate.Length || originalCandidate.Length < commonChars || wasEmpty)
+                    {
+                        ClearPreviousOptions();
+                        System.Console.WriteLine("");
+                        foreach (var entry in sortedEntries)
+                        {
+                            // Show just the filename for cleaner display
+                            System.Console.WriteLine("  " + Path.GetFileName(entry.TrimEnd(Path.DirectorySeparatorChar)) +
+                                (entry.EndsWith(Path.DirectorySeparatorChar.ToString()) ? "/" : ""));
+                        }
+                        System.Console.WriteLine("");
+                        lastDisplayedLines = sortedEntries.Count + 2;
+                    }
+
+                    completion = commonPrefix;
+                    return true;
+                }
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -5383,7 +5651,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
 
     public static class ManifestReader
     {
-        public static T Read<T>(string filePath)
+        public static T? Read<T>(string filePath)
         {
             try
             {
@@ -5399,10 +5667,10 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
     }
     public static class StatusReader
     {
-        public static T Read<T>(string statusline)
+        public static T? Read<T>(string statusline)
         {
             try
-            {                
+            {
                 return JsonSerializer.Deserialize<T>(statusline);
             }
             catch (Exception ex)
@@ -5414,7 +5682,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
     }
     public static class VersionReader
     {
-        public static T Read<T>(string versionline)
+        public static T? Read<T>(string versionline)
         {
             try
             {
