@@ -34,6 +34,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - **Load/Unload** - VRAM management
 - **Manage** - Full-screen TUI using Terminal.Gui
 - **Qc** - Quantization comparison with test suites
+- **QcView** - Quantization comparison test results viewer
 
 ### Key Files
 
@@ -57,7 +58,6 @@ BDD tests using SpecFlow + xUnit in `osync.Tests/`:
 - Static HttpClient with 1-day timeout for large model transfers
 - Model names auto-append `:latest` tag when not specified
 - Tab completion support via PowerArgs with local models as source
-- Cross-platform publish profiles in `Properties/PublishProfiles/`
 
 ### Dependencies
 
