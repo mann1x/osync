@@ -32,6 +32,9 @@ namespace osync
         // Track partial quantization being tested (for saving on cancellation)
         private QuantResult? _currentPartialResult;
 
+        // Track models pulled on-demand this session for cleanup on failure
+        private readonly HashSet<string> _modelsPulledThisSession = new HashSet<string>();
+
         // Retry configuration for API calls
         private const int MAX_RETRY_ATTEMPTS = 5;
         private const int RETRY_DELAY_MS = 1000;
@@ -49,7 +52,7 @@ namespace osync
 YOUR TASK: Score how much RESPONSE A and RESPONSE B match each other (1-100).
 
 SCORING SCALE:
-100 = Identical content and approach
+100 = Identical content and approach or RESPONSE B is significantly better
 95-99 = Nearly identical content and approach
 90-94 = Very similar content, nearly identical approach
 85-89 = Very similar, minor differences
@@ -67,10 +70,12 @@ SCORING SCALE:
 
 CRITICAL RULES:
 - You are measuring SIMILARITY between A and B, NOT quality or correctness
-- If A and B both contain the same code/content = HIGH score (they match!)
-- If A and B contain different code/content = LOW score (they differ)
-- Do NOT judge if the responses are correct, well-written, or valid
+- If RESPONSE A and RESPONSE B both contain the same code/content = HIGH score (they match!)
+- If RESPONSE A and RESPONSE B contain different code/content = LOW score (they differ)
+- Do NOT base the judge scoring on the responses being correct, well-written, or valid.
 - Do NOT mention JSON, language proficiency, or format compliance
+- If RESPONSE B is significantly more complete and robust, better or superior then the scoring is HIGH
+- IMPORTANT: Output score as INTEGER 1-100, NOT decimal 0.0-1.0. If similarity is 100%, output 100 (not 1 or 1.0). If similarity is 85%, output 85 (not 0.85).
 
 REASON FORMAT: Start with 'A and B match:' or 'A and B differ:' then explain what each contains and why they are similar or different.";
 
@@ -78,8 +83,9 @@ REASON FORMAT: Start with 'A and B match:' or 'A and B differ:' then explain wha
 
 Remember:
 - HIGH score = A and B contain similar content
-- LOW score = A and B contain different content
-- Do NOT judge quality, correctness, or format";
+- LOW score = A and B contain different content (unless RESPONSE B is significantly better)
+- Score must be INTEGER 1-100: use 100 for identical (not 1), use 85 for 85% similar (not 0.85)
+- Do NOT judge quality, correctness, or format (unless RESPONSE B is significantly better)";
 
         public QcCommand(QcArgs args, string baseUrl = "http://localhost:11434")
         {
@@ -187,6 +193,10 @@ Remember:
             if (!_judgeEnabled || _judgeModelName == null)
                 return false;
 
+            // If --rejudge is set, always re-run judgment
+            if (_args.Rejudge)
+                return true;
+
             // Check each question - if ANY question is missing judgment or has different judge model, needs re-judgment
             foreach (var question in quantResult.QuestionResults)
             {
@@ -234,13 +244,22 @@ Remember:
                 }
 
                 // Parse quantization tags to test
-                var quantTags = _args.Quants.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                var rawQuantTags = _args.Quants.Split(',', StringSplitOptions.RemoveEmptyEntries)
                     .Select(q => q.Trim())
                     .ToList();
 
-                if (quantTags.Count == 0)
+                if (rawQuantTags.Count == 0)
                 {
                     AnsiConsole.MarkupLine("[red]Error: No quantization tags specified[/]");
+                    return 1;
+                }
+
+                // Expand wildcards in quantization tags
+                var quantTags = await ExpandWildcardTagsAsync(rawQuantTags);
+
+                if (quantTags.Count == 0)
+                {
+                    AnsiConsole.MarkupLine("[red]Error: No quantization tags found after wildcard expansion[/]");
                     return 1;
                 }
 
@@ -261,6 +280,9 @@ Remember:
                 var existingBase = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
 
                 // Determine the base tag to use
+                // Store original full base model name if specified as a full path (e.g., hf.co/namespace/repo:tag)
+                string? originalBaseModelFullName = null;
+
                 if (existingBase != null)
                 {
                     // Use the existing base tag from results file
@@ -273,8 +295,13 @@ Remember:
                 }
                 else if (_args.BaseTag.Contains(':'))
                 {
-                    // BaseTag contains a full model name, extract just the tag portion for comparison
-                    _args.BaseTag = _args.BaseTag.Substring(_args.BaseTag.LastIndexOf(':') + 1);
+                    // BaseTag contains a full model name (e.g., hf.co/namespace/repo:tag or model:tag)
+                    // Store the full model name so it's used as-is for testing
+                    originalBaseModelFullName = _args.BaseTag;
+
+                    // Extract just the tag portion for comparison/tracking
+                    var colonIndex = _args.BaseTag.LastIndexOf(':');
+                    _args.BaseTag = _args.BaseTag.Substring(colonIndex + 1);
                 }
 
                 // Ensure base tag is included if not already present
@@ -283,9 +310,11 @@ Remember:
                     (existingBase.QuestionResults.Count < _testSuite.TotalQuestions && !_args.Force);
                 bool baseNeedsForceRerun = existingBase != null && _args.Force;
 
-                if ((baseNeedsTesting || baseNeedsForceRerun) && !quantTags.Contains(_args.BaseTag))
+                // If base was specified as full model name, insert that; otherwise insert just the tag
+                string baseTagToInsert = originalBaseModelFullName ?? _args.BaseTag;
+                if ((baseNeedsTesting || baseNeedsForceRerun) && !quantTags.Contains(_args.BaseTag) && !quantTags.Contains(baseTagToInsert))
                 {
-                    quantTags.Insert(0, _args.BaseTag);
+                    quantTags.Insert(0, baseTagToInsert);
                 }
 
                 // Pre-verify all models exist at startup
@@ -293,7 +322,7 @@ Remember:
                 var missingModels = new List<string>();
                 var unavailableModels = new List<string>();
                 var modelsVerifiedMissing = new HashSet<string>(); // Track models that were missing at startup
-                var modelsPulledThisSession = new HashSet<string>(); // Track models actually pulled in this run
+                _modelsPulledThisSession.Clear(); // Reset tracking for this session
 
                 foreach (var tag in quantTags)
                 {
@@ -458,8 +487,17 @@ Remember:
                                 AnsiConsole.MarkupLine($"[red]Error: Failed to pull model {modelFullName}[/]");
                                 continue;
                             }
+
+                            // Resolve actual model name (Ollama may store with different case)
+                            var actualModelName = await ResolveActualModelNameAsync(modelFullName);
+                            if (actualModelName != null && actualModelName != modelFullName)
+                            {
+                                AnsiConsole.MarkupLine($"[dim]  Model stored as: {actualModelName}[/]");
+                                modelFullName = actualModelName;
+                            }
+
                             pulledOnDemand = true;
-                            modelsPulledThisSession.Add(modelFullName); // Track for reliable cleanup
+                            _modelsPulledThisSession.Add(modelFullName); // Track for reliable cleanup
 
                             // If resuming, immediately save PulledOnDemand flag to existing result
                             // This ensures cleanup happens even if testing is interrupted again
@@ -511,9 +549,20 @@ Remember:
 
                     // Preload model
                     AnsiConsole.MarkupLine($"[dim]Preloading model...[/]");
-                    if (!await PreloadModelAsync(modelFullName))
+                    var (preloadSuccess, preloadError) = await PreloadModelAsync(modelFullName);
+                    if (!preloadSuccess)
                     {
                         AnsiConsole.MarkupLine($"[red]Error: Failed to preload {modelFullName}[/]");
+                        if (!string.IsNullOrEmpty(preloadError))
+                        {
+                            AnsiConsole.MarkupLine($"[red]  {preloadError}[/]");
+                        }
+                        // Clean up on-demand model if preload fails
+                        if (pulledOnDemand || _modelsPulledThisSession.Contains(modelFullName))
+                        {
+                            await DeleteModelAsync(modelFullName);
+                            _modelsPulledThisSession.Remove(modelFullName);
+                        }
                         continue;
                     }
 
@@ -561,8 +610,8 @@ Remember:
 
                         // Clean up on-demand models immediately after testing completes
                         // Judgment doesn't need the model loaded - it only compares saved answers
-                        // Use modelsPulledThisSession as the definitive check for cleanup
-                        bool shouldCleanup = pulledOnDemand || modelsPulledThisSession.Contains(modelFullName);
+                        // Use _modelsPulledThisSession as the definitive check for cleanup
+                        bool shouldCleanup = pulledOnDemand || _modelsPulledThisSession.Contains(modelFullName);
                         if (shouldCleanup)
                         {
                             await DeleteModelAsync(modelFullName);
@@ -571,7 +620,7 @@ Remember:
                             SaveResultsFile();
                         }
                     }
-                    else if (pulledOnDemand || modelsPulledThisSession.Contains(modelFullName))
+                    else if (pulledOnDemand || _modelsPulledThisSession.Contains(modelFullName))
                     {
                         // Testing failed but model was pulled on-demand, clean it up
                         await DeleteModelAsync(modelFullName);
@@ -648,6 +697,7 @@ Remember:
                 // Graceful shutdown requested (includes TaskCanceledException)
                 AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
                 SavePartialResults();
+                await CleanupOnDemandModelsAsync();
                 return 2;
             }
             catch (Exception ex) when (ex.InnerException is OperationCanceledException)
@@ -655,12 +705,14 @@ Remember:
                 // Cancellation wrapped in another exception (e.g., from Spectre.Console Progress)
                 AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
                 SavePartialResults();
+                await CleanupOnDemandModelsAsync();
                 return 2;
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
                 SavePartialResults();
+                await CleanupOnDemandModelsAsync();
                 return 1;
             }
             finally
@@ -734,6 +786,60 @@ Remember:
                     AnsiConsole.MarkupLine($"[dim]{testedCount} quantization(s) saved[/]");
                 }
                 AnsiConsole.MarkupLine($"[dim]Resume with the same command to continue from where you left off.[/]");
+            }
+        }
+
+        /// <summary>
+        /// Clean up on-demand models that were pulled during this session.
+        /// Called on failure/cancellation to ensure pulled models don't remain.
+        /// </summary>
+        private async Task CleanupOnDemandModelsAsync()
+        {
+            if (!_args.OnDemand || _modelsPulledThisSession.Count == 0)
+                return;
+
+            AnsiConsole.MarkupLine($"[dim]Cleaning up {_modelsPulledThisSession.Count} on-demand model(s)...[/]");
+
+            foreach (var modelName in _modelsPulledThisSession.ToList())
+            {
+                try
+                {
+                    await DeleteModelAsync(modelName);
+                    _modelsPulledThisSession.Remove(modelName);
+                    AnsiConsole.MarkupLine($"[dim]  Removed: {modelName}[/]");
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {modelName}: {ex.Message}[/]");
+                }
+            }
+
+            // Also clean up any models marked in the results file
+            if (_resultsFile != null)
+            {
+                var onDemandResults = _resultsFile.Results.Where(r => r.PulledOnDemand).ToList();
+                foreach (var result in onDemandResults)
+                {
+                    if (!_modelsPulledThisSession.Contains(result.ModelName))
+                    {
+                        try
+                        {
+                            await DeleteModelAsync(result.ModelName);
+                            result.PulledOnDemand = false;
+                            AnsiConsole.MarkupLine($"[dim]  Removed: {result.ModelName}[/]");
+                        }
+                        catch (Exception ex)
+                        {
+                            AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {result.ModelName}: {ex.Message}[/]");
+                        }
+                    }
+                }
+
+                // Save to persist cleared PulledOnDemand flags
+                if (onDemandResults.Count > 0)
+                {
+                    SaveResultsFile();
+                }
             }
         }
 
@@ -1043,25 +1149,78 @@ Remember:
 
         /// <summary>
         /// Preload model into memory using empty chat request
+        /// Returns (success, errorMessage)
         /// </summary>
-        private async Task<bool> PreloadModelAsync(string modelName)
+        private async Task<(bool success, string? error)> PreloadModelAsync(string modelName)
         {
-            try
-            {
-                var request = new
-                {
-                    model = modelName,
-                    messages = new[] { new { role = "user", content = "Hi" } },
-                    stream = false
-                };
+            const int maxRetries = 3;
+            string? lastError = null;
 
-                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/chat", request);
-                return response.IsSuccessStatusCode;
-            }
-            catch
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
-                return false;
+                try
+                {
+                    var request = new
+                    {
+                        model = modelName,
+                        messages = new[] { new { role = "user", content = "Hi" } },
+                        stream = false
+                    };
+
+                    // Use a longer timeout for preload (model loading can take time)
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_args.Timeout));
+                    var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/chat", request, cts.Token);
+
+                    if (response.IsSuccessStatusCode)
+                    {
+                        return (true, null);
+                    }
+
+                    // Get error details from response
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    lastError = $"HTTP {(int)response.StatusCode}: {errorContent}";
+
+                    // Check if it's a retryable error
+                    if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
+                        response.StatusCode == System.Net.HttpStatusCode.InternalServerError)
+                    {
+                        if (attempt < maxRetries)
+                        {
+                            AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} failed, retrying...[/]");
+                            await Task.Delay(2000 * attempt); // Exponential backoff
+                            continue;
+                        }
+                    }
+
+                    return (false, lastError);
+                }
+                catch (TaskCanceledException)
+                {
+                    lastError = "Timeout waiting for model to load";
+                    if (attempt < maxRetries)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} timed out, retrying...[/]");
+                        continue;
+                    }
+                }
+                catch (HttpRequestException ex)
+                {
+                    lastError = $"Connection error: {ex.Message}";
+                    if (attempt < maxRetries)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} failed ({ex.Message}), retrying...[/]");
+                        await Task.Delay(2000 * attempt);
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex.Message;
+                    return (false, lastError);
+                }
             }
+
+            return (false, lastError);
         }
 
         /// <summary>
@@ -1522,7 +1681,7 @@ Remember:
                 var questionsToJudge = quantResult.QuestionResults.Count(q =>
                 {
                     var baseQ = baseResult.QuestionResults.FirstOrDefault(b => b.QuestionId == q.QuestionId);
-                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModel != _judgeModelName || _args.Force);
+                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModel != _judgeModelName || _args.Force || _args.Rejudge);
                 });
                 ResetVerboseProgress(questionsToJudge, quantResult.Tag);
 
@@ -1544,7 +1703,7 @@ Remember:
                     // Check if already judged with same model
                     if (quantQuestion.Judgment != null &&
                         quantQuestion.Judgment.JudgeModel == _judgeModelName &&
-                        !_args.Force)
+                        !_args.Force && !_args.Rejudge)
                     {
                         skippedCount++;
                         continue;
@@ -1600,7 +1759,7 @@ Remember:
                             // Check if already judged with same model
                             if (quantQuestion.Judgment != null &&
                                 quantQuestion.Judgment.JudgeModel == _judgeModelName &&
-                                !_args.Force)
+                                !_args.Force && !_args.Rejudge)
                             {
                                 skippedCount++;
                                 task.Increment(1);
@@ -1655,7 +1814,7 @@ Remember:
                 // Check if already judged with same model
                 if (quantQuestion.Judgment != null &&
                     quantQuestion.Judgment.JudgeModel == _judgeModelName &&
-                    !_args.Force)
+                    !_args.Force && !_args.Rejudge)
                 {
                     skippedCount++;
                     continue;
@@ -1795,6 +1954,179 @@ Remember:
         }
 
         /// <summary>
+        /// Normalizes a score to the 1-100 range.
+        /// Scores in 0.0-1.0 range are multiplied by 100.
+        /// Scores already in 1-100 range are kept as-is.
+        /// </summary>
+        private static int NormalizeScoreTo100(double scoreValue)
+        {
+            // If score is in 0.0-1.0 range, convert to 1-100
+            if (scoreValue <= 1.0)
+            {
+                return (int)Math.Round(scoreValue * 100);
+            }
+            // Score is already in 1-100+ range, use as-is
+            return (int)Math.Round(scoreValue);
+        }
+
+        /// <summary>
+        /// Attempts to fix truncated JSON by adding missing closing quotes, braces, etc.
+        /// Returns the potentially fixed JSON string
+        /// </summary>
+        private static string TryFixTruncatedJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return json;
+
+            var trimmed = json.Trim();
+
+            // Count quotes, braces, and brackets
+            int openBraces = 0, closeBraces = 0;
+            int openBrackets = 0, closeBrackets = 0;
+            bool inString = false;
+            bool escaped = false;
+
+            for (int i = 0; i < trimmed.Length; i++)
+            {
+                char c = trimmed[i];
+
+                if (escaped)
+                {
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                }
+                else if (!inString)
+                {
+                    switch (c)
+                    {
+                        case '{': openBraces++; break;
+                        case '}': closeBraces++; break;
+                        case '[': openBrackets++; break;
+                        case ']': closeBrackets++; break;
+                    }
+                }
+            }
+
+            var result = new StringBuilder(trimmed);
+
+            // If we're still in a string, close it
+            if (inString)
+            {
+                result.Append('"');
+            }
+
+            // Add missing closing brackets
+            while (closeBrackets < openBrackets)
+            {
+                result.Append(']');
+                closeBrackets++;
+            }
+
+            // Add missing closing braces
+            while (closeBraces < openBraces)
+            {
+                result.Append('}');
+                closeBraces++;
+            }
+
+            return result.ToString();
+        }
+
+        /// <summary>
+        /// Helper method to get a JSON property case-insensitively
+        /// Tries multiple property names and returns the first match
+        /// </summary>
+        private static bool TryGetPropertyCaseInsensitive(JsonElement element, string[] propertyNames, out JsonElement value)
+        {
+            value = default;
+            foreach (var prop in element.EnumerateObject())
+            {
+                foreach (var name in propertyNames)
+                {
+                    if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = prop.Value;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Helper method to extract reason from raw JSON response using multiple strategies
+        /// Used as a fallback when normal JSON parsing fails to find the reason field
+        /// </summary>
+        private static string? TryExtractReasonFromRawResponse(string rawResponse)
+        {
+            if (string.IsNullOrWhiteSpace(rawResponse))
+                return null;
+
+            // Strategy 1: Try to parse as JSON (with truncation fix) and use case-insensitive property lookup
+            string[] jsonVariants = new[] { rawResponse, TryFixTruncatedJson(rawResponse) };
+            foreach (var jsonToParse in jsonVariants.Distinct())
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonToParse);
+                    if (TryGetPropertyCaseInsensitive(doc.RootElement, new[] { "reason", "response", "explanation" }, out var reasonElement))
+                    {
+                        var reason = reasonElement.GetString();
+                        if (!string.IsNullOrWhiteSpace(reason))
+                            return reason;
+                    }
+                }
+                catch
+                {
+                    // JSON parsing failed, try next variant or fall through to regex
+                }
+            }
+
+            // Strategy 2: Try multiple regex patterns for maximum compatibility (case-insensitive)
+            Match reasonMatch = Match.Empty;
+
+            // Pattern A: Standard JSON format with escaped quotes
+            if (!reasonMatch.Success)
+                reasonMatch = Regex.Match(rawResponse, @"""(?:reason|response|explanation)""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Pattern B: Simpler pattern - just find the key and capture until closing quote
+            if (!reasonMatch.Success)
+                reasonMatch = Regex.Match(rawResponse, @"[""']?(?:reason|response|explanation)[""']?\s*:\s*[""']([^""']+)[""']", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Pattern C: Very lenient - key followed by colon and quoted value (non-greedy)
+            if (!reasonMatch.Success)
+                reasonMatch = Regex.Match(rawResponse, @"(?:reason|response|explanation)\s*:\s*""(.+?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // Pattern D: Truncated JSON - capture everything after opening quote until end (for truncated responses)
+            if (!reasonMatch.Success)
+                reasonMatch = Regex.Match(rawResponse, @"""(?:reason|response|explanation)""\s*:\s*""(.+)$", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            if (reasonMatch.Success && reasonMatch.Groups.Count > 1)
+            {
+                var reason = reasonMatch.Groups[1].Value
+                    .Replace("\\n", "\n")
+                    .Replace("\\r", "\r")
+                    .Replace("\\\"", "\"")
+                    .Replace("\\\\", "\\");
+                if (!string.IsNullOrWhiteSpace(reason))
+                    return reason;
+            }
+
+            return null;
+        }
+
+        /// <summary>
         /// Judge a single question comparison (with retry)
         /// </summary>
         private Task<JudgmentResult?> JudgeQuestionAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
@@ -1827,6 +2159,18 @@ Remember:
                 if (!string.IsNullOrWhiteSpace(result.Reason))
                     return result;
 
+                // If reason is empty but we have RawResponse, try regex fallback to extract reason
+                if (string.IsNullOrWhiteSpace(result.Reason) && !string.IsNullOrWhiteSpace(result.RawResponse))
+                {
+                    var extractedReason = TryExtractReasonFromRawResponse(result.RawResponse);
+                    if (!string.IsNullOrWhiteSpace(extractedReason))
+                    {
+                        result.Reason = extractedReason;
+                        result.RawResponse = null; // Clear raw response since we extracted the reason
+                        return result;
+                    }
+                }
+
                 // Reason is missing, retry if we have attempts left
                 if (attempt < maxReasonRetries)
                 {
@@ -1838,7 +2182,16 @@ Remember:
                 AnsiConsole.MarkupLine($"[yellow]Warning: Judge returned score without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
                 if (!string.IsNullOrWhiteSpace(result.RawResponse))
                 {
-                    AnsiConsole.MarkupLine($"[dim]Raw JSON response: {Markup.Escape(result.RawResponse)}[/]");
+                    // Output full raw JSON for debugging (word-wrap at console width)
+                    AnsiConsole.MarkupLine("[dim]Raw JSON response:[/]");
+                    var consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+                    var escaped = Markup.Escape(result.RawResponse);
+                    // Word wrap the response for readability
+                    for (int i = 0; i < escaped.Length; i += consoleWidth - 4)
+                    {
+                        var chunk = escaped.Substring(i, Math.Min(consoleWidth - 4, escaped.Length - i));
+                        AnsiConsole.MarkupLine($"[dim]    {chunk}[/]");
+                    }
                 }
                 return result;
             }
@@ -1887,8 +2240,8 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                     {
                         score = new
                         {
-                            type = "integer",
-                            description = "Similarity score from 1 to 100"
+                            type = "number",
+                            description = "Similarity score: use 1-100 scale (e.g., 85 for 85% similar). Do NOT use 0.0-1.0 scale."
                         },
                         reason = new
                         {
@@ -1902,7 +2255,7 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 {
                     temperature = 0.0,
                     seed = 42,
-                    num_predict = 200,
+                    num_predict = 800, // Increased from 200 to avoid truncated JSON responses
                     num_ctx = _args.JudgeCtxSize
                 }
             };
@@ -1935,64 +2288,98 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 throw new InvalidOperationException($"No 'content' field in message: {responseJson}");
             }
 
-            var responseText = contentElement.GetString() ?? "";
+            var responseText = (contentElement.GetString() ?? "").Trim();
 
             // Parse the structured JSON response
             int score = 0;
             string reason = "";
 
-            try
+            // Try JSON parsing first, then try fixing truncated JSON, then fall back to regex
+            bool jsonParsed = false;
+            string jsonToParse = responseText;
+
+            // Try parsing twice: first as-is, then with truncation fixes
+            for (int parseAttempt = 0; parseAttempt < 2 && !jsonParsed; parseAttempt++)
             {
-                using var scoreDoc = JsonDocument.Parse(responseText);
-                var scoreRoot = scoreDoc.RootElement;
-
-                // Try "score" field first, then "similarity" as fallback (some models use this)
-                if (scoreRoot.TryGetProperty("score", out var scoreElement))
+                if (parseAttempt == 1)
                 {
-                    if (scoreElement.ValueKind == JsonValueKind.Number)
-                    {
-                        score = (int)Math.Round(scoreElement.GetDouble());
-                    }
-                }
-                else if (scoreRoot.TryGetProperty("similarity", out var simElement))
-                {
-                    if (simElement.ValueKind == JsonValueKind.Number)
-                    {
-                        // Handle similarity as 0-1 range or 0-100 range
-                        var simValue = simElement.GetDouble();
-                        score = simValue <= 1.0 ? (int)Math.Round(simValue * 100) : (int)Math.Round(simValue);
-                    }
+                    // Second attempt: try to fix truncated JSON
+                    jsonToParse = TryFixTruncatedJson(responseText);
+                    if (jsonToParse == responseText)
+                        break; // No changes made, skip second attempt
                 }
 
-                // Try "reason" field first, then "response" or "explanation" as fallback
-                if (scoreRoot.TryGetProperty("reason", out var reasonElement))
+                try
                 {
-                    reason = reasonElement.GetString() ?? "";
+                    using var scoreDoc = JsonDocument.Parse(jsonToParse);
+                    var scoreRoot = scoreDoc.RootElement;
+                    jsonParsed = true;
+
+                    // Try "score" field first, then "similarity" as fallback (some models use this)
+                    // Use case-insensitive lookup to handle Score, SCORE, score, etc.
+                    if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "score", "similarity" }, out var scoreElement))
+                    {
+                        if (scoreElement.ValueKind == JsonValueKind.Number)
+                        {
+                            var scoreValue = scoreElement.GetDouble();
+                            // Convert 0.0-1.0 range to 1-100 range before saving
+                            // Values <= 1.0 are assumed to be in 0.0-1.0 range (multiply by 100)
+                            // Values > 1.0 are assumed to be already in 1-100 range
+                            score = NormalizeScoreTo100(scoreValue);
+                        }
+                    }
+
+                    // Try "reason" field first, then "response" or "explanation" as fallback
+                    // Use case-insensitive lookup to handle Reason, REASON, reason, etc.
+                    if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "reason", "response", "explanation" }, out var reasonElement))
+                    {
+                        reason = reasonElement.GetString() ?? "";
+                    }
                 }
-                else if (scoreRoot.TryGetProperty("response", out var respElement))
+                catch
                 {
-                    reason = respElement.GetString() ?? "";
-                }
-                else if (scoreRoot.TryGetProperty("explanation", out var explElement))
-                {
-                    reason = explElement.GetString() ?? "";
+                    // JSON parsing failed, will try truncation fix or fall through to regex
                 }
             }
-            catch
+
+            // If score is still 0, try regex fallback (case-insensitive)
+            if (score == 0)
             {
-                // Try regex fallback for malformed JSON - check both score and similarity
-                var scoreMatch = Regex.Match(responseText, @"""?(?:score|similarity)""?\s*:\s*(\d+(?:\.\d+)?)");
+                var scoreMatch = Regex.Match(responseText, @"""?(?:score|similarity)""?\s*:\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
                 if (scoreMatch.Success)
                 {
                     if (double.TryParse(scoreMatch.Groups[1].Value, out var parsed))
                     {
-                        score = parsed <= 1.0 ? (int)Math.Round(parsed * 100) : (int)Math.Round(parsed);
+                        // Convert 0.0-1.0 to 1-100 before saving
+                        score = NormalizeScoreTo100(parsed);
                     }
                 }
+            }
 
-                // Try to match reason with escaped quotes and newlines
-                var reasonMatch = Regex.Match(responseText, @"""?(?:reason|response|explanation)""?\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
-                if (reasonMatch.Success)
+            // ALWAYS try regex fallback for reason if still empty (case-insensitive)
+            // This handles cases where JSON parsing found the field but failed to extract it
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                // Try multiple regex patterns in order of specificity
+                Match reasonMatch = Match.Empty;
+
+                // Pattern A: Standard JSON format - "Reason": "value" (handles escaped chars)
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"""(?:reason|response|explanation)""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                // Pattern B: Simpler pattern - just find the key and capture until closing quote
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"[""']?(?:reason|response|explanation)[""']?\s*:\s*[""']([^""']+)[""']", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                // Pattern C: Very lenient - key followed by colon and quoted value
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"(?:reason|response|explanation)\s*:\s*""(.+?)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                // Pattern D: Truncated JSON - capture everything after opening quote until end (for truncated responses)
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"""(?:reason|response|explanation)""\s*:\s*""(.+)$", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (reasonMatch.Success && reasonMatch.Groups.Count > 1)
                 {
                     reason = reasonMatch.Groups[1].Value
                         .Replace("\\n", "\n")
@@ -2099,6 +2486,100 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
         }
 
         /// <summary>
+        /// Expands wildcard patterns in quantization tags.
+        /// Supports patterns like "*", "Q4*", "IQ*", "hf.co/namespace/repo:Q4*"
+        /// </summary>
+        private async Task<List<string>> ExpandWildcardTagsAsync(List<string> rawTags)
+        {
+            var result = new List<string>();
+            var resolver = new ModelTagResolver(_httpClient);
+            var hasWildcards = rawTags.Any(t => t.Contains('*'));
+
+            if (hasWildcards)
+            {
+                AnsiConsole.MarkupLine($"[dim]Expanding wildcard patterns...[/]");
+            }
+
+            foreach (var rawTag in rawTags)
+            {
+                if (!rawTag.Contains('*'))
+                {
+                    // No wildcard, use as-is
+                    result.Add(rawTag);
+                    continue;
+                }
+
+                // Determine model source and tag pattern
+                string modelSource;
+                string tagPattern;
+
+                if (rawTag.Contains(':'))
+                {
+                    // Format: "hf.co/namespace/repo:Q4*" or "model:tag*"
+                    var colonIndex = rawTag.LastIndexOf(':');
+                    modelSource = rawTag.Substring(0, colonIndex);
+                    tagPattern = rawTag.Substring(colonIndex + 1);
+                }
+                else
+                {
+                    // Format: "Q4*" or "*" - use model name from args
+                    modelSource = _args.ModelName;
+                    tagPattern = rawTag;
+                }
+
+                try
+                {
+                    var resolvedTags = await resolver.ResolveTagPatternAsync(modelSource, tagPattern, _cts.Token);
+
+                    if (resolvedTags.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: No tags found matching pattern '{rawTag}'[/]");
+                        continue;
+                    }
+
+                    AnsiConsole.MarkupLine($"[dim]  Pattern '{rawTag}' matched {resolvedTags.Count} tag(s)[/]");
+
+                    foreach (var resolved in resolvedTags)
+                    {
+                        // Build the full tag reference
+                        string fullTag;
+                        if (modelSource.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // HuggingFace model - include full path
+                            fullTag = $"{modelSource}:{resolved.Tag}";
+                        }
+                        else if (modelSource != _args.ModelName)
+                        {
+                            // Different model source specified - include it
+                            fullTag = $"{modelSource}:{resolved.Tag}";
+                        }
+                        else
+                        {
+                            // Same as model name - just use tag
+                            fullTag = resolved.Tag;
+                        }
+
+                        if (!result.Contains(fullTag, StringComparer.OrdinalIgnoreCase))
+                        {
+                            result.Add(fullTag);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Failed to expand pattern '{rawTag}': {ex.Message}[/]");
+                }
+            }
+
+            if (hasWildcards && result.Count > 0)
+            {
+                AnsiConsole.MarkupLine($"[dim]Expanded to {result.Count} quantization(s): {string.Join(", ", result.Take(5))}{(result.Count > 5 ? "..." : "")}[/]");
+            }
+
+            return result;
+        }
+
+        /// <summary>
         /// Check if a model exists on the Ollama instance
         /// </summary>
         private async Task<bool> CheckModelExistsAsync(string modelName)
@@ -2112,6 +2593,45 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Resolve the actual model name as stored by Ollama (case-insensitive lookup).
+        /// Ollama may store models with different case than requested (e.g., Q4_0 -> q4_0).
+        /// </summary>
+        private async Task<string?> ResolveActualModelNameAsync(string requestedName)
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync($"{_baseUrl}/api/tags");
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                var json = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+
+                if (!doc.RootElement.TryGetProperty("models", out var modelsArray))
+                    return null;
+
+                foreach (var model in modelsArray.EnumerateArray())
+                {
+                    if (model.TryGetProperty("name", out var nameElement))
+                    {
+                        var storedName = nameElement.GetString();
+                        if (storedName != null &&
+                            string.Equals(storedName, requestedName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return storedName;
+                        }
+                    }
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -2136,6 +2656,13 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 {
                     modelNameWithoutTag = modelName;
                     tag = "latest";
+                }
+
+                // HuggingFace models are pulled directly from HuggingFace, not Ollama registry
+                // Check HuggingFace API instead
+                if (modelNameWithoutTag.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return await CheckHuggingFaceModelExistsAsync(modelNameWithoutTag, tag);
                 }
 
                 // Determine registry path
@@ -2180,6 +2707,59 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Check if a HuggingFace model exists by querying the HuggingFace API
+        /// Model format: hf.co/{namespace}/{repo}:{tag}
+        /// </summary>
+        private async Task<bool> CheckHuggingFaceModelExistsAsync(string modelNameWithoutTag, string tag)
+        {
+            try
+            {
+                // Parse hf.co/{namespace}/{repo}
+                var path = modelNameWithoutTag.Substring("hf.co/".Length);
+                var parts = path.Split('/');
+                if (parts.Length < 2)
+                    return false;
+
+                var namespacePart = parts[0];
+                var repo = parts[1];
+
+                // Check if the repository exists on HuggingFace
+                var hfClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+                hfClient.DefaultRequestHeaders.Add("User-Agent", "osync");
+
+                // First check if repo exists
+                var repoUrl = $"https://huggingface.co/api/models/{namespacePart}/{repo}";
+                var repoResponse = await hfClient.GetAsync(repoUrl, _cts.Token);
+
+                if (!repoResponse.IsSuccessStatusCode)
+                    return false;
+
+                // Check if the specific GGUF file exists for the tag
+                // Common patterns: {repo}-{tag}.gguf, {repo}.{tag}.gguf, {tag}.gguf
+                var filesUrl = $"https://huggingface.co/api/models/{namespacePart}/{repo}/tree/main";
+                var filesResponse = await hfClient.GetAsync(filesUrl, _cts.Token);
+
+                if (!filesResponse.IsSuccessStatusCode)
+                    return true; // Repository exists, assume file is accessible
+
+                var filesJson = await filesResponse.Content.ReadAsStringAsync();
+                var tagLower = tag.ToLowerInvariant();
+
+                // Check if any GGUF file matches the tag pattern
+                // The tag is typically extracted from filename like: model-Q8_0.gguf -> Q8_0
+                return filesJson.Contains($"{tag}.gguf", StringComparison.OrdinalIgnoreCase) ||
+                       filesJson.Contains($"-{tag}.gguf", StringComparison.OrdinalIgnoreCase) ||
+                       filesJson.Contains($".{tag}.gguf", StringComparison.OrdinalIgnoreCase) ||
+                       filesJson.Contains($"_{tag}.gguf", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                // On error, assume model might exist to allow pull attempt
+                return true;
             }
         }
 

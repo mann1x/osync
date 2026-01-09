@@ -191,7 +191,7 @@ namespace osync
         [ArgDescription("Base quantization tag for comparison (default: fp16, or existing base from results file)"), ArgShortcut("-B")]
         public string BaseTag { get; set; } = string.Empty;
 
-        [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated)"), ArgShortcut("-Q")]
+        [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated, supports wildcards e.g., Q4*,IQ*)"), ArgShortcut("-Q")]
         public string Quants { get; set; } = string.Empty;
 
         [ArgDescription("Test suite: v1base (50 questions), v1quick (v1base with 10 questions), v1code (50 questions coding-focused) or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
@@ -217,6 +217,9 @@ namespace osync
 
         [ArgDescription("Force re-run testing for quantizations already present in results file"), ArgShortcut("--force")]
         public bool Force { get; set; }
+
+        [ArgDescription("Re-run judgment process for existing test results"), ArgShortcut("--rejudge")]
+        public bool Rejudge { get; set; }
 
         [ArgDescription("Judge model for similarity scoring (local model name or http://host:port/model for remote)"), ArgShortcut("--judge")]
         public string Judge { get; set; } = string.Empty;

@@ -75,6 +75,12 @@
 
 ## Usage
 
+### DeepWiki
+
+An AI generated DeepWiki is available here:
+
+https://deepwiki.com/mann1x/osync
+
 ### Quick Start
 
 ```bash
@@ -493,10 +499,37 @@ When resuming:
 - Missing judgments are automatically detected and run
 - Progress bars show resumed position
 
+**Wildcard Tag Selection:**
+
+Use wildcards (`*`) to select multiple quantizations from HuggingFace or Ollama registries:
+
+```bash
+# Test all quantizations from a HuggingFace repository
+osync qc -M LFM2.5-1.2B-Instruct -b F16 -Q hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF:*
+
+# Test only IQ quantizations (case-insensitive)
+osync qc -M hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF -b F16 -Q IQ*
+
+# Test Q4 and Q5 quantizations
+osync qc -M llama3.2 -b fp16 -Q Q4*,Q5*
+
+# Mix HuggingFace base with Ollama quants
+osync qc -M LFM2.5-1.2B-Instruct -b hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF:F16 -Q IQ*,Q4*,Q5*
+
+# Multiple HuggingFace patterns
+osync qc -M LFM2.5-1.2B-Instruct -b hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF:F16 -Q hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF:IQ*,hf.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF:Q5*
+```
+
+Wildcard behavior:
+- `*` matches any characters (case-insensitive)
+- Tags are fetched from HuggingFace API for `hf.co/...` models
+- Tags are scraped from Ollama website for Ollama registry models
+- Patterns without model prefix use the `-M` model as source
+
 **Options:**
 
 - `-M <name>` - Model name without tag (required)
-- `-Q <tags>` - Comma-separated quantization tags to compare (required)
+- `-Q <tags>` - Comma-separated quantization tags to compare, supports wildcards (e.g., `Q4*,IQ*`) (required)
 - `-B <tag>` - Base quantization tag for comparison (default: fp16, or uses existing base from results file)
 - `-D <url>` - Remote server URL (default: local)
 - `-O <file>` - Output results file (default: modelname.qc.json)
@@ -508,6 +541,7 @@ When resuming:
 - `-Fr <value>` - frequency_penalty parameter
 - `-T <file>` - External test suite JSON file (default: internal v1base)
 - `--force` - Force re-run testing for quantizations already present in results file
+- `--rejudge` - Re-run judgment process for existing test results (without re-testing)
 - `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
 - `--judge-ctxsize <value>` - Context length for judge model (default: 12288)
 - `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
@@ -531,6 +565,9 @@ osync qc -M llama3.2 -Q q4_k_m --judge http://192.168.1.200:11434/mistral
 
 # Parallel mode (judge runs concurrently with testing)
 osync qc -M llama3.2 -Q q4_k_m --judge mistral --mode parallel
+
+# Re-run judgment only (use existing test results)
+osync qc -M llama3.2 -Q q4_k_m --judge mistral --rejudge
 ```
 
 When judgment scoring is enabled:
@@ -538,7 +575,7 @@ When judgment scoring is enabled:
 - Returns a similarity score from 1-100 for each question with reasoning
 - Final score is calculated as: **50% metrics + 50% judgment**
 - Results display shows separate columns for Final Score, Metrics Score, and Judge Score
-- Existing judgments are skipped unless `--force` is used or a different judge model is specified
+- Existing judgments are skipped unless `--force`, `--rejudge` is used, or a different judge model is specified
 
 **Judge Execution Modes:**
 
@@ -844,6 +881,48 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.4
+- **New --rejudge Argument for QC Command** - Re-run judgment without re-testing
+  - New `--rejudge` argument to re-run judgment process for existing test results
+  - Unlike `--force` which re-runs both testing and judgment, `--rejudge` only re-runs judgment
+  - Useful for re-evaluating results with a different judge model or updated prompts
+- **Improved Judge Response Parsing** - More robust handling of judge model responses
+  - Case-insensitive JSON property matching for Reason/reason/REASON fields
+  - Multiple regex patterns with increasing leniency for fallback parsing
+  - Truncated JSON repair to handle incomplete responses from models
+  - Increased num_predict from 200 to 800 to reduce truncated responses
+  - Full raw JSON output displayed when reason parsing fails (for debugging)
+- **Improved Judge Scoring Accuracy** - Fixed score interpretation issues
+  - Changed JSON schema score type from "integer" to "number" for better model compatibility
+  - Added explicit prompt instructions for 1-100 integer scoring (not 0.0-1.0 decimal)
+  - Score normalization to handle both 0.0-1.0 and 1-100 ranges from different models
+- **Fixed HuggingFace Model Verification in On-Demand Mode** - Registry check now supports HuggingFace models
+  - On-demand mode (`--ondemand`) now properly verifies HuggingFace models (hf.co/...)
+  - Checks HuggingFace API to verify repository and GGUF file existence
+  - Supports various GGUF filename patterns for tag matching
+- **Fixed Base Model Name Handling** - Full model names now preserved for base tag
+  - Base model specified as full model name (e.g., `-b qwen3-coder:30b-a3b-fp16` or `-b hf.co/namespace/repo:tag`) is now used as-is
+  - Previously, only the tag portion was extracted and combined with `-M` model name
+- **Wildcard Tag Selection for QC Command** - Dynamically select quantizations with patterns
+  - Support for wildcard patterns (`*`) in `-Q` argument (e.g., `Q4*`, `IQ*`, `*`)
+  - Fetches available tags from HuggingFace API for `hf.co/...` models
+  - Scrapes available tags from Ollama website for Ollama registry models
+  - Case-insensitive pattern matching
+  - New `ModelTagResolver` class for reusable tag resolution across commands
+- **Improved On-Demand Cleanup** - Models pulled on-demand are now properly cleaned up on failure
+  - On-demand models are removed when testing fails or is cancelled
+  - Cleanup happens in exception handlers to ensure no orphaned models remain
+  - Models tracked at class level for reliable cleanup across failures
+  - Preload failures now also trigger cleanup of on-demand models
+- **Improved Model Preload** - Better error handling and retry logic for model loading
+  - Added retry logic (3 attempts with exponential backoff) for transient failures
+  - Shows actual error message when preload fails (HTTP status, error details)
+  - Uses configurable timeout (`--timeout`) for model loading
+  - Handles timeout, connection errors, and server errors gracefully
+- **Fixed Model Name Case Sensitivity** - Handle Ollama storing HuggingFace tags with different case
+  - After pulling, resolves actual model name stored by Ollama (case-insensitive lookup)
+  - Fixes issue where `Q4_0` is stored as `q4_0` causing preload to fail
 
 v1.2.3
 - **On-Demand Mode for QC Command** - Pull models automatically and remove after testing
