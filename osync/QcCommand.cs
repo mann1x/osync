@@ -32,6 +32,9 @@ namespace osync
         // Track partial quantization being tested (for saving on cancellation)
         private QuantResult? _currentPartialResult;
 
+        // Track whether the current model being tested was pulled on-demand
+        private bool _currentModelPulledOnDemand;
+
         // Track models pulled on-demand this session for cleanup on failure
         private readonly HashSet<string> _modelsPulledThisSession = new HashSet<string>();
 
@@ -287,6 +290,11 @@ Remember:
                 {
                     // Use the existing base tag from results file
                     _args.BaseTag = existingBase.Tag;
+                    // Also preserve the full model name from the existing base for insertion
+                    if (!string.IsNullOrEmpty(existingBase.ModelName))
+                    {
+                        originalBaseModelFullName = existingBase.ModelName;
+                    }
                 }
                 else if (string.IsNullOrEmpty(_args.BaseTag))
                 {
@@ -330,12 +338,21 @@ Remember:
 
                     // Check if already tested (skip verification for complete results unless forced)
                     var existingResult = _resultsFile.Results.FirstOrDefault(r => r?.Tag == (tag.Contains(':') ? tag.Substring(tag.LastIndexOf(':') + 1) : tag));
-                    if (existingResult != null && !_args.Force)
+                    if (existingResult != null)
                     {
-                        var isComplete = existingResult.QuestionResults.Count >= _testSuite.TotalQuestions;
-                        if (isComplete)
+                        // When resuming from saved results, use the stored ModelName to preserve full model paths
+                        if (!string.IsNullOrEmpty(existingResult.ModelName))
                         {
-                            continue; // Skip verification for already-tested models
+                            modelFullName = existingResult.ModelName;
+                        }
+
+                        if (!_args.Force)
+                        {
+                            var isComplete = existingResult.QuestionResults.Count >= _testSuite.TotalQuestions;
+                            if (isComplete)
+                            {
+                                continue; // Skip verification for already-tested models
+                            }
                         }
                     }
 
@@ -426,6 +443,13 @@ Remember:
                     var existingResult = _resultsFile.Results.FirstOrDefault(r => r?.Tag == tagForTracking);
                     if (existingResult != null)
                     {
+                        // When resuming from saved results, use the stored ModelName to preserve full model paths
+                        // This ensures models like "hf.co/namespace/repo:tag" aren't incorrectly derived from _args.ModelName
+                        if (!string.IsNullOrEmpty(existingResult.ModelName))
+                        {
+                            modelFullName = existingResult.ModelName;
+                        }
+
                         // Check if this is a complete result
                         var isComplete = existingResult.QuestionResults.Count >= _testSuite.TotalQuestions;
 
@@ -573,6 +597,9 @@ Remember:
                         baseResultForParallel = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
                     }
 
+                    // Track current model's on-demand status for cancellation handling
+                    _currentModelPulledOnDemand = pulledOnDemand;
+
                     // Pass existing partial result for resume functionality
                     var (quantResult, judgmentTasks) = await RunTestSuiteAsync(modelFullName, tagForTracking, modelInfo, baseResultForParallel, existingResult);
                     if (quantResult != null)
@@ -619,11 +646,14 @@ Remember:
                             quantResult.PulledOnDemand = false;
                             SaveResultsFile();
                         }
+                        // Clear the tracking flag since this model is done
+                        _currentModelPulledOnDemand = false;
                     }
                     else if (pulledOnDemand || _modelsPulledThisSession.Contains(modelFullName))
                     {
                         // Testing failed but model was pulled on-demand, clean it up
                         await DeleteModelAsync(modelFullName);
+                        _currentModelPulledOnDemand = false;
                     }
                 }
 
@@ -721,6 +751,9 @@ Remember:
             }
         }
 
+        // Track if we're waiting for cancellation confirmation
+        private bool _waitingForCancelConfirmation;
+
         /// <summary>
         /// Handle Ctrl+C/Ctrl+Break for graceful shutdown
         /// </summary>
@@ -733,11 +766,36 @@ Remember:
                 return;
             }
 
-            // First Ctrl+C - request graceful cancellation
+            if (_waitingForCancelConfirmation)
+            {
+                // Already waiting for confirmation, ignore
+                e.Cancel = true;
+                return;
+            }
+
+            // First Ctrl+C - ask for confirmation
             e.Cancel = true;
-            _cancellationRequested = true;
-            _cts.Cancel();
-            AnsiConsole.MarkupLine($"\n[yellow]Cancellation requested. Saving partial results... (press Ctrl+C again to force exit)[/]");
+            _waitingForCancelConfirmation = true;
+
+            // Show confirmation prompt
+            AnsiConsole.MarkupLine($"\n[yellow]Cancel testing? (y/n)[/]");
+
+            // Read response synchronously
+            var key = Console.ReadKey(true);
+
+            if (key.KeyChar == 'y' || key.KeyChar == 'Y')
+            {
+                // Confirmed - proceed with cancellation
+                _cancellationRequested = true;
+                _cts.Cancel();
+                AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed. Saving partial results... (press Ctrl+C again to force exit)[/]");
+            }
+            else
+            {
+                // Not confirmed - continue execution
+                _waitingForCancelConfirmation = false;
+                AnsiConsole.MarkupLine($"[green]Continuing...[/]");
+            }
         }
 
         /// <summary>
@@ -751,6 +809,10 @@ Remember:
             // Add partial quantization if it has any results
             if (_currentPartialResult != null && _currentPartialResult.QuestionResults.Count > 0)
             {
+                // Preserve the on-demand status for the partial result
+                // This ensures the model can be resumed and cleaned up properly later
+                _currentPartialResult.PulledOnDemand = _currentModelPulledOnDemand;
+
                 // Check if this quantization is already in results (shouldn't happen, but be safe)
                 var existing = _resultsFile.Results.FirstOrDefault(r => r.Tag == _currentPartialResult.Tag);
                 if (existing == null)
@@ -767,6 +829,8 @@ Remember:
                             existing.QuestionResults.Add(qr);
                         }
                     }
+                    // Update the on-demand flag on the existing result too
+                    existing.PulledOnDemand = _currentModelPulledOnDemand;
                 }
             }
 
@@ -792,32 +856,59 @@ Remember:
         /// <summary>
         /// Clean up on-demand models that were pulled during this session.
         /// Called on failure/cancellation to ensure pulled models don't remain.
+        /// On cancellation, models with incomplete results are NOT cleaned up to allow resume.
         /// </summary>
         private async Task CleanupOnDemandModelsAsync()
         {
-            if (!_args.OnDemand || _modelsPulledThisSession.Count == 0)
+            if (!_args.OnDemand)
                 return;
 
-            AnsiConsole.MarkupLine($"[dim]Cleaning up {_modelsPulledThisSession.Count} on-demand model(s)...[/]");
-
-            foreach (var modelName in _modelsPulledThisSession.ToList())
+            // Build set of models that have incomplete results - these should NOT be cleaned up
+            // This preserves on-demand models for resume functionality when cancelled
+            var incompleteModels = new HashSet<string>();
+            if (_resultsFile != null && _cancellationRequested)
             {
-                try
+                foreach (var result in _resultsFile.Results)
                 {
-                    await DeleteModelAsync(modelName);
-                    _modelsPulledThisSession.Remove(modelName);
-                    AnsiConsole.MarkupLine($"[dim]  Removed: {modelName}[/]");
-                }
-                catch (Exception ex)
-                {
-                    AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {modelName}: {ex.Message}[/]");
+                    if (result.QuestionResults.Count < _testSuite.TotalQuestions)
+                    {
+                        incompleteModels.Add(result.ModelName);
+                    }
                 }
             }
 
-            // Also clean up any models marked in the results file
+            // Only clean up models that are complete (or on fatal error, not cancellation)
+            var modelsToCleanup = _modelsPulledThisSession
+                .Where(m => !incompleteModels.Contains(m))
+                .ToList();
+
+            if (modelsToCleanup.Count > 0)
+            {
+                AnsiConsole.MarkupLine($"[dim]Cleaning up {modelsToCleanup.Count} on-demand model(s)...[/]");
+
+                foreach (var modelName in modelsToCleanup)
+                {
+                    try
+                    {
+                        await DeleteModelAsync(modelName);
+                        _modelsPulledThisSession.Remove(modelName);
+                        AnsiConsole.MarkupLine($"[dim]  Removed: {modelName}[/]");
+                    }
+                    catch (Exception ex)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {modelName}: {ex.Message}[/]");
+                    }
+                }
+            }
+
+            // Also clean up any models marked in the results file that are COMPLETE
+            // Incomplete models are kept for resume
             if (_resultsFile != null)
             {
-                var onDemandResults = _resultsFile.Results.Where(r => r.PulledOnDemand).ToList();
+                var onDemandResults = _resultsFile.Results
+                    .Where(r => r.PulledOnDemand && r.QuestionResults.Count >= _testSuite.TotalQuestions)
+                    .ToList();
+
                 foreach (var result in onDemandResults)
                 {
                     if (!_modelsPulledThisSession.Contains(result.ModelName))
@@ -840,6 +931,12 @@ Remember:
                 {
                     SaveResultsFile();
                 }
+            }
+
+            // If there are incomplete models being preserved, inform the user
+            if (incompleteModels.Count > 0)
+            {
+                AnsiConsole.MarkupLine($"[dim]Preserving {incompleteModels.Count} on-demand model(s) with incomplete results for resume[/]");
             }
         }
 

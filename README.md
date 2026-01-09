@@ -882,6 +882,19 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.2.5
+- **QC Resume Bug Fixes** - Fixed critical issues with resuming from saved results files
+  - Fixed model name parsing when resuming: full model paths (e.g., `hf.co/namespace/repo:tag`) are now preserved correctly instead of being incorrectly derived from the `-M` argument
+  - Fixed base model handling when resuming: the stored full model name is now used instead of just the tag portion
+- **Cancellation Confirmation Prompt** - Added y/n confirmation before cancelling QC tests
+  - First Ctrl+C now prompts "Cancel testing? (y/n)" instead of immediately cancelling
+  - Prevents accidental cancellation of long-running tests
+  - Second Ctrl+C still force exits immediately
+- **Improved On-Demand Model Cleanup** - Better handling of on-demand models during cancellation
+  - Models with incomplete test results are now preserved for resume instead of being deleted
+  - On-demand status (`PulledOnDemand`) is properly saved in partial results
+  - Models are only cleaned up after testing completes or on fatal preload failure
+
 v1.2.4
 - **New --rejudge Argument for QC Command** - Re-run judgment without re-testing
   - New `--rejudge` argument to re-run judgment process for existing test results
