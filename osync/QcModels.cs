@@ -62,6 +62,18 @@ namespace osync
     {
         public string TestSuiteName { get; set; } = string.Empty;
         public string ModelName { get; set; } = string.Empty;
+        /// <summary>
+        /// URL to the source repository for the model (e.g., HuggingFace page)
+        /// </summary>
+        public string? RepositoryUrl { get; set; }
+        /// <summary>
+        /// Maximum tokens to generate per answer (test suite setting)
+        /// </summary>
+        public int? NumPredict { get; set; }
+        /// <summary>
+        /// Default context length for the test suite
+        /// </summary>
+        public int? ContextLength { get; set; }
         public QcTestOptions Options { get; set; } = new QcTestOptions();
         public List<QuantResult> Results { get; set; } = new List<QuantResult>();
     }
@@ -87,9 +99,22 @@ namespace osync
         public string Tag { get; set; } = string.Empty;
         public string ModelName { get; set; } = string.Empty;
         public long DiskSizeBytes { get; set; }
+        /// <summary>
+        /// Full SHA256 digest of the model manifest
+        /// </summary>
+        public string? Digest { get; set; }
+        /// <summary>
+        /// Short digest (first 12 characters of the SHA256)
+        /// </summary>
+        public string? ShortDigest { get; set; }
         public string Family { get; set; } = string.Empty;
         public string ParameterSize { get; set; } = string.Empty;
         public string QuantizationType { get; set; } = string.Empty;
+        /// <summary>
+        /// Enhanced quantization string from tensor analysis.
+        /// Format: "66% Q4_K" or "Q6_K_XL (76% Q6_K)"
+        /// </summary>
+        public string? EnhancedQuantization { get; set; }
         public bool IsBase { get; set; }
         /// <summary>
         /// Indicates this model was pulled on-demand and should be removed after testing completes.
@@ -112,6 +137,10 @@ namespace osync
         public double EvalTokensPerSecond { get; set; }
         public double PromptTokensPerSecond { get; set; }
         public int TotalTokens { get; set; }
+        /// <summary>
+        /// Actual context length used for this question (resolved from suite/category/question overrides)
+        /// </summary>
+        public int? ContextLength { get; set; }
         public JudgmentResult? Judgment { get; set; }
     }
 
@@ -123,6 +152,10 @@ namespace osync
         public string JudgeModel { get; set; } = string.Empty;
         public int Score { get; set; }  // 1-100
         public string Reason { get; set; } = string.Empty;  // Judge's reasoning for the score
+        /// <summary>
+        /// Which answer is qualitatively better: "A" (base), "B" (quant), or "AB" (tie)
+        /// </summary>
+        public string? BestAnswer { get; set; }
         public DateTime JudgedAt { get; set; }
         /// <summary>
         /// Raw JSON response from judge, only populated when reason parsing failed (for debugging)
@@ -283,6 +316,11 @@ namespace osync
         // Judgment scoring info
         public bool HasJudgmentScoring { get; set; }
         public string? JudgeModel { get; set; }
+
+        /// <summary>
+        /// URL to the source repository for the model
+        /// </summary>
+        public string? RepositoryUrl { get; set; }
     }
 
     /// <summary>
@@ -293,6 +331,11 @@ namespace osync
         public string Tag { get; set; } = string.Empty;
         public long DiskSizeBytes { get; set; }
         public string QuantizationType { get; set; } = string.Empty;
+        /// <summary>
+        /// Enhanced quantization string from tensor analysis.
+        /// Format: "66% Q4_K" or "Q6_K_XL (76% Q6_K)"
+        /// </summary>
+        public string? EnhancedQuantization { get; set; }
 
         // Category confidence scores (%) - metrics only
         public Dictionary<string, double> CategoryScores { get; set; } = new Dictionary<string, double>();
@@ -306,6 +349,23 @@ namespace osync
         // Judgment scoring (when judge model is used)
         public double? AverageJudgmentScore { get; set; }
         public bool HasJudgmentScoring { get; set; }
+
+        // Best answer statistics (when judge model is used)
+        /// <summary>Count of questions where quant answer was better than base</summary>
+        public int BestCount { get; set; }
+        /// <summary>Count of questions where quant answer was worse than base</summary>
+        public int WorstCount { get; set; }
+        /// <summary>Count of questions where quant and base answers were tied</summary>
+        public int TieCount { get; set; }
+        /// <summary>Percentage of quant wins (excluding ties): BestCount / (BestCount + WorstCount) * 100</summary>
+        public double? BestPercentage { get; set; }
+        /// <summary>Percentage of quant losses (excluding ties): WorstCount / (BestCount + WorstCount) * 100</summary>
+        public double? WorstPercentage { get; set; }
+        /// <summary>Percentage of ties out of total judged questions</summary>
+        public double? TiePercentage { get; set; }
+
+        // Category-level best answer stats
+        public Dictionary<string, CategoryBestStats> CategoryBestStats { get; set; } = new Dictionary<string, CategoryBestStats>();
 
         // Final combined score (50% metrics + 50% judgment when available)
         public double FinalScore { get; set; }
@@ -321,6 +381,17 @@ namespace osync
     }
 
     /// <summary>
+    /// Best answer statistics for a category
+    /// </summary>
+    public class CategoryBestStats
+    {
+        public int BestCount { get; set; }
+        public int WorstCount { get; set; }
+        public int TieCount { get; set; }
+        public double? BestPercentage { get; set; }
+    }
+
+    /// <summary>
     /// Score for a single question comparison
     /// </summary>
     public class QuestionScore
@@ -333,5 +404,9 @@ namespace osync
         public double PerplexityScore { get; set; }
         public double OverallConfidenceScore { get; set; }
         public double? JudgmentScore { get; set; }
+        /// <summary>
+        /// Which answer is qualitatively better: "A" (base), "B" (quant), or "AB" (tie)
+        /// </summary>
+        public string? BestAnswer { get; set; }
     }
 }

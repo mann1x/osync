@@ -466,7 +466,8 @@ Results are saved as JSON (`modelname.qc.json` by default) with:
 - Test suite name and version
 - Test options (temperature, seed, top_p, top_k, etc.)
 - Per-quantization results with all question answers and tokens
-- Model metadata (family, parameter size, quantization type, disk size)
+- Model metadata (family, parameter size, quantization type, enhanced quantization with tensor analysis, disk size)
+- Model digest (SHA256 and short digest for model identification/verification)
 
 **Incremental Testing:**
 
@@ -486,7 +487,7 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m --force
 
 Testing can be interrupted with Ctrl+C and resumed later:
 ```bash
-# Start testing (press Ctrl+C to save partial results and exit)
+# Start testing (press Ctrl+C, then 'y' to confirm save and exit)
 osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0
 
 # Resume from where you left off
@@ -497,7 +498,16 @@ When resuming:
 - Already-completed quantizations are skipped
 - Partially-tested quantizations continue from the last saved question
 - Missing judgments are automatically detected and run
+- Missing model digests are automatically retrieved and backfilled
 - Progress bars show resumed position
+
+**Cancellation & Timeout Handling:**
+
+- First Ctrl+C prompts for confirmation (y=cancel and save, n=continue)
+- Second Ctrl+C force exits immediately
+- Timeouts are retried automatically with exponential backoff
+- After retry exhaustion, prompts: y=cancel, n=double timeout and retry
+- On-demand models with incomplete results are preserved for resume
 
 **Wildcard Tag Selection:**
 
@@ -543,11 +553,12 @@ Wildcard behavior:
 - `--force` - Force re-run testing for quantizations already present in results file
 - `--rejudge` - Re-run judgment process for existing test results (without re-testing)
 - `--judge <model>` - Use a judge model for similarity scoring (see Judge Scoring below)
-- `--judge-ctxsize <value>` - Context length for judge model (default: 12288)
+- `--judge-ctxsize <value>` - Context length for judge model (0 = auto, default: 0). Auto mode calculates: test_ctx × 2 + 2048
 - `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
 - `--timeout <seconds>` - API timeout in seconds for testing and judgment calls (default: 600)
 - `--verbose` - Show judgment details (question ID, score, reason) for each judged question
 - `--ondemand` - Pull models on-demand if not available, then remove after testing (see On-Demand Mode below)
+- `--repo <url>` - Repository URL for the model source (saved in results file for qcview)
 
 **Judge Scoring:**
 
@@ -666,7 +677,7 @@ Judging UD-IQ3_XXS Q1-3 Score: 75% (3/50 6%)
 
 #### View Quantization Results (`qcview`)
 
-Display quantization comparison results in formatted tables or export as JSON.
+Display quantization comparison results in formatted tables or export to various formats.
 
 ```bash
 # View results in table format (console)
@@ -678,8 +689,17 @@ osync qcview llama3.2.qc.json -O report.txt
 # Export as JSON to file
 osync qcview llama3.2.qc.json -Fo json -O report.json
 
-# View in console as JSON
-osync qcview llama3.2.qc.json -Fo json
+# Export as Markdown
+osync qcview llama3.2.qc.json -Fo md
+
+# Export as HTML (interactive with theme toggle)
+osync qcview llama3.2.qc.json -Fo html
+
+# Export as PDF (includes full Q&A pages)
+osync qcview llama3.2.qc.json -Fo pdf
+
+# Add or override repository URL in output
+osync qcview llama3.2.qc.json -Fo html --repo https://github.com/user/model
 ```
 
 **Table Output:**
@@ -689,7 +709,10 @@ Displays color-coded results with:
 - Component scores: Token Similarity, Logprobs Divergence, Length Consistency, Perplexity
 - Category-by-category breakdown
 - Performance metrics (eval/prompt tokens per second)
-- Model metadata (quantization type, disk size)
+- Model metadata (quantization type with tensor analysis, disk size)
+  - Shows dominant tensor quantization with percentage (e.g., `Q4_K (87%)`)
+  - Mixed quantization shown as `Q6_K (81% Q8_0)` when dominant differs from tag
+  - Unknown tensor types indicated with `?` suffix (e.g., `Q3_K?`)
 
 **Color Coding:**
 - 🟢 Green (90-100%): Excellent quality preservation
@@ -698,19 +721,25 @@ Displays color-coded results with:
 - 🟠 Orange (50-70%): Moderate quality loss
 - 🔴 Red (<50%): Significant quality degradation
 
-**JSON Output:**
+**Output Formats:**
 
-Complete results including:
-- Base model information
-- Per-quantization overall and category scores
-- Detailed per-question scores (with `QuestionScores` array)
-- Performance metrics
+- **table** (default) - Color-coded console output or plain text file
+- **json** - Complete results with all scores and metadata
+- **md** - Markdown format with tables (for GitHub, documentation)
+- **html** - Interactive HTML with dark/light theme toggle, collapsible Q&A sections
+- **pdf** - Professional PDF report with:
+  - Summary tables with color-coded scores
+  - Category breakdown table
+  - Rankings by score, speed, perplexity, and best answers
+  - Full Q&A pages for each quantization (questions, answers, judgment details)
 
 **Options:**
 
 - `<file>` - Results file to view (required, positional argument)
-- `-Fo <format>` - Output format: table or json (default: table)
-- `-O <file>` - Output filename (default: console, shows file size on success)
+- `-Fo <format>` - Output format: table, json, md, html, pdf (default: table)
+- `-O <file>` - Output filename (default: auto-generated based on format)
+- `--repo <url>` - Repository URL (displayed in output, overrides value from results file)
+- `--metricsonly` - Ignore judgment data and show only metrics-based scores (useful for comparing pure model output quality without judge influence)
 
 #### Manage (`manage`)
 
@@ -734,12 +763,12 @@ osync manage http://192.168.0.100:11434
 - Visual status indicators for sorting and filtering
 
 **Keyboard Shortcuts:**
-- **Ctrl+C** - Copy model(s) (local or to remote server)
+- **Ctrl+C** - Copy model(s) (local or to remote server, supports batch selection)
 - **Ctrl+M** - Rename model
 - **Ctrl+R** - Run/chat with model
 - **Ctrl+S** - Show model information
-- **Ctrl+D** - Delete model(s)
-- **Ctrl+U** - Update model(s)
+- **Ctrl+D** - Delete model(s) (supports batch selection with Space to select multiple)
+- **Ctrl+U** - Update model(s) (supports batch selection)
 - **Ctrl+P** - Pull model from registry
 - **Ctrl+L** - Load model into memory
 - **Ctrl+K** - Unload model from memory
@@ -758,6 +787,58 @@ osync manage http://192.168.0.100:11434
 
 **Themes:**
 - Default, Dark, Blue, Solarized, Gruvbox, Nord, Dracula
+
+#### Version (`showversion`, `-v`)
+
+Display osync version and environment information.
+
+```bash
+# Show version only
+osync -v
+osync showversion
+
+# Show detailed environment information
+osync showversion --verbose
+```
+
+**Basic Output:**
+```
+osync v1.2.6 (b20260110-1117)
+```
+
+**Verbose Output:**
+```
+osync v1.2.6 (b20260110-1117)
+Binary path: C:\Users\user\.osync\osync.exe
+Installed: Yes (C:\Users\user\.osync)
+Shell: PowerShell Core 7.5.4
+Tab completion: Installed (C:\Users\user\Documents\PowerShell\Microsoft.PowerShell_profile.ps1)
+```
+
+**Verbose Information:**
+- **Binary path** - Location of the osync executable
+- **Installed** - Whether osync is installed in the standard install directory
+- **Shell** - Detected shell type and version (bash, zsh, PowerShell Core/Desktop, cmd)
+- **Tab completion** - Status of tab completion for the current shell
+
+#### Install (`install`)
+
+Install osync to user directory and configure shell completion.
+
+```bash
+# Run the installer
+osync install
+```
+
+**Installation Directory:**
+- **Windows:** `~/.osync`
+- **Linux/macOS:** `~/.local/bin`
+
+**Features:**
+- Copies osync executable to install directory
+- Adds install directory to PATH
+- Offers to configure tab completion for detected shell
+- Supports bash, zsh, and PowerShell
 
 ### Options
 
@@ -882,18 +963,142 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.2.6
+- **QcView Multiple Output Formats** - Export results to various formats
+  - **Markdown (.md)** - Tables formatted for GitHub and documentation
+  - **HTML (.html)** - Interactive report with dark/light theme toggle, collapsible Q&A sections, color-coded scores
+  - **PDF (.pdf)** - Professional report using QuestPDF library with:
+    - Summary tables with color-coded scores for all metrics
+    - Scores by category table
+    - Rankings tables (by score, eval speed, perplexity, best answers)
+    - Full Q&A pages for each quantization with judgment details
+  - Use `-Fo md`, `-Fo html`, or `-Fo pdf` to select format
+- **QcView Repository URL** - New `--repo` argument to specify model source repository
+  - URL is displayed in output headers and included in JSON export
+  - Can be saved during `qc` testing and overridden in `qcview`
+- **Headless/Background Mode Fix** - Fixed console errors when running qc command in background
+  - Console.WindowWidth and Console.ReadKey now properly handled in headless environments
+  - Prevents "The handle is invalid" errors when running without a terminal
+- **New Version Command** - Added `osync version` (alias `-v`) to display version info
+  - Shows osync version number and build timestamp
+  - `--verbose` flag displays detailed info: binary path, installation status, shell type/version, tab completion status
+  - Detects bash, zsh, PowerShell (Core/Desktop), and cmd shells
+  - Smart installation detection: when running a different binary, compares version AND build timestamp with installed version
+  - Reports if installed version is older/newer (e.g., `installed v1.2.6 (b20260110-1156) is older`)
+  - Fixed tab completion detection to match actual script markers in profiles
+- **Model Digest Tracking** - QC results now include SHA256 digest for each tested model
+  - Full digest (`Digest`) and short digest (`ShortDigest`, first 12 chars) stored in results JSON
+  - Automatically populated from local Ollama or HuggingFace registry
+  - Backfill: missing digests are automatically retrieved when loading existing results files
+- **Fixed Model ID Display** - IDs now show first 12 chars of manifest SHA256 (matches `ollama ls`)
+  - `osync ls` and manage TUI compute SHA256 of manifest file content
+  - ID column width increased from 8 to 12 characters
+  - Consistent with `ollama ls` output for easy cross-reference
+- **Improved osync ps Output** - Dynamic console width and better model name display
+  - Detects console width and adjusts column sizes dynamically
+  - Model names now truncated from beginning to preserve full tag (e.g., `...0B-A3B-Instruct-GGUF:Q4_K_S`)
+  - Better visibility of quantization tags for HuggingFace models with long paths
+- **Load Command Timing** - Shows elapsed time and API-reported load duration
+  - Displays total elapsed time and Ollama's `load_duration` from response
+  - Example: `✓ Model 'model:tag' loaded successfully (2m 15s) (API: 2m 5s)`
+- **QCView Table Alignment Fix** - Tag and Quant columns now left-aligned instead of centered
+- **Timeout Handling Improvements** - Better handling of HTTP timeouts during testing
+  - Timeouts are now properly distinguished from user cancellation (no longer shows "Operation cancelled by user")
+  - Timeouts trigger retry with exponential backoff instead of immediate failure
+  - After retry attempts exhausted, prompts user: y=cancel, n=double timeout and retry
+  - Allows recovery from slow model responses without losing progress
+- **Improved On-Demand Model Cleanup** - Fixed critical bug where models were deleted during testing
+  - Models with incomplete test results are NEVER cleaned up (preserves for resume)
+  - Fixed cleanup to protect incomplete models regardless of error type (timeout, cancellation, etc.)
+  - On-demand status tracking is now consistent when resuming interrupted tests
+- **Fixed HuggingFace Wildcard Tag Detection** - Now detects all quantization formats
+  - Added support for XL variants (Q2_K_XL, Q3_K_XL, Q4_K_XL, Q5_K_XL, Q6_K_XL, Q8_K_XL)
+  - Added support for TQ ternary quantization (TQ1_0)
+- **Fixed HuggingFace Model Quant Column** - QC results now correctly show quantization type
+  - Ollama returns `"quantization_level": "unknown"` for HuggingFace models
+  - Now extracts quantization type from model name/tag when API returns "unknown"
+- **Enhanced Quantization Display with Tensor Analysis** - Quant column now shows dominant tensor quantization
+  - Analyzes transformer block weight tensors only (excludes embeddings, output, and norms)
+  - Calculates weighted percentage by tensor size (elements × bits per weight)
+  - Displays format like `Q4_0 (87%)` or `Q6_K (81% Q8_0)` showing actual tensor distribution
+  - Uses Ollama API `verbose=true` to fetch tensor metadata
+  - Fixed: Extract quant type from model name before tensor analysis for correct formatting
+  - Fixed: Filter to transformer weights only (Q8_0 embeddings/output were skewing results)
+  - Fixed: Unknown tensor types shown with "?" suffix (e.g., `Q3_K?`) to indicate uncertainty
+  - Supports all quantization types: Q*_K variants, IQ (importance matrix), and TQ (ternary)
+- **Fixed QC Model Validation** - Relaxed overly strict parameter size comparison
+  - Parameter size formatting varies between models (e.g., "999.89M" vs "1,000M" for same model)
+  - Now only warns on family mismatch instead of blocking testing
+  - Testing continues even with warnings
+- **Improved Judge API Retry Strategy** - More resilient handling of judge server errors
+  - Increased retry attempts from 5 to 25 for judge API calls
+  - Delay ramps from 5 seconds to 30 seconds progressively
+  - Shows warning and skips judgment only after all retries exhausted (instead of failing)
+  - Better handles overloaded or slow judge servers (HTTP 500 errors)
+- **Fixed Base Model Re-Pull When Adding Quants** - Skip base model if results already exist
+  - When adding new quants to existing test results without `-b`, no longer tries to pull the base model
+  - If results file contains any base model results (even partial), the base is skipped entirely
+  - Improved base model detection: automatically identifies base by common patterns (fp16, f16, bf16, etc.)
+  - Use `--force` to re-run the base model if needed
+- **Improved osync ls Wildcard Handling** - Better shell expansion handling on Linux/macOS
+  - Default behavior: `osync ls code` matches models starting with "code" (prefix match, same as `code*`)
+  - Suffix match: `osync ls *q4_k_m` finds all models ending with "q4_k_m" (useful for finding by quantization)
+  - Contains match: `osync ls *code*` finds models containing "code" anywhere in the name
+  - Shell expansion handling: detects when shell expanded unquoted wildcards and shows helpful warning
+  - Suggests using quotes to prevent expansion: `osync ls 'gemma*'`
+- **Wildcard Tag Expansion for osync pull** - Pull multiple models with tag patterns
+  - Supports wildcards in tags: `osync pull gemma3:1b-it-q*` pulls all matching tags
+  - Works with HuggingFace: `osync pull hf.co/unsloth/gemma-3-1b-it-GGUF:IQ2*`
+  - Works with remote servers: `osync pull -d http://server:11434 gemma3:1b-it-q*`
+  - Automatically resolves available tags from Ollama registry or HuggingFace API
+  - Shows list of matching tags before pulling
+- **Judge Best Answer Tracking** - QC judge now evaluates which response is qualitatively better
+  - Judge model returns `bestanswer`: A (base better), B (quant better), or AB (tie)
+  - Verbose output shows best answer for each judgment: `Score: 75% (27/50 54%) Best: AB`
+  - Handles edge cases: normalizes various formats (ResponseA, Response_A, Tie, identical, etc.)
+  - Results automatically re-judged if `--judge` is active and `bestanswer` is missing
+- **QcView Judge Best Column** - New column showing quant win statistics
+  - Format: `67% (B:10 A:5 =:3)` showing quant won 67% of non-tie comparisons
+  - B = quant better, A = base better, = = tie
+  - Best percentage excludes ties (only counts decisive wins/losses)
+  - Color-coded: green (>=60%), yellow (40-60%), red (<40%)
+- **Enhanced JSON Output** - Additional statistics in JSON export
+  - Per-question `BestAnswer` field (A/B/AB)
+  - Per-quantization: `BestCount`, `WorstCount`, `TieCount`, `BestPercentage`, `WorstPercentage`, `TiePercentage`
+  - Per-category: `CategoryBestStats` with counts and percentages
+- **QcView Metrics-Only Mode** - New `--metricsonly` argument to ignore judgment data
+  - Shows only metrics-based scores (token similarity, logprobs divergence, perplexity, length consistency)
+  - Useful for comparing pure model output quality without judge influence
+  - Works with all output formats (table, json, md, html, pdf)
+- **Automatic Judge Context Length** - Judge model context is now auto-calculated by default
+  - When `--judge-ctxsize` is 0 (new default), calculates: test_ctx × 2 + 2048
+  - Ensures judge has enough context for both base and quantized responses plus prompt
+  - Can still be manually overridden with explicit value
+- **PDF Generation Progress Bar** - Visual progress indicator when generating PDF reports
+  - Shows progress through Q&A pages for each quantization
+  - Useful for large test results files with many questions
+- **PDF Layout Improvements** - Better page break handling in PDF reports
+  - Ranking tables use ShowEntire() to prevent splitting across pages
+  - Speed columns simplified to show only percentage (removed tok/s to prevent wrapping)
+  - Category scores section moves entirely to next page if it won't fit
+  - Rankings organized into paired rows (Final Score + Eval Speed, Perplexity + Prompt Speed, Best Answers)
+  - Added Prompt Speed ranking table with vs Base percentage column
+- **Manage TUI Batch Delete Fix** - Fixed multi-selection delete not working
+  - Delete now properly handles multiple selected models (Ctrl+D with checkmarks)
+  - Confirmation dialog shows count and lists all models to be deleted
+  - Dialog title shows model count (e.g., "Confirm Delete (3 models)")
+  - Success message shows count of deleted models
+  - Partial success handling when some deletions fail
+
 v1.2.5
 - **QC Resume Bug Fixes** - Fixed critical issues with resuming from saved results files
   - Fixed model name parsing when resuming: full model paths (e.g., `hf.co/namespace/repo:tag`) are now preserved correctly instead of being incorrectly derived from the `-M` argument
   - Fixed base model handling when resuming: the stored full model name is now used instead of just the tag portion
+  - Fixed verification loop to use stored model names from results file
 - **Cancellation Confirmation Prompt** - Added y/n confirmation before cancelling QC tests
   - First Ctrl+C now prompts "Cancel testing? (y/n)" instead of immediately cancelling
   - Prevents accidental cancellation of long-running tests
   - Second Ctrl+C still force exits immediately
-- **Improved On-Demand Model Cleanup** - Better handling of on-demand models during cancellation
-  - Models with incomplete test results are now preserved for resume instead of being deleted
-  - On-demand status (`PulledOnDemand`) is properly saved in partial results
-  - Models are only cleaned up after testing completes or on fatal preload failure
 
 v1.2.4
 - **New --rejudge Argument for QC Command** - Re-run judgment without re-testing

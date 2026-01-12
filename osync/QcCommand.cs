@@ -42,6 +42,11 @@ namespace osync
         private const int MAX_RETRY_ATTEMPTS = 5;
         private const int RETRY_DELAY_MS = 1000;
 
+        // Judge-specific retry configuration (more resilient for slow/overloaded servers)
+        private const int JUDGE_MAX_RETRY_ATTEMPTS = 25;
+        private const int JUDGE_RETRY_DELAY_START_MS = 5000;   // Start at 5 seconds
+        private const int JUDGE_RETRY_DELAY_END_MS = 30000;    // Ramp up to 30 seconds
+
         // Default context lengths
         private const int DEFAULT_TEST_CONTEXT_LENGTH = 4096;
         private const int DEFAULT_JUDGE_CONTEXT_LENGTH = 12288;
@@ -50,9 +55,11 @@ namespace osync
         private int _lastDisplayedContextLength = 0;
 
         // System prompt for the judge model - includes full instructions for redundancy
-        private const string JUDGE_SYSTEM_PROMPT = @"You are a SIMILARITY JUDGE. You compare two AI-generated responses (A and B) and measure how SIMILAR they are to each other.
+        private const string JUDGE_SYSTEM_PROMPT = @"You are a SIMILARITY JUDGE. You compare two AI-generated responses (A and B) and measure how SIMILAR they are to each other, and determine which is qualitatively better.
 
-YOUR TASK: Score how much RESPONSE A and RESPONSE B match each other (1-100).
+YOUR TASK:
+1. Score how much RESPONSE A and RESPONSE B match each other (1-100)
+2. Determine which response is qualitatively BETTER (A, B, or AB for tie)
 
 SCORING SCALE:
 100 = Identical content and approach or RESPONSE B is significantly better
@@ -71,24 +78,31 @@ SCORING SCALE:
 11-20 = Completely different responses
 1-10 = Completely different responses, gibberish content
 
+BESTANSWER VALUES:
+- 'A' = RESPONSE A is qualitatively better (more complete, more correct, better explained)
+- 'B' = RESPONSE B is qualitatively better (more complete, more correct, better explained)
+- 'AB' = Both responses are equally good (tie)
+
 CRITICAL RULES:
-- You are measuring SIMILARITY between A and B, NOT quality or correctness
+- Score measures SIMILARITY between A and B, NOT quality or correctness
+- bestanswer measures which response is QUALITATIVELY BETTER
 - If RESPONSE A and RESPONSE B both contain the same code/content = HIGH score (they match!)
 - If RESPONSE A and RESPONSE B contain different code/content = LOW score (they differ)
-- Do NOT base the judge scoring on the responses being correct, well-written, or valid.
+- Do NOT base the similarity score on the responses being correct, well-written, or valid
 - Do NOT mention JSON, language proficiency, or format compliance
 - If RESPONSE B is significantly more complete and robust, better or superior then the scoring is HIGH
 - IMPORTANT: Output score as INTEGER 1-100, NOT decimal 0.0-1.0. If similarity is 100%, output 100 (not 1 or 1.0). If similarity is 85%, output 85 (not 0.85).
 
 REASON FORMAT: Start with 'A and B match:' or 'A and B differ:' then explain what each contains and why they are similar or different.";
 
-        private const string JUDGE_USER_INSTRUCTIONS = @"Compare RESPONSE A and RESPONSE B below. Score their SIMILARITY (1-100).
+        private const string JUDGE_USER_INSTRUCTIONS = @"Compare RESPONSE A and RESPONSE B below. Score their SIMILARITY (1-100) and determine which is BETTER (A, B, or AB for tie).
 
 Remember:
 - HIGH score = A and B contain similar content
 - LOW score = A and B contain different content (unless RESPONSE B is significantly better)
 - Score must be INTEGER 1-100: use 100 for identical (not 1), use 85 for 85% similar (not 0.85)
-- Do NOT judge quality, correctness, or format (unless RESPONSE B is significantly better)";
+- bestanswer: 'A' if A is better, 'B' if B is better, 'AB' if tied
+- Do NOT judge quality, correctness, or format for the similarity SCORE (but DO for bestanswer)";
 
         public QcCommand(QcArgs args, string baseUrl = "http://localhost:11434")
         {
@@ -99,9 +113,8 @@ Remember:
             if (_args.Timeout <= 0)
                 _args.Timeout = 600;
 
-            // Apply default judge context size if not set
-            if (_args.JudgeCtxSize <= 0)
-                _args.JudgeCtxSize = DEFAULT_JUDGE_CONTEXT_LENGTH;
+            // JudgeCtxSize 0 = auto (calculated per-question: test_ctx * 2 + 2048)
+            // No longer set a default here - handled dynamically in judgment
 
             _httpClient = new HttpClient
             {
@@ -240,6 +253,12 @@ Remember:
                 // Print output file path
                 AnsiConsole.MarkupLine($"[dim]Output file: {GetOutputFilePath()}[/]");
 
+                // Print repository URL if set
+                if (!string.IsNullOrWhiteSpace(_resultsFile.RepositoryUrl))
+                {
+                    AnsiConsole.MarkupLine($"[dim]Repository: {_resultsFile.RepositoryUrl}[/]");
+                }
+
                 // Print OnDemand mode status
                 if (_args.OnDemand)
                 {
@@ -313,9 +332,10 @@ Remember:
                 }
 
                 // Ensure base tag is included if not already present
-                // Include base if: no base exists yet, OR base exists but is incomplete (needs resume)
-                bool baseNeedsTesting = existingBase == null ||
-                    (existingBase.QuestionResults.Count < _testSuite.TotalQuestions && !_args.Force);
+                // Skip base entirely if results already contain base model results (at least partial)
+                // This prevents re-pulling the base model when adding new quants to existing tests
+                bool baseHasResults = existingBase != null && existingBase.QuestionResults.Count > 0;
+                bool baseNeedsTesting = !baseHasResults;
                 bool baseNeedsForceRerun = existingBase != null && _args.Force;
 
                 // If base was specified as full model name, insert that; otherwise insert just the tag
@@ -497,6 +517,13 @@ Remember:
                         pulledOnDemand = true;
                     }
 
+                    // If resuming with a model that was previously pulled on-demand, track it
+                    // This ensures consistent cleanup tracking even if the model already exists locally
+                    if (pulledOnDemand && existingResult != null)
+                    {
+                        _modelsPulledThisSession.Add(modelFullName);
+                    }
+
                     // Check if model exists on the Ollama instance
                     bool modelExists = await CheckModelExistsAsync(modelFullName);
 
@@ -540,8 +567,8 @@ Remember:
                         }
                     }
 
-                    // Get model metadata (pass original tag for fallback quantization extraction)
-                    var modelInfo = await GetModelInfoAsync(modelFullName, tag);
+                    // Get model metadata (pass tagForTracking for fallback quantization extraction)
+                    var modelInfo = await GetModelInfoAsync(modelFullName, tagForTracking);
                     if (modelInfo == null)
                     {
                         AnsiConsole.MarkupLine($"[red]Error: Could not retrieve model info for {modelFullName}[/]");
@@ -554,19 +581,18 @@ Remember:
                         continue;
                     }
 
-                    // Validate against base model if not base
+                    // Validate against base model if not base (warning only, don't skip)
                     if (tagForTracking != _args.BaseTag && _resultsFile.Results.Count > 0)
                     {
                         var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
                         if (baseResult != null)
                         {
-                            if (modelInfo.Family != baseResult.Family ||
-                                modelInfo.ParameterSize != baseResult.ParameterSize)
+                            // Only warn on family mismatch (parameter size formatting varies)
+                            if (modelInfo.Family != baseResult.Family)
                             {
-                                AnsiConsole.MarkupLine($"[red]Error: Model mismatch![/]");
-                                AnsiConsole.MarkupLine($"  Expected: {baseResult.Family} {baseResult.ParameterSize}");
-                                AnsiConsole.MarkupLine($"  Got: {modelInfo.Family} {modelInfo.ParameterSize}");
-                                continue;
+                                AnsiConsole.MarkupLine($"[yellow]Warning: Model family mismatch[/]");
+                                AnsiConsole.MarkupLine($"  Base: {baseResult.Family} {baseResult.ParameterSize}");
+                                AnsiConsole.MarkupLine($"  Current: {modelInfo.Family} {modelInfo.ParameterSize}");
                             }
                         }
                     }
@@ -722,27 +748,52 @@ Remember:
                     return 1;
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException ex)
             {
-                // Graceful shutdown requested (includes TaskCanceledException)
-                AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
-                SavePartialResults();
-                await CleanupOnDemandModelsAsync();
-                return 2;
+                // Distinguish between user cancellation and timeout
+                // TaskCanceledException (timeout) inherits from OperationCanceledException
+                if (_cancellationRequested)
+                {
+                    // User-initiated cancellation via Ctrl+C
+                    AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                    SavePartialResults();
+                    await CleanupOnDemandModelsAsync();
+                    return 2;
+                }
+                else
+                {
+                    // Timeout or other cancellation not initiated by user - treat as error
+                    AnsiConsole.MarkupLine($"\n[red]Operation failed: {ex.Message}[/]");
+                    AnsiConsole.MarkupLine($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
+                    SavePartialResults();
+                    // Don't clean up on-demand models on timeout - preserve for resume
+                    return 1;
+                }
             }
             catch (Exception ex) when (ex.InnerException is OperationCanceledException)
             {
                 // Cancellation wrapped in another exception (e.g., from Spectre.Console Progress)
-                AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
-                SavePartialResults();
-                await CleanupOnDemandModelsAsync();
-                return 2;
+                if (_cancellationRequested)
+                {
+                    AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                    SavePartialResults();
+                    await CleanupOnDemandModelsAsync();
+                    return 2;
+                }
+                else
+                {
+                    // Timeout or other cancellation not initiated by user
+                    AnsiConsole.MarkupLine($"\n[red]Operation failed: {ex.Message}[/]");
+                    AnsiConsole.MarkupLine($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
+                    SavePartialResults();
+                    return 1;
+                }
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
                 SavePartialResults();
-                await CleanupOnDemandModelsAsync();
+                // Don't clean up on-demand models on error - preserve for resume
                 return 1;
             }
             finally
@@ -780,21 +831,31 @@ Remember:
             // Show confirmation prompt
             AnsiConsole.MarkupLine($"\n[yellow]Cancel testing? (y/n)[/]");
 
-            // Read response synchronously
-            var key = Console.ReadKey(true);
-
-            if (key.KeyChar == 'y' || key.KeyChar == 'Y')
+            // Read response synchronously (may fail in headless mode)
+            try
             {
-                // Confirmed - proceed with cancellation
+                var key = Console.ReadKey(true);
+
+                if (key.KeyChar == 'y' || key.KeyChar == 'Y')
+                {
+                    // Confirmed - proceed with cancellation
+                    _cancellationRequested = true;
+                    _cts.Cancel();
+                    AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed. Saving partial results... (press Ctrl+C again to force exit)[/]");
+                }
+                else
+                {
+                    // Not confirmed - continue execution
+                    _waitingForCancelConfirmation = false;
+                    AnsiConsole.MarkupLine($"[green]Continuing...[/]");
+                }
+            }
+            catch
+            {
+                // Headless mode - treat as cancel
                 _cancellationRequested = true;
                 _cts.Cancel();
-                AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed. Saving partial results... (press Ctrl+C again to force exit)[/]");
-            }
-            else
-            {
-                // Not confirmed - continue execution
-                _waitingForCancelConfirmation = false;
-                AnsiConsole.MarkupLine($"[green]Continuing...[/]");
+                AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed (headless mode).[/]");
             }
         }
 
@@ -856,17 +917,17 @@ Remember:
         /// <summary>
         /// Clean up on-demand models that were pulled during this session.
         /// Called on failure/cancellation to ensure pulled models don't remain.
-        /// On cancellation, models with incomplete results are NOT cleaned up to allow resume.
+        /// Models with incomplete results are NEVER cleaned up to allow resume.
         /// </summary>
         private async Task CleanupOnDemandModelsAsync()
         {
             if (!_args.OnDemand)
                 return;
 
-            // Build set of models that have incomplete results - these should NOT be cleaned up
-            // This preserves on-demand models for resume functionality when cancelled
+            // Build set of models that have incomplete results - these should NEVER be cleaned up
+            // This preserves on-demand models for resume functionality
             var incompleteModels = new HashSet<string>();
-            if (_resultsFile != null && _cancellationRequested)
+            if (_resultsFile != null)
             {
                 foreach (var result in _resultsFile.Results)
                 {
@@ -962,18 +1023,40 @@ Remember:
                 return; // Already have a base, no repair needed
 
             // No base marked - try to identify and fix
-            // Extract the base tag from _args.BaseTag (normalize if it contains full model name)
+            // First try using _args.BaseTag if specified
             var baseTag = _args.BaseTag;
             if (!string.IsNullOrEmpty(baseTag) && baseTag.Contains(':'))
             {
                 baseTag = baseTag.Substring(baseTag.LastIndexOf(':') + 1);
             }
 
-            if (string.IsNullOrEmpty(baseTag))
-                return;
+            QuantResult? matchingResult = null;
 
-            // Find the matching result and mark it as base
-            var matchingResult = _resultsFile.Results.FirstOrDefault(r => r.Tag == baseTag);
+            if (!string.IsNullOrEmpty(baseTag))
+            {
+                // Find the matching result by tag
+                matchingResult = _resultsFile.Results.FirstOrDefault(r => r.Tag == baseTag);
+            }
+
+            // If no base tag specified or not found, look for common base model patterns
+            if (matchingResult == null)
+            {
+                // Common base model patterns (case-insensitive)
+                // Look for tags ending with fp16, f16, bf16, fp32, f32 (with optional separator)
+                var commonBasePatterns = new[] { "fp16", "f16", "bf16", "fp32", "f32" };
+                foreach (var pattern in commonBasePatterns)
+                {
+                    matchingResult = _resultsFile.Results.FirstOrDefault(r =>
+                        r.Tag.Equals(pattern, StringComparison.OrdinalIgnoreCase) ||
+                        r.Tag.EndsWith("-" + pattern, StringComparison.OrdinalIgnoreCase) ||
+                        r.Tag.EndsWith("_" + pattern, StringComparison.OrdinalIgnoreCase) ||
+                        // Also check for patterns like "4b-it-fp16" where it ends with the pattern
+                        r.Tag.EndsWith(pattern, StringComparison.OrdinalIgnoreCase));
+                    if (matchingResult != null)
+                        break;
+                }
+            }
+
             if (matchingResult != null)
             {
                 matchingResult.IsBase = true;
@@ -1073,7 +1156,10 @@ Remember:
 
             if (_judgeEnabled)
             {
-                AnsiConsole.MarkupLine($"[dim]Judge context length: {_args.JudgeCtxSize}[/]");
+                var judgeCtxDisplay = _args.JudgeCtxSize > 0
+                    ? _args.JudgeCtxSize.ToString()
+                    : $"auto (test_ctx*2 + 2048 = {_testSuite.ContextLength * 2 + 2048} base)";
+                AnsiConsole.MarkupLine($"[dim]Judge context length: {judgeCtxDisplay}[/]");
             }
         }
 
@@ -1110,8 +1196,17 @@ Remember:
 
                     AnsiConsole.MarkupLine($"[dim]Loaded existing results file ({_resultsFile.Results.Count} quantizations tested)[/]");
 
+                    // Update repository URL if provided (overrides existing)
+                    if (!string.IsNullOrWhiteSpace(_args.Repository))
+                    {
+                        _resultsFile.RepositoryUrl = _args.Repository;
+                    }
+
                     // Repair IsBase flag if needed (for files created before this fix)
                     RepairBaseFlag();
+
+                    // Backfill missing digest information for existing results
+                    await BackfillMissingDigestsAsync();
 
                     return true;
                 }
@@ -1127,6 +1222,9 @@ Remember:
             {
                 TestSuiteName = _testSuite.Name,
                 ModelName = _args.ModelName,
+                RepositoryUrl = string.IsNullOrWhiteSpace(_args.Repository) ? null : _args.Repository,
+                NumPredict = _testSuite.NumPredict,
+                ContextLength = _testSuite.ContextLength,
                 Options = new QcTestOptions
                 {
                     Temperature = _args.Temperature,
@@ -1178,8 +1276,8 @@ Remember:
         {
             try
             {
-                // First, get model details from /api/show
-                var showRequest = new { name = modelName };
+                // Get model details from /api/show with verbose=true to include tensor info
+                var showRequest = new { name = modelName, verbose = true };
                 var showResponse = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/show", showRequest);
 
                 if (!showResponse.IsSuccessStatusCode)
@@ -1195,8 +1293,9 @@ Remember:
                 var parameterSize = details.GetProperty("parameter_size").GetString() ?? "";
                 var quantizationType = details.GetProperty("quantization_level").GetString() ?? "";
 
-                // If quantization type is empty, try to extract from the original model name/tag
-                if (string.IsNullOrEmpty(quantizationType))
+                // If quantization type is empty or "unknown" (HuggingFace models), extract from the model name/tag
+                // Do this BEFORE tensor analysis so enhancedQuant uses the correct type
+                if (string.IsNullOrEmpty(quantizationType) || quantizationType.Equals("unknown", StringComparison.OrdinalIgnoreCase))
                 {
                     // Try the original model name first (full name with tag)
                     if (!string.IsNullOrEmpty(originalModelName))
@@ -1210,7 +1309,18 @@ Remember:
                     }
                 }
 
-                // Get model size from /api/tags endpoint
+                // Calculate enhanced quantization from tensor analysis
+                string? enhancedQuant = null;
+                if (showRoot.TryGetProperty("tensors", out var tensorsElement))
+                {
+                    var dominantResult = CalculateDominantQuantFromTensors(tensorsElement, quantizationType);
+                    if (dominantResult != null)
+                    {
+                        enhancedQuant = dominantResult.GetFormattedString(quantizationType);
+                    }
+                }
+
+                // Get model size and digest from /api/tags endpoint
                 var tagsResponse = await _httpClient.GetAsync($"{_baseUrl}/api/tags");
                 if (!tagsResponse.IsSuccessStatusCode)
                     return null;
@@ -1220,12 +1330,25 @@ Remember:
                 var modelsArray = tagsDoc.RootElement.GetProperty("models");
 
                 long sizeBytes = 0;
+                string? digest = null;
                 foreach (var model in modelsArray.EnumerateArray())
                 {
                     var name = model.GetProperty("name").GetString();
                     if (name?.ToLowerInvariant() == modelName.ToLowerInvariant())
                     {
                         sizeBytes = model.GetProperty("size").GetInt64();
+                        // Extract digest - Ollama returns it in format "sha256:abc123..."
+                        if (model.TryGetProperty("digest", out var digestProp))
+                        {
+                            var rawDigest = digestProp.GetString();
+                            // Remove "sha256:" prefix if present
+                            if (!string.IsNullOrEmpty(rawDigest))
+                            {
+                                digest = rawDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                                    ? rawDigest.Substring(7)
+                                    : rawDigest;
+                            }
+                        }
                         break;
                     }
                 }
@@ -1235,8 +1358,49 @@ Remember:
                     Family = family,
                     ParameterSize = parameterSize,
                     QuantizationType = quantizationType,
-                    SizeBytes = sizeBytes
+                    EnhancedQuantization = enhancedQuant,
+                    SizeBytes = sizeBytes,
+                    Digest = digest
                 };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Calculates dominant quantization from tensor JSON element.
+        /// </summary>
+        /// <param name="tensorsElement">JSON element containing tensor array</param>
+        /// <param name="expectedQuantType">Expected quantization type from model name (maps "unknown" tensors to this)</param>
+        private static DominantQuantResult? CalculateDominantQuantFromTensors(JsonElement tensorsElement, string? expectedQuantType = null)
+        {
+            try
+            {
+                var tensors = new List<TensorInfo>();
+                foreach (var tensor in tensorsElement.EnumerateArray())
+                {
+                    var name = tensor.GetProperty("name").GetString() ?? "";
+                    var type = tensor.GetProperty("type").GetString() ?? "";
+                    var shape = new List<long>();
+
+                    if (tensor.TryGetProperty("shape", out var shapeElement))
+                    {
+                        foreach (var dim in shapeElement.EnumerateArray())
+                        {
+                            shape.Add(dim.GetInt64());
+                        }
+                    }
+
+                    tensors.Add(new TensorInfo(name, type, shape));
+                }
+
+                if (tensors.Count == 0)
+                    return null;
+
+                var analyzer = new TensorAnalyzer();
+                return analyzer.CalculateDominantQuantization(tensors, expectedQuantType);
             }
             catch
             {
@@ -1353,9 +1517,12 @@ Remember:
                 Tag = tag,
                 ModelName = modelFullName,
                 DiskSizeBytes = metadata.SizeBytes,
+                Digest = metadata.Digest,
+                ShortDigest = metadata.ShortDigest,
                 Family = metadata.Family,
                 ParameterSize = metadata.ParameterSize,
                 QuantizationType = metadata.QuantizationType,
+                EnhancedQuantization = metadata.EnhancedQuantization,
                 QuestionResults = questionResults
             };
 
@@ -1472,9 +1639,12 @@ Remember:
                 Tag = tag,
                 ModelName = modelFullName,
                 DiskSizeBytes = metadata.SizeBytes,
+                Digest = metadata.Digest,
+                ShortDigest = metadata.ShortDigest,
                 Family = metadata.Family,
                 ParameterSize = metadata.ParameterSize,
                 QuantizationType = metadata.QuantizationType,
+                EnhancedQuantization = metadata.EnhancedQuantization,
                 QuestionResults = questionResults
             };
 
@@ -1482,15 +1652,140 @@ Remember:
         }
 
         /// <summary>
-        /// Execute an async operation with retry logic
+        /// Execute an async operation with retry logic.
+        /// Timeouts trigger retry with optional timeout extension via y/n prompt.
         /// </summary>
         private async Task<T?> ExecuteWithRetryAsync<T>(Func<Task<T?>> operation, string operationName) where T : class
         {
             Exception? lastException = null;
+            int currentMaxRetries = MAX_RETRY_ATTEMPTS;
+            int totalAttempts = 0;
 
-            for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++)
+            while (true)
             {
-                // Check for cancellation before each attempt
+                for (int attempt = 1; attempt <= currentMaxRetries; attempt++)
+                {
+                    totalAttempts++;
+
+                    // Check for user cancellation before each attempt
+                    if (_cancellationRequested)
+                    {
+                        _cts.Token.ThrowIfCancellationRequested();
+                    }
+
+                    try
+                    {
+                        var result = await operation();
+                        if (result != null)
+                            return result;
+
+                        // Result was null, will retry
+                        lastException = null;
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        // Check if this is user-initiated cancellation or a timeout
+                        if (_cancellationRequested)
+                        {
+                            // User-initiated cancellation - rethrow immediately
+                            throw;
+                        }
+                        // Timeout - treat as retryable error
+                        lastException = ex;
+                    }
+                    catch (Exception ex) when (ex.InnerException is OperationCanceledException)
+                    {
+                        if (_cancellationRequested)
+                        {
+                            throw;
+                        }
+                        // Wrapped timeout - treat as retryable error
+                        lastException = ex;
+                    }
+                    catch (Exception ex)
+                    {
+                        lastException = ex;
+                    }
+
+                    // Show retry message if we have more attempts
+                    if (attempt < currentMaxRetries)
+                    {
+                        var msg = lastException != null
+                            ? $"[yellow]Attempt {attempt + 1}/{currentMaxRetries} for {operationName}: {lastException.Message}[/]"
+                            : $"[yellow]Attempt {attempt + 1}/{currentMaxRetries} for {operationName}...[/]";
+                        AnsiConsole.MarkupLine(msg);
+                        await Task.Delay(RETRY_DELAY_MS * Math.Min(attempt, 5)); // Capped exponential backoff
+                    }
+                }
+
+                // All attempts in this round failed - prompt user
+                var isTimeout = lastException is OperationCanceledException ||
+                               lastException is TaskCanceledException ||
+                               (lastException?.InnerException is OperationCanceledException);
+
+                if (isTimeout)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Timeout after {totalAttempts} attempts for {operationName}[/]");
+                    AnsiConsole.MarkupLine($"[yellow]Current timeout: {_args.Timeout} seconds[/]");
+                    AnsiConsole.MarkupLine($"[yellow]Cancel and save progress, or extend timeout and retry? (y=cancel, n=retry with 2x timeout)[/]");
+
+                    bool shouldCancel = false;
+                    try
+                    {
+                        var key = Console.ReadKey(true);
+                        shouldCancel = key.KeyChar == 'y' || key.KeyChar == 'Y';
+                    }
+                    catch
+                    {
+                        // Headless mode - auto-extend timeout and retry
+                        AnsiConsole.MarkupLine($"[dim](headless mode - auto-extending timeout)[/]");
+                        shouldCancel = false;
+                    }
+
+                    if (shouldCancel)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Cancelling...[/]");
+                        _cancellationRequested = true;
+                        _cts.Cancel();
+                        throw new OperationCanceledException("User cancelled after timeout");
+                    }
+                    else
+                    {
+                        // Double the timeout and retry
+                        _args.Timeout *= 2;
+                        _httpClient.Timeout = TimeSpan.FromSeconds(_args.Timeout);
+                        AnsiConsole.MarkupLine($"[green]Timeout extended to {_args.Timeout} seconds. Retrying...[/]");
+                        currentMaxRetries = MAX_RETRY_ATTEMPTS; // Reset retry count
+                        continue; // Start new retry loop
+                    }
+                }
+                else
+                {
+                    // Non-timeout error - fail after retries exhausted
+                    if (lastException != null)
+                    {
+                        AnsiConsole.MarkupLine($"[red]Failed after {totalAttempts} attempts for {operationName}: {lastException.Message}[/]");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[red]Failed after {totalAttempts} attempts for {operationName}[/]");
+                    }
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Execute an async operation with extended retry logic specifically for judge API calls.
+        /// Uses more aggressive retry (25 attempts) with delay ramping from 5 to 30 seconds.
+        /// </summary>
+        private async Task<T?> ExecuteJudgeWithRetryAsync<T>(Func<Task<T?>> operation, string operationName) where T : class
+        {
+            Exception? lastException = null;
+
+            for (int attempt = 1; attempt <= JUDGE_MAX_RETRY_ATTEMPTS; attempt++)
+            {
+                // Check for user cancellation before each attempt
                 if (_cancellationRequested)
                 {
                     _cts.Token.ThrowIfCancellationRequested();
@@ -1507,40 +1802,40 @@ Remember:
                 }
                 catch (OperationCanceledException)
                 {
-                    // Don't retry on cancellation - rethrow immediately
-                    throw;
+                    if (_cancellationRequested)
+                        throw;
+                    lastException = new Exception("Timeout");
                 }
                 catch (Exception ex) when (ex.InnerException is OperationCanceledException)
                 {
-                    // Don't retry on wrapped cancellation - rethrow immediately
-                    throw;
+                    if (_cancellationRequested)
+                        throw;
+                    lastException = ex;
                 }
                 catch (Exception ex)
                 {
                     lastException = ex;
                 }
 
-                // Show retry message if we have more attempts
-                if (attempt < MAX_RETRY_ATTEMPTS)
+                // Show retry message and wait before next attempt
+                if (attempt < JUDGE_MAX_RETRY_ATTEMPTS)
                 {
-                    var msg = lastException != null
-                        ? $"[yellow]Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for {operationName}: {lastException.Message}[/]"
-                        : $"[yellow]Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} for {operationName}...[/]";
-                    AnsiConsole.MarkupLine(msg);
-                    await Task.Delay(RETRY_DELAY_MS * attempt); // Exponential backoff
+                    // Calculate delay: linear ramp from 5s to 30s over 25 attempts
+                    var progress = (double)(attempt - 1) / (JUDGE_MAX_RETRY_ATTEMPTS - 1);
+                    var delayMs = (int)(JUDGE_RETRY_DELAY_START_MS + progress * (JUDGE_RETRY_DELAY_END_MS - JUDGE_RETRY_DELAY_START_MS));
+                    var delaySec = delayMs / 1000.0;
+
+                    var errorMsg = lastException != null ? $": {lastException.Message}" : "";
+                    AnsiConsole.MarkupLine($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed{errorMsg}[/]");
+                    AnsiConsole.MarkupLine($"[dim]  Retrying in {delaySec:F0}s...[/]");
+
+                    await Task.Delay(delayMs, _cts.Token);
                 }
             }
 
-            // All attempts failed
-            if (lastException != null)
-            {
-                AnsiConsole.MarkupLine($"[red]Failed after {MAX_RETRY_ATTEMPTS} attempts for {operationName}: {lastException.Message}[/]");
-            }
-            else
-            {
-                AnsiConsole.MarkupLine($"[red]Failed after {MAX_RETRY_ATTEMPTS} attempts for {operationName}[/]");
-            }
-
+            // All attempts exhausted
+            var finalError = lastException != null ? $": {lastException.Message}" : "";
+            AnsiConsole.MarkupLine($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failed attempts{finalError}[/]");
             return null;
         }
 
@@ -1684,7 +1979,8 @@ Remember:
                 Tokens = tokens,
                 EvalTokensPerSecond = evalTokensPerSecond,
                 PromptTokensPerSecond = promptTokensPerSecond,
-                TotalTokens = result.EvalCount ?? 0
+                TotalTokens = result.EvalCount ?? 0,
+                ContextLength = contextLength
             };
         }
 
@@ -1700,6 +1996,8 @@ Remember:
         private void WriteVerboseJudgment(string questionId, JudgmentResult judgment)
         {
             var scoreColor = judgment.Score >= 80 ? "lime" : judgment.Score >= 50 ? "yellow" : "red";
+            var bestColor = judgment.BestAnswer == "B" ? "lime" : judgment.BestAnswer == "A" ? "red" : "yellow";
+            var bestDisplay = judgment.BestAnswer ?? "?";
 
             lock (_verboseOutputLock)
             {
@@ -1707,7 +2005,7 @@ Remember:
                 var total = _verboseTotalCount;
                 var percent = total > 0 ? (completed * 100 / total) : 0;
 
-                AnsiConsole.Markup($"[magenta]Judging {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Score: [{scoreColor}]{judgment.Score}%[/] [dim]({completed}/{total} {percent}%)[/]");
+                AnsiConsole.Markup($"[magenta]Judging {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Score: [{scoreColor}]{judgment.Score}%[/] [dim]({completed}/{total} {percent}%)[/] Best: [{bestColor}]{bestDisplay}[/]");
                 AnsiConsole.WriteLine("");
 
                 if (string.IsNullOrWhiteSpace(judgment.Reason))
@@ -1717,7 +2015,8 @@ Remember:
                 else
                 {
                     // Word-wrap the reason into 4 lines at console width (minus indent)
-                    var consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+                    int consoleWidth = 120;
+                    try { consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120; } catch { }
                     var lineWidth = consoleWidth - 4; // 4 chars for indent
                     var words = judgment.Reason.Replace("\r", "").Replace("\n", " ").Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     var lines = new List<string>();
@@ -1774,11 +2073,12 @@ Remember:
             // In verbose mode, skip progress bar and just show verbose output with text progress
             if (_args.Verbose)
             {
-                // Count questions that need judging
+                // Count questions that need judging (including those missing BestAnswer)
                 var questionsToJudge = quantResult.QuestionResults.Count(q =>
                 {
                     var baseQ = baseResult.QuestionResults.FirstOrDefault(b => b.QuestionId == q.QuestionId);
-                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModel != _judgeModelName || _args.Force || _args.Rejudge);
+                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModel != _judgeModelName ||
+                        q.Judgment.BestAnswer == null || _args.Force || _args.Rejudge);
                 });
                 ResetVerboseProgress(questionsToJudge, quantResult.Tag);
 
@@ -1795,11 +2095,15 @@ Remember:
                         .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
 
                     if (baseQuestion == null)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
                         continue;
+                    }
 
-                    // Check if already judged with same model
+                    // Check if already judged with same model (and has BestAnswer)
                     if (quantQuestion.Judgment != null &&
                         quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                        quantQuestion.Judgment.BestAnswer != null &&
                         !_args.Force && !_args.Rejudge)
                     {
                         skippedCount++;
@@ -1853,9 +2157,10 @@ Remember:
                                 continue;
                             }
 
-                            // Check if already judged with same model
+                            // Check if already judged with same model (and has BestAnswer)
                             if (quantQuestion.Judgment != null &&
                                 quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                                quantQuestion.Judgment.BestAnswer != null &&
                                 !_args.Force && !_args.Rejudge)
                             {
                                 skippedCount++;
@@ -1904,13 +2209,15 @@ Remember:
 
                 if (baseQuestion == null)
                 {
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
                     skippedCount++;
                     continue;
                 }
 
-                // Check if already judged with same model
+                // Check if already judged with same model (and has BestAnswer)
                 if (quantQuestion.Judgment != null &&
                     quantQuestion.Judgment.JudgeModel == _judgeModelName &&
+                    quantQuestion.Judgment.BestAnswer != null &&
                     !_args.Force && !_args.Rejudge)
                 {
                     skippedCount++;
@@ -2224,14 +2531,14 @@ Remember:
         }
 
         /// <summary>
-        /// Judge a single question comparison (with retry)
+        /// Judge a single question comparison (with extended retry for resilience)
         /// </summary>
         private Task<JudgmentResult?> JudgeQuestionAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
         {
             if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
                 return Task.FromResult<JudgmentResult?>(null);
 
-            return ExecuteWithRetryAsync(
+            return ExecuteJudgeWithRetryAsync(
                 () => JudgeQuestionCoreAsync(baseQuestion, quantQuestion),
                 $"judgment Q{baseQuestion.QuestionId}");
         }
@@ -2281,7 +2588,8 @@ Remember:
                 {
                     // Output full raw JSON for debugging (word-wrap at console width)
                     AnsiConsole.MarkupLine("[dim]Raw JSON response:[/]");
-                    var consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120;
+                    int consoleWidth = 120;
+                    try { consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120; } catch { }
                     var escaped = Markup.Escape(result.RawResponse);
                     // Word wrap the response for readability
                     for (int i = 0; i < escaped.Length; i += consoleWidth - 4)
@@ -2319,7 +2627,23 @@ Remember:
 {quantQuestion.Answer}
 --- END RESPONSE B ---
 
-How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
+How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason.";
+
+            // Calculate judge context length: if auto (0), use test_ctx * 2 + 2048
+            int judgeContextLength;
+            if (_args.JudgeCtxSize > 0)
+            {
+                judgeContextLength = _args.JudgeCtxSize;
+            }
+            else
+            {
+                // Auto: get the test context length from the question (or test suite, or fallback to 4096)
+                var testCtx = quantQuestion.ContextLength
+                    ?? baseQuestion.ContextLength
+                    ?? _testSuite?.ContextLength
+                    ?? DEFAULT_TEST_CONTEXT_LENGTH;
+                judgeContextLength = testCtx * 2 + 2048;
+            }
 
             var request = new
             {
@@ -2340,20 +2664,25 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                             type = "number",
                             description = "Similarity score: use 1-100 scale (e.g., 85 for 85% similar). Do NOT use 0.0-1.0 scale."
                         },
+                        bestanswer = new
+                        {
+                            type = "string",
+                            description = "Which answer is qualitatively better: 'A' if Response A is better, 'B' if Response B is better, 'AB' if tied/equal"
+                        },
                         reason = new
                         {
                             type = "string",
                             description = "Comparison explanation starting with 'A and B match:' or 'A and B differ:'"
                         }
                     },
-                    required = new[] { "score", "reason" }
+                    required = new[] { "score", "bestanswer", "reason" }
                 },
                 options = new
                 {
                     temperature = 0.0,
                     seed = 42,
                     num_predict = 800, // Increased from 200 to avoid truncated JSON responses
-                    num_ctx = _args.JudgeCtxSize
+                    num_ctx = judgeContextLength
                 }
             };
 
@@ -2390,6 +2719,7 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             // Parse the structured JSON response
             int score = 0;
             string reason = "";
+            string? bestAnswer = null;
 
             // Try JSON parsing first, then try fixing truncated JSON, then fall back to regex
             bool jsonParsed = false;
@@ -2431,6 +2761,12 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                     if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "reason", "response", "explanation" }, out var reasonElement))
                     {
                         reason = reasonElement.GetString() ?? "";
+                    }
+
+                    // Try "bestanswer" field with various naming conventions
+                    if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "bestanswer", "best_answer", "best", "winner", "better" }, out var bestElement))
+                    {
+                        bestAnswer = NormalizeBestAnswer(bestElement.GetString());
                     }
                 }
                 catch
@@ -2486,6 +2822,16 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 }
             }
 
+            // Try regex fallback for bestanswer if still null
+            if (bestAnswer == null)
+            {
+                var bestMatch = Regex.Match(responseText, @"""?(?:bestanswer|best_answer|best|winner|better)""?\s*:\s*""?([^"",}\s]+)""?", RegexOptions.IgnoreCase);
+                if (bestMatch.Success)
+                {
+                    bestAnswer = NormalizeBestAnswer(bestMatch.Groups[1].Value);
+                }
+            }
+
             // If score is 0 or negative, treat as minimum score (1) - some models ignore instructions
             if (score <= 0)
             {
@@ -2500,9 +2846,56 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 JudgeModel = _judgeModelName,
                 Score = score,
                 Reason = reason,
+                BestAnswer = bestAnswer,
                 JudgedAt = DateTime.UtcNow,
                 RawResponse = string.IsNullOrWhiteSpace(reason) ? responseText : null // Capture raw response for debugging when reason is missing
             };
+        }
+
+        /// <summary>
+        /// Normalizes various bestanswer values to A, B, or AB.
+        /// Handles: "A", "B", "AB", "Response A", "RESPONSE_A", "Tie", "identical", "equal", etc.
+        /// </summary>
+        private static string? NormalizeBestAnswer(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+
+            var trimmed = value.Trim().ToUpperInvariant();
+
+            // Exact matches first
+            if (trimmed == "A" || trimmed == "B" || trimmed == "AB")
+                return trimmed;
+
+            // Tie variations
+            if (trimmed == "TIE" || trimmed == "TIED" || trimmed == "EQUAL" || trimmed == "SAME" ||
+                trimmed == "IDENTICAL" || trimmed == "BOTH" || trimmed == "NEITHER" || trimmed == "NONE" ||
+                trimmed == "DRAW" || trimmed == "N/A" || trimmed == "NA")
+                return "AB";
+
+            // Response A variations
+            if (trimmed.Contains("RESPONSE A") || trimmed.Contains("RESPONSE_A") ||
+                trimmed.Contains("ANSWER A") || trimmed.Contains("ANSWER_A") ||
+                trimmed == "RESPONSEA" || trimmed == "ANSWERA" ||
+                (trimmed.StartsWith("A") && !trimmed.StartsWith("AB") && trimmed.Length <= 3))
+                return "A";
+
+            // Response B variations
+            if (trimmed.Contains("RESPONSE B") || trimmed.Contains("RESPONSE_B") ||
+                trimmed.Contains("ANSWER B") || trimmed.Contains("ANSWER_B") ||
+                trimmed == "RESPONSEB" || trimmed == "ANSWERB" ||
+                (trimmed.StartsWith("B") && trimmed.Length <= 3))
+                return "B";
+
+            // Contains A or B anywhere
+            if (trimmed.Contains("A") && trimmed.Contains("B"))
+                return "AB";
+            if (trimmed.Contains("A"))
+                return "A";
+            if (trimmed.Contains("B"))
+                return "B";
+
+            return null;
         }
 
         /// <summary>
@@ -2539,6 +2932,7 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             // IQ patterns: IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S, IQ2_M, IQ3_XXS, IQ3_XS, IQ3_S, IQ3_M, IQ4_XS, IQ4_NL
             // Q patterns: Q2_K, Q3_K_S, Q3_K_M, Q3_K_L, Q4_0, Q4_1, Q4_K_S, Q4_K_M, Q5_0, Q5_1, Q5_K_S, Q5_K_M, Q6_K, Q8_0
             // Extended patterns: Q3_K_XL, Q4_K_XL, Q4_K_XXL, Q5_K_XL, Q6_K_XL, etc.
+            // TQ patterns: TQ1_0, TQ2_0 (ternary quantization)
             // May have UD- prefix (Unsloth Dynamic): UD-Q4_K_M, UD-IQ3_XXS
 
             var patterns = new[]
@@ -2551,6 +2945,8 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                 @"(?:^|[-_:])?(Q[2-8]_K)(?:[-_]|$)",
                 // Q patterns with number suffix (Q4_0, Q5_1, etc.)
                 @"(?:^|[-_:])?(Q[2-8]_[01])(?:[-_]|$)",
+                // TQ patterns (ternary quantization)
+                @"(?:^|[-_:])?(TQ[0-9]_0)(?:[-_]|$)",
                 // F16, F32 patterns
                 @"(?:^|[-_:])?(F(?:16|32))(?:[-_]|$)",
             };
@@ -2579,7 +2975,14 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             public string Family { get; set; } = string.Empty;
             public string ParameterSize { get; set; } = string.Empty;
             public string QuantizationType { get; set; } = string.Empty;
+            /// <summary>
+            /// Enhanced quantization display string including tensor analysis.
+            /// Format: "66% Q4_K" or "Q6_K_XL (76% Q6_K)"
+            /// </summary>
+            public string? EnhancedQuantization { get; set; }
             public long SizeBytes { get; set; }
+            public string? Digest { get; set; }
+            public string? ShortDigest => Digest?.Length >= 12 ? Digest.Substring(0, 12) : Digest;
         }
 
         /// <summary>
@@ -2690,6 +3093,159 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Get digest for a model from local Ollama, or HuggingFace registry as fallback
+        /// </summary>
+        private async Task<string?> GetModelDigestAsync(string modelName)
+        {
+            // First try to get digest from local Ollama
+            var localDigest = await GetLocalOllamaDigestAsync(modelName);
+            if (!string.IsNullOrEmpty(localDigest))
+                return localDigest;
+
+            // If model is from HuggingFace, try to get digest from HF registry
+            if (modelName.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase))
+            {
+                var hfDigest = await GetHuggingFaceDigestAsync(modelName);
+                if (!string.IsNullOrEmpty(hfDigest))
+                    return hfDigest;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Get digest from local Ollama /api/tags endpoint
+        /// </summary>
+        private async Task<string?> GetLocalOllamaDigestAsync(string modelName)
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync($"{_baseUrl}/api/tags");
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                var json = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+
+                if (!doc.RootElement.TryGetProperty("models", out var modelsArray))
+                    return null;
+
+                foreach (var model in modelsArray.EnumerateArray())
+                {
+                    if (model.TryGetProperty("name", out var nameElement))
+                    {
+                        var storedName = nameElement.GetString();
+                        if (storedName != null &&
+                            string.Equals(storedName, modelName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (model.TryGetProperty("digest", out var digestProp))
+                            {
+                                var rawDigest = digestProp.GetString();
+                                if (!string.IsNullOrEmpty(rawDigest))
+                                {
+                                    // Remove "sha256:" prefix if present
+                                    return rawDigest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                                        ? rawDigest.Substring(7)
+                                        : rawDigest;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// Get digest from HuggingFace registry manifest
+        /// URL format: https://huggingface.co/v2/{user}/{repo}/manifests/{tag}
+        /// </summary>
+        private async Task<string?> GetHuggingFaceDigestAsync(string modelName)
+        {
+            try
+            {
+                // Parse hf.co/user/repo:tag format
+                if (!modelName.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                var remaining = modelName.Substring(6); // Remove "hf.co/"
+                var colonIndex = remaining.LastIndexOf(':');
+                if (colonIndex < 0)
+                    return null;
+
+                var repoPath = remaining.Substring(0, colonIndex);
+                var tag = remaining.Substring(colonIndex + 1);
+
+                // Split repo path into user/repo
+                var slashIndex = repoPath.IndexOf('/');
+                if (slashIndex < 0)
+                    return null;
+
+                var user = repoPath.Substring(0, slashIndex);
+                var repo = repoPath.Substring(slashIndex + 1);
+
+                // Fetch manifest from HuggingFace registry
+                var manifestUrl = $"https://huggingface.co/v2/{user}/{repo}/manifests/{tag}";
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json");
+                httpClient.Timeout = TimeSpan.FromSeconds(30);
+
+                var response = await httpClient.GetAsync(manifestUrl);
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                var manifestContent = await response.Content.ReadAsByteArrayAsync();
+
+                // Compute SHA256 of the manifest content
+                using var sha256 = System.Security.Cryptography.SHA256.Create();
+                var hashBytes = sha256.ComputeHash(manifestContent);
+                var digest = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+
+                return digest;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// Backfill missing digest information for existing results in the results file
+        /// </summary>
+        private async Task BackfillMissingDigestsAsync()
+        {
+            if (_resultsFile == null || _resultsFile.Results.Count == 0)
+                return;
+
+            var resultsWithoutDigest = _resultsFile.Results.Where(r => string.IsNullOrEmpty(r.Digest)).ToList();
+            if (resultsWithoutDigest.Count == 0)
+                return;
+
+            AnsiConsole.MarkupLine($"[dim]Backfilling digest info for {resultsWithoutDigest.Count} result(s)...[/]");
+
+            bool anyUpdated = false;
+            foreach (var result in resultsWithoutDigest)
+            {
+                var digest = await GetModelDigestAsync(result.ModelName);
+                if (!string.IsNullOrEmpty(digest))
+                {
+                    result.Digest = digest;
+                    result.ShortDigest = digest.Length >= 12 ? digest.Substring(0, 12) : digest;
+                    anyUpdated = true;
+                    AnsiConsole.MarkupLine($"[dim]  + {result.Tag}: {result.ShortDigest}[/]");
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine($"[yellow]  Warning: Could not retrieve digest for {result.ModelName}[/]");
+                }
+            }
+
+            if (anyUpdated)
+            {
+                SaveResultsFile();
             }
         }
 
@@ -2975,8 +3531,7 @@ How similar are RESPONSE A and RESPONSE B? Provide score and reason.";
                                     if (lastPercent >= 0)
                                     {
                                         // Clear the progress line by overwriting with spaces, then newline
-                                        Console.Write("\r" + new string(' ', Console.WindowWidth - 1) + "\r");
-                                        Console.Out.Flush();
+                                        try { Console.Write("\r" + new string(' ', Console.WindowWidth - 1) + "\r"); Console.Out.Flush(); } catch { }
                                     }
                                     AnsiConsole.MarkupLine($"[dim]{Markup.Escape(status)}[/]");
                                     lastStatus = status;

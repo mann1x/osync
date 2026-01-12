@@ -1,6 +1,7 @@
 {
   "name": "v1base",
-  "numPredict": 8192,
+  "numPredict": 4096,
+  "contextLength": 4096,
   "categories": [
     {
       "id": 1,

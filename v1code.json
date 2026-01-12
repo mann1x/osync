@@ -1,6 +1,7 @@
 {
   "name": "v1code",
   "numPredict": 8192,
+  "contextLength": 8192,
   "categories": [
     {
       "id": 1,

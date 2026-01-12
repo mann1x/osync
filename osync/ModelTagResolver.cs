@@ -223,8 +223,8 @@ public partial class ModelTagResolver
     }
 
     // Regex pattern for common GGUF quantization suffixes
-    // Matches: Q4_0, Q4_K_M, Q5_K_S, Q8_0, IQ2_XXS, IQ3_M, IQ4_NL, F16, F32, BF16
-    [GeneratedRegex(@"(?:IQ[1-4]_(?:XXS|XS|S|M|NL)|Q[2-8]_(?:K_[SML]|K|[01])|[FB]F?(?:16|32))$",
+    // Matches: Q4_0, Q4_K_M, Q5_K_S, Q5_K_XL, Q8_0, IQ2_XXS, IQ3_M, IQ4_NL, TQ1_0, F16, F32, BF16
+    [GeneratedRegex(@"(?:IQ[1-4]_(?:XXS|XS|S|M|NL)|Q[2-8]_(?:K_(?:[SML]|XL)|K|[01])|TQ[0-9]_0|[FB]F?(?:16|32))$",
         RegexOptions.IgnoreCase)]
     private static partial Regex QuantizationPattern();
 

@@ -35,7 +35,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.2.5";
+        static string version = "1.2.6";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -244,15 +244,35 @@ namespace osync
                     return;
                 }
 
+                // Get console width and calculate column widths dynamically
+                int consoleWidth = 120; // Default width
+                try
+                {
+                    consoleWidth = System.Console.WindowWidth;
+                    if (consoleWidth < 80) consoleWidth = 80;
+                    if (consoleWidth > 300) consoleWidth = 300;
+                }
+                catch { /* Use default if console width unavailable */ }
+
+                // Fixed column widths for ID, SIZE, VRAM USAGE, CONTEXT, UNTIL
+                int idWidth = 14;
+                int sizeWidth = 20;
+                int vramWidth = 15;
+                int contextWidth = 8;
+                int untilWidth = 20;
+                int spacing = 5; // spaces between columns
+                int fixedColumnsWidth = idWidth + sizeWidth + vramWidth + contextWidth + untilWidth + spacing;
+                int nameWidth = Math.Max(20, consoleWidth - fixedColumnsWidth - 1);
+
                 Console.WriteLine("");
                 Console.WriteLine("Loaded Models:");
-                Console.WriteLine(new string('-', 135));
-                Console.WriteLine($"{"NAME",-30} {"ID",-15} {"SIZE",-25} {"VRAM USAGE",-15} {"CONTEXT",-10} {"UNTIL",-30}");
-                Console.WriteLine(new string('-', 135));
+                Console.WriteLine(new string('-', consoleWidth - 1));
+                Console.WriteLine($"{"NAME".PadRight(nameWidth)} {"ID".PadRight(idWidth)} {"SIZE".PadRight(sizeWidth)} {"VRAM USAGE".PadRight(vramWidth)} {"CONTEXT".PadRight(contextWidth)} {"UNTIL".PadRight(untilWidth)}");
+                Console.WriteLine(new string('-', consoleWidth - 1));
 
                 foreach (var model in status.Models)
                 {
-                    var name = TruncateString(model.Name, 30);
+                    var name = TruncateStringEnd(model.Name, nameWidth);
                     var id = GetShortDigest(model.Digest);
                     var size = FormatModelSize(model.Size, model.Details?.ParameterSize);
 
@@ -271,10 +291,10 @@ namespace osync
                     var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
                     var until = FormatUntil(model.ExpiresAt);
 
-                    Console.WriteLine($"{name,-30} {id,-15} {size,-25} {vramUsage,-15} {context,-10} {until,-30}");
+                    Console.WriteLine($"{name.PadRight(nameWidth)} {id.PadRight(idWidth)} {size.PadRight(sizeWidth)} {vramUsage.PadRight(vramWidth)} {context.PadRight(contextWidth)} {until.PadRight(untilWidth)}");
                 }
 
-                Console.WriteLine(new string('-', 135));
+                Console.WriteLine(new string('-', consoleWidth - 1));
                 Console.WriteLine("");
             }
             catch (HttpRequestException ex)
@@ -301,6 +321,18 @@ namespace osync
                 return str ?? "";
 
             return str.Substring(0, maxLength - 3) + "...";
+        }
+
+        /// <summary>
+        /// Truncates a string from the beginning, preserving the end (useful for model names where the tag is important)
+        /// </summary>
+        private string TruncateStringEnd(string str, int maxLength)
+        {
+            if (string.IsNullOrEmpty(str) || str.Length <= maxLength)
+                return str ?? "";
+
+            // Keep the end of the string with "..." prefix
+            return "..." + str.Substring(str.Length - maxLength + 3);
         }
 
         private string GetShortDigest(string digest)
@@ -333,6 +365,13 @@ namespace osync
                 len = len / 1024;
             }
             return $"{len:0.##} {sizes[order]}";
+        }
+
+        private string FormatDuration(TimeSpan duration)
+        {
+            if (duration.TotalSeconds >= 60)
+                return $"{(int)duration.TotalMinutes}m {duration.Seconds}s";
+            return $"{duration.TotalSeconds:F1}s";
         }
 
         private string FormatUntil(DateTime expiresAt)
@@ -404,33 +443,57 @@ namespace osync
             {
                 Console.WriteLine($"Loading model '{modelName}' into memory...");
 
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
                 using var httpClient = new HttpClient
                 {
                     BaseAddress = new Uri(ollamaHost),
                     Timeout = Timeout.InfiniteTimeSpan
                 };
 
-                // Send empty chat request to preload the model
+                // Send generate request with minimal prompt to get load_duration in response
+                // Using num_predict=1 to minimize generation while still getting timing info
                 var preloadRequest = new
                 {
-                    model = modelName
+                    model = modelName,
+                    prompt = ".",
+                    stream = false,
+                    options = new { num_predict = 1 }
                 };
 
                 var jsonContent = JsonSerializer.Serialize(preloadRequest);
                 var httpContent = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/chat")
+                var requestMessage = new HttpRequestMessage(HttpMethod.Post, "/api/generate")
                 {
                     Content = httpContent
                 };
 
-                var response = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
+                var response = await httpClient.SendAsync(requestMessage);
                 response.EnsureSuccessStatusCode();
 
-                // Consume the response to complete the preload
-                await response.Content.ReadAsStringAsync();
+                // Parse the response to get load_duration
+                var responseContent = await response.Content.ReadAsStringAsync();
 
-                Console.WriteLine($"✓ Model '{modelName}' loaded successfully");
+                stopwatch.Stop();
+                var elapsed = stopwatch.Elapsed;
+                string timeStr = FormatDuration(elapsed);
+
+                // Try to extract load_duration from response (in nanoseconds)
+                string apiTimeStr = "";
+                try
+                {
+                    using var doc = JsonDocument.Parse(responseContent);
+                    if (doc.RootElement.TryGetProperty("load_duration", out var loadDurationElement))
+                    {
+                        var loadDurationNs = loadDurationElement.GetInt64();
+                        var loadDuration = TimeSpan.FromTicks(loadDurationNs / 100); // nanoseconds to ticks (100ns per tick)
+                        apiTimeStr = $" (API: {FormatDuration(loadDuration)})";
+                    }
+                }
+                catch { /* Ignore parsing errors */ }
+
+                Console.WriteLine($"✓ Model '{modelName}' loaded successfully ({timeStr}){apiTimeStr}");
             }
             catch (HttpRequestException ex)
             {
@@ -649,6 +712,372 @@ namespace osync
         public void Install()
         {
             ActionInstall();
+        }
+
+        [ArgActionMethod, ArgDescription("Show osync version information"), ArgShortcut("-v")]
+        public void ShowVersion(VersionArgs args)
+        {
+            Console.WriteLine($"osync {GetFullVersion()}");
+
+            if (!args.Verbose)
+                return;
+
+            Console.WriteLine();
+
+            // Get binary path and installation status
+            string binaryPath = System.Environment.ProcessPath ?? "unknown";
+            Console.WriteLine($"Binary path: {binaryPath}");
+
+            // Check installation status
+            bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
+            string installDir = isWindows
+                ? Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".osync")
+                : Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".local", "bin");
+
+            string binaryDir = Path.GetDirectoryName(binaryPath) ?? "";
+            bool isRunningFromInstallDir = Path.GetFullPath(binaryDir).Equals(Path.GetFullPath(installDir), StringComparison.OrdinalIgnoreCase);
+
+            // Check if osync exists in install directory
+            string installedBinaryPath = isWindows
+                ? Path.Combine(installDir, "osync.exe")
+                : Path.Combine(installDir, "osync");
+            bool installedBinaryExists = System.IO.File.Exists(installedBinaryPath);
+
+            if (isRunningFromInstallDir)
+            {
+                Console.WriteLine($"Installed: Yes ({installDir})");
+            }
+            else if (installedBinaryExists)
+            {
+                // Get version and build of installed binary and compare
+                var (installedVersion, installedBuild) = GetInstalledBinaryVersionInfo(installedBinaryPath);
+                string currentVersion = version;
+                string currentBuild = GetBuildVersion();
+
+                if (installedVersion != null)
+                {
+                    string installedFullVersion = installedBuild != null
+                        ? $"v{installedVersion} ({installedBuild})"
+                        : $"v{installedVersion}";
+
+                    int comparison = CompareVersions(currentVersion, currentBuild, installedVersion, installedBuild);
+                    if (comparison > 0)
+                        Console.WriteLine($"Installed: Yes ({installDir}) - installed {installedFullVersion} is older");
+                    else if (comparison < 0)
+                        Console.WriteLine($"Installed: Yes ({installDir}) - installed {installedFullVersion} is newer");
+                    else
+                        Console.WriteLine($"Installed: Yes ({installDir}) - same version");
+                }
+                else
+                {
+                    Console.WriteLine($"Installed: Yes ({installDir}) - version unknown");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"Installed: No ({installDir})");
+            }
+
+            // Detect shell type and version
+            Console.WriteLine();
+            var (shellType, shellVersion) = DetectShellInfo();
+            Console.WriteLine($"Shell: {shellType} {shellVersion}");
+
+            // Check tab completion status
+            var (completionInstalled, completionCanInstall, completionPath) = CheckTabCompletionStatus(shellType);
+            if (completionInstalled)
+            {
+                Console.WriteLine($"Tab completion: Installed ({completionPath})");
+            }
+            else if (completionCanInstall)
+            {
+                Console.WriteLine($"Tab completion: Not installed (can be installed via 'osync install')");
+            }
+            else
+            {
+                Console.WriteLine($"Tab completion: Not available for {shellType}");
+            }
+        }
+
+        private (string shellType, string shellVersion) DetectShellInfo()
+        {
+            bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
+
+            // Check SHELL environment variable (Unix)
+            string? shellEnv = System.Environment.GetEnvironmentVariable("SHELL");
+
+            // Check PSModulePath for PowerShell detection
+            string? psModulePath = System.Environment.GetEnvironmentVariable("PSModulePath");
+            bool isPowerShell = !string.IsNullOrEmpty(psModulePath);
+
+            // Check for bash-specific variables
+            string? bashVersion = System.Environment.GetEnvironmentVariable("BASH_VERSION");
+            if (!string.IsNullOrEmpty(bashVersion))
+            {
+                return ("bash", bashVersion);
+            }
+
+            // Check for zsh-specific variables
+            string? zshVersion = System.Environment.GetEnvironmentVariable("ZSH_VERSION");
+            if (!string.IsNullOrEmpty(zshVersion))
+            {
+                return ("zsh", zshVersion);
+            }
+
+            // PowerShell detection
+            if (isPowerShell)
+            {
+                // Try to get PowerShell version
+                if (isWindows)
+                {
+                    // Try pwsh first, then powershell
+                    string? pwshPath = FindExecutableInPath("pwsh");
+                    if (pwshPath != null)
+                    {
+                        var (version, edition) = GetPowerShellVersion(pwshPath);
+                        return ($"PowerShell {edition}", version.ToString());
+                    }
+                    string? psPath = FindExecutableInPath("powershell");
+                    if (psPath != null)
+                    {
+                        var (version, edition) = GetPowerShellVersion(psPath);
+                        return ($"PowerShell {edition}", version.ToString());
+                    }
+                }
+                else
+                {
+                    string? pwshPath = FindExecutableInPath("pwsh");
+                    if (pwshPath != null)
+                    {
+                        var (version, edition) = GetPowerShellVersion(pwshPath);
+                        return ($"PowerShell {edition}", version.ToString());
+                    }
+                }
+                return ("PowerShell", "unknown");
+            }
+
+            // Windows Command Prompt detection
+            if (isWindows)
+            {
+                string? comspec = System.Environment.GetEnvironmentVariable("COMSPEC");
+                if (!string.IsNullOrEmpty(comspec) && comspec.EndsWith("cmd.exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Get Windows version as proxy for cmd version
+                    return ("cmd", System.Environment.OSVersion.Version.ToString());
+                }
+            }
+
+            // Fall back to SHELL env var
+            if (!string.IsNullOrEmpty(shellEnv))
+            {
+                string shellName = Path.GetFileName(shellEnv);
+                return (shellName, "unknown");
+            }
+
+            return ("unknown", "");
+        }
+
+        private string? FindExecutableInPath(string name)
+        {
+            bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
+            string[] extensions = isWindows ? new[] { ".exe", ".cmd", ".bat", "" } : new[] { "" };
+            string? pathEnv = System.Environment.GetEnvironmentVariable("PATH");
+
+            if (string.IsNullOrEmpty(pathEnv))
+                return null;
+
+            char separator = isWindows ? ';' : ':';
+            foreach (string dir in pathEnv.Split(separator))
+            {
+                foreach (string ext in extensions)
+                {
+                    string fullPath = Path.Combine(dir, name + ext);
+                    if (System.IO.File.Exists(fullPath))
+                        return fullPath;
+                }
+            }
+            return null;
+        }
+
+        private (bool installed, bool canInstall, string path) CheckTabCompletionStatus(string shellType)
+        {
+            bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
+            string homeDir = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+
+            switch (shellType.ToLowerInvariant())
+            {
+                case "bash":
+                    // Check common bash completion paths
+                    string[] bashPaths = {
+                        "/etc/bash_completion.d/osync",
+                        Path.Combine(homeDir, ".local/share/bash-completion/completions/osync"),
+                        Path.Combine(homeDir, ".bash_completion.d/osync")
+                    };
+                    foreach (var path in bashPaths)
+                    {
+                        if (System.IO.File.Exists(path))
+                            return (true, true, path);
+                    }
+                    // Check if sourced in bashrc
+                    string bashrc = Path.Combine(homeDir, ".bashrc");
+                    if (System.IO.File.Exists(bashrc))
+                    {
+                        string content = System.IO.File.ReadAllText(bashrc);
+                        if (content.Contains("# osync bash completion script") || content.Contains("# osync completion"))
+                            return (true, true, bashrc);
+                    }
+                    return (false, true, "");
+
+                case "zsh":
+                    // Check common zsh completion paths
+                    string[] zshPaths = {
+                        Path.Combine(homeDir, ".zfunc/_osync"),
+                        "/usr/local/share/zsh/site-functions/_osync"
+                    };
+                    foreach (var path in zshPaths)
+                    {
+                        if (System.IO.File.Exists(path))
+                            return (true, true, path);
+                    }
+                    return (false, true, "");
+
+                case "powershell core":
+                case "powershell desktop":
+                case var ps when ps.StartsWith("PowerShell", StringComparison.OrdinalIgnoreCase):
+                    // Check PowerShell profile for completion
+                    string psProfile = isWindows
+                        ? Path.Combine(homeDir, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1")
+                        : Path.Combine(homeDir, ".config", "powershell", "Microsoft.PowerShell_profile.ps1");
+                    if (System.IO.File.Exists(psProfile))
+                    {
+                        string content = System.IO.File.ReadAllText(psProfile);
+                        if (content.Contains("# osync PowerShell completion - START") || content.Contains("# osync tab completion"))
+                            return (true, true, psProfile);
+                    }
+                    // Also check Windows PowerShell profile
+                    if (isWindows)
+                    {
+                        string wpProfile = Path.Combine(homeDir, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1");
+                        if (System.IO.File.Exists(wpProfile))
+                        {
+                            string content = System.IO.File.ReadAllText(wpProfile);
+                            if (content.Contains("# osync PowerShell completion - START") || content.Contains("# osync tab completion"))
+                                return (true, true, wpProfile);
+                        }
+                    }
+                    return (false, true, "");
+
+                case "cmd":
+                    // cmd.exe doesn't support custom tab completion
+                    return (false, false, "");
+
+                default:
+                    return (false, false, "");
+            }
+        }
+
+        private (string? version, string? build) GetInstalledBinaryVersionInfo(string binaryPath)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = binaryPath,
+                    Arguments = "ShowVersion",  // Use the actual command name, not alias
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(startInfo);
+                if (process == null) return (null, null);
+
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit(5000);
+
+                // Parse version and build from output like "osync v1.2.6 (b20260110-1156)"
+                // Use specific pattern to avoid matching IP addresses
+                var match = System.Text.RegularExpressions.Regex.Match(output, @"osync\s+v?(\d+\.\d+\.\d+)\s*\((b\d{8}-\d{4})\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    return (match.Groups[1].Value, match.Groups[2].Value);
+                }
+
+                // Try without build number
+                var versionMatch = System.Text.RegularExpressions.Regex.Match(output, @"osync\s+v?(\d+\.\d+\.\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (versionMatch.Success)
+                {
+                    return (versionMatch.Groups[1].Value, null);
+                }
+                return (null, null);
+            }
+            catch
+            {
+                return (null, null);
+            }
+        }
+
+        private int CompareVersions(string version1, string? build1, string version2, string? build2)
+        {
+            // Remove 'v' prefix if present
+            version1 = version1.TrimStart('v');
+            version2 = version2.TrimStart('v');
+
+            // Split into parts
+            var parts1 = version1.Split('.').Select(p => int.TryParse(p, out int v) ? v : 0).ToArray();
+            var parts2 = version2.Split('.').Select(p => int.TryParse(p, out int v) ? v : 0).ToArray();
+
+            // Pad arrays to same length
+            int maxLen = Math.Max(parts1.Length, parts2.Length);
+            Array.Resize(ref parts1, maxLen);
+            Array.Resize(ref parts2, maxLen);
+
+            // Compare version parts
+            for (int i = 0; i < maxLen; i++)
+            {
+                if (parts1[i] > parts2[i]) return 1;
+                if (parts1[i] < parts2[i]) return -1;
+            }
+
+            // Versions are equal, compare build numbers if available
+            // Build format: b20260110-1156 (bYYYYMMDD-HHMM)
+            if (!string.IsNullOrEmpty(build1) && !string.IsNullOrEmpty(build2))
+            {
+                // Extract date and time from build strings
+                var buildDate1 = ParseBuildDateTime(build1);
+                var buildDate2 = ParseBuildDateTime(build2);
+
+                if (buildDate1.HasValue && buildDate2.HasValue)
+                {
+                    return buildDate1.Value.CompareTo(buildDate2.Value);
+                }
+            }
+
+            return 0;
+        }
+
+        private DateTime? ParseBuildDateTime(string build)
+        {
+            // Parse build format: b20260110-1156 (bYYYYMMDD-HHMM)
+            var match = System.Text.RegularExpressions.Regex.Match(build, @"b(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})");
+            if (match.Success)
+            {
+                try
+                {
+                    int year = int.Parse(match.Groups[1].Value);
+                    int month = int.Parse(match.Groups[2].Value);
+                    int day = int.Parse(match.Groups[3].Value);
+                    int hour = int.Parse(match.Groups[4].Value);
+                    int minute = int.Parse(match.Groups[5].Value);
+                    return new DateTime(year, month, day, hour, minute, 0);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+            return null;
         }
 
         [ArgShortcut("-bt"), ArgDescription("Bandwidth throttling (B, KB, MB, GB)"), ArgExample("-bt 10MB", "Throttle bandwidth to 10MB"), ArgDefaultValue(0)]
@@ -1631,6 +2060,11 @@ namespace osync
 
         private void ActionCopyRemoteToLocal(string sourceServer, string sourceModel, string destModel)
         {
+            ActionCopyRemoteToLocalAsync(sourceServer, sourceModel, destModel).GetAwaiter().GetResult();
+        }
+
+        private async Task ActionCopyRemoteToLocalAsync(string sourceServer, string sourceModel, string destModel)
+        {
             // Validate source server
             if (!ValidateServerUrl(sourceServer))
             {
@@ -1638,56 +2072,281 @@ namespace osync
                 System.Environment.Exit(1);
             }
 
-            var originalBaseAddress = client.BaseAddress;
+            // Ensure local ollama models directory exists
+            if (!Directory.Exists(ollama_models))
+            {
+                Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                System.Environment.Exit(1);
+            }
+
+            // Create dedicated client for source server
+            var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            sourceClient.BaseAddress = new Uri(sourceServer);
+
+            Console.WriteLine($"Fetching model information from {sourceServer}...");
+
+            // Get modelfile string to extract blob digests
+            var (modelfile, modelfileErr) = await GetRemoteModelfileStringWithClient(sourceClient, sourceModel);
+
+            if (modelfile == null)
+            {
+                Console.WriteLine($"Error: Could not retrieve model '{sourceModel}' from source server");
+                if (modelfileErr != null)
+                {
+                    Console.WriteLine($"Details: {modelfileErr}");
+                }
+                System.Environment.Exit(1);
+            }
+
+            // Extract blob digests from modelfile
+            var blobDigests = ExtractBlobDigestsFromModelfile(modelfile);
+
+            if (blobDigests.Count == 0)
+            {
+                Console.WriteLine($"Error: No blob references found in modelfile");
+                System.Environment.Exit(1);
+            }
+
+            Console.WriteLine($"Found {blobDigests.Count} blob(s) to download");
+
+            // Get modelfile information for creating model locally
+            var (template, system, _) = await GetRemoteModelfileWithClient(sourceClient, sourceModel);
+            // Get parameters as raw JSON to preserve types (arrays, numbers, etc.)
+            var parametersRaw = await GetRemoteModelParametersRaw(sourceClient, sourceModel);
+
+            // Download each blob from source to local blobs directory
+            string blobDir = Path.Combine(ollama_models, "blobs");
+            Directory.CreateDirectory(blobDir);
+
+            var files = new Dictionary<string, string>();
+            int modelIndex = 0;
+
+            foreach (var digest in blobDigests)
+            {
+                Console.WriteLine($"\nDownloading blob {digest.Substring(0, 19)}...");
+
+                // Download blob from source server
+                await DownloadBlobToLocal(sourceClient, sourceServer, sourceModel, digest, blobDir);
+
+                // Track files for model creation
+                string filename = modelIndex == 0 ? "model.gguf" : $"model_{modelIndex}.gguf";
+                files[filename] = digest;
+                modelIndex++;
+            }
+
+            // Create model locally using ollama create
+            Console.WriteLine($"\nCreating local model '{destModel}'...");
+            await CreateLocalModelFromBlobs(destModel, files, template, system, parametersRaw);
+
+            Console.WriteLine($"\nSuccessfully copied '{sourceModel}' from {sourceServer} to local '{destModel}'");
+
+            sourceClient.Dispose();
+        }
+
+        /// <summary>
+        /// Downloads a blob from the Ollama registry to the local blobs directory.
+        /// Uses the same approach as remote-to-remote copy.
+        /// </summary>
+        private async Task DownloadBlobToLocal(HttpClient sourceClient, string sourceServer, string sourceModel, string digest, string blobDir)
+        {
+            // Convert digest to local blob filename (sha256:xxx -> sha256-xxx)
+            string blobFilename = digest.Replace(":", "-");
+            string blobPath = Path.Combine(blobDir, blobFilename);
+
+            // Check if blob already exists locally
+            if (System.IO.File.Exists(blobPath))
+            {
+                var existingInfo = new FileInfo(blobPath);
+                Console.WriteLine($"  Blob already exists locally ({ByteSize.FromBytes(existingInfo.Length)})");
+                return;
+            }
+
+            // Build registry path from model name
+            string modelNameWithoutTag = sourceModel.Contains(":") ? sourceModel.Split(':')[0] : sourceModel;
+            string registryPath = modelNameWithoutTag.Contains("/")
+                ? modelNameWithoutTag  // Already has namespace like "mannix/model"
+                : $"library/{modelNameWithoutTag}";  // Standard library model
+
+            // Create a client for registry access
+            var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(2) };
+            registryClient.DefaultRequestHeaders.UserAgent.ParseAdd("ollama/0.5.0");
 
             try
             {
-                // Get model from source using ollama pull API
-                client.BaseAddress = new Uri(sourceServer);
-                Console.WriteLine($"Pulling model '{sourceModel}' from source server...");
-
-                // Use ollama pull to download from remote and then copy locally
-                var pullProcess = new Process();
-                pullProcess.StartInfo.FileName = "ollama";
-                pullProcess.StartInfo.Arguments = $"pull {sourceModel}";
-                pullProcess.StartInfo.CreateNoWindow = true;
-                pullProcess.StartInfo.UseShellExecute = false;
-                pullProcess.StartInfo.RedirectStandardOutput = true;
-                pullProcess.StartInfo.RedirectStandardError = true;
-                pullProcess.StartInfo.EnvironmentVariables["OLLAMA_HOST"] = sourceServer;
-
-                try
+                // Construct registry URLs to try (same as remote-to-remote copy)
+                var registryUrls = new[]
                 {
-                    pullProcess.Start();
-                    string output = pullProcess.StandardOutput.ReadToEnd();
-                    string error = pullProcess.StandardError.ReadToEnd();
-                    pullProcess.WaitForExit();
+                    $"https://registry.ollama.ai/v2/{registryPath}/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/{registryPath}/blobs/{digest}",
+                    // Try without library prefix
+                    $"https://registry.ollama.ai/v2/{modelNameWithoutTag}/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/{modelNameWithoutTag}/blobs/{digest}",
+                    // Fallback to direct blob access
+                    $"https://registry.ollama.ai/v2/blobs/{digest}",
+                    $"https://registry.ollama.com/v2/blobs/{digest}"
+                };
 
-                    if (pullProcess.ExitCode != 0)
+                HttpResponseMessage? downloadResponse = null;
+
+                foreach (var url in registryUrls)
+                {
+                    try
                     {
-                        Console.WriteLine($"Error: failed to pull model from source server: {error}");
-                        System.Environment.Exit(1);
+                        downloadResponse = await registryClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                        if (downloadResponse.IsSuccessStatusCode)
+                        {
+                            break; // Successfully found the blob
+                        }
                     }
-
-                    Console.WriteLine(output);
-                    Console.WriteLine($"Successfully pulled '{sourceModel}' from source server");
-
-                    // Now copy locally if destination name is different
-                    if (sourceModel != destModel)
+                    catch
                     {
-                        Console.WriteLine($"Copying to '{destModel}'...");
-                        ActionCopyLocal(sourceModel, destModel);
+                        continue;
                     }
                 }
-                catch (Exception e)
+
+                if (downloadResponse == null || !downloadResponse.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Exception: failed to pull model: {e.Message}");
-                    System.Environment.Exit(1);
+                    Console.WriteLine($"  Error: Blob not found in Ollama registry");
+                    Console.WriteLine($"  Note: This model was likely created locally on the remote server");
+                    Console.WriteLine($"        and is not available in the public registry.");
+                    Console.WriteLine($"  To copy custom models, use rsync or scp to copy the files directly.");
+                    throw new Exception($"Blob {digest} not available in registry");
                 }
+
+                var totalBytes = downloadResponse.Content.Headers.ContentLength ?? 0;
+                var totalSize = ByteSize.FromBytes(totalBytes);
+
+                Console.WriteLine($"  Downloading {totalSize} from registry...");
+
+                using var contentStream = await downloadResponse.Content.ReadAsStreamAsync();
+                using var fileStream = new FileStream(blobPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+
+                var buffer = new byte[81920];
+                long totalRead = 0;
+                int bytesRead;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                long lastReport = 0;
+
+                while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    await fileStream.WriteAsync(buffer, 0, bytesRead);
+                    totalRead += bytesRead;
+
+                    // Report progress every 50MB or so
+                    if (totalRead - lastReport > 50 * 1024 * 1024)
+                    {
+                        var percent = totalBytes > 0 ? (totalRead * 100.0 / totalBytes) : 0;
+                        var speed = totalRead / sw.Elapsed.TotalSeconds;
+                        Console.Write($"\r  Downloaded {ByteSize.FromBytes(totalRead)} / {totalSize} ({percent:F1}%) - {ByteSize.FromBytes(speed).ToString("#.#")}/s    ");
+                        lastReport = totalRead;
+                    }
+                }
+
+                var finalSpeed = totalRead / sw.Elapsed.TotalSeconds;
+                Console.WriteLine($"\r  Downloaded {ByteSize.FromBytes(totalRead)} in {sw.Elapsed.TotalSeconds:F1}s ({ByteSize.FromBytes(finalSpeed).ToString("#.#")}/s)    ");
+            }
+            catch (Exception ex) when (!(ex.Message.Contains("not available in registry")))
+            {
+                // Clean up partial file
+                if (System.IO.File.Exists(blobPath))
+                {
+                    System.IO.File.Delete(blobPath);
+                }
+                throw new Exception($"Failed to download blob {digest}: {ex.Message}", ex);
             }
             finally
             {
-                client.BaseAddress = originalBaseAddress;
+                registryClient.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Creates a local model from downloaded blobs using ollama create.
+        /// </summary>
+        private async Task CreateLocalModelFromBlobs(string modelName, Dictionary<string, string> files, string? template, string? system, Dictionary<string, object>? parameters)
+        {
+            // Create model using ollama create API - use local Ollama URL
+            string localOllamaUrl = System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? "http://localhost:11434";
+
+            // Handle bind-all addresses (0.0.0.0 or ::0) - convert to localhost for client connections
+            if (localOllamaUrl.Contains("0.0.0.0") || localOllamaUrl.Contains("::0") || localOllamaUrl.Contains("[::]"))
+            {
+                localOllamaUrl = localOllamaUrl.Replace("0.0.0.0", "localhost").Replace("::0", "localhost").Replace("[::]", "localhost");
+            }
+
+            if (!localOllamaUrl.StartsWith("http"))
+            {
+                localOllamaUrl = "http://" + localOllamaUrl;
+            }
+
+            // Ensure port is present (default Ollama port is 11434)
+            if (!localOllamaUrl.Contains(":11434") && !localOllamaUrl.Contains(":80") && !System.Text.RegularExpressions.Regex.IsMatch(localOllamaUrl, @":\d{2,5}$"))
+            {
+                localOllamaUrl = localOllamaUrl.TrimEnd('/') + ":11434";
+            }
+
+            // Build request using same format as RunCreateModel (model + files dictionary)
+            var modelCreate = new Dictionary<string, object>
+            {
+                { "model", modelName },
+                { "files", files }
+            };
+
+            if (!string.IsNullOrEmpty(template))
+                modelCreate["template"] = template;
+            if (!string.IsNullOrEmpty(system))
+                modelCreate["system"] = system;
+            if (parameters != null && parameters.Count > 0)
+            {
+                // Parameters are already properly typed (arrays, numbers, strings)
+                modelCreate["parameters"] = parameters;
+            }
+
+            var json = JsonSerializer.Serialize(modelCreate);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            try
+            {
+                using var localClient = new HttpClient() { BaseAddress = new Uri(localOllamaUrl), Timeout = TimeSpan.FromMinutes(30) };
+                var postMessage = new HttpRequestMessage(HttpMethod.Post, "api/create");
+                postMessage.Content = content;
+                var response = await localClient.SendAsync(postMessage, HttpCompletionOption.ResponseHeadersRead);
+                var stream = await response.Content.ReadAsStreamAsync();
+
+                string lastStatus = "";
+                using (var streamReader = new StreamReader(stream))
+                {
+                    while (!streamReader.EndOfStream)
+                    {
+                        string? statusLine = await streamReader.ReadLineAsync();
+                        if (statusLine != null)
+                        {
+                            RootStatus? status = StatusReader.Read<RootStatus>(statusLine);
+                            if (status?.status != null)
+                            {
+                                lastStatus = status.status;
+                                Console.WriteLine($"  {status.status}");
+                            }
+                        }
+                    }
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Error creating model: {response.StatusCode}");
+                    System.Environment.Exit(1);
+                }
+                else if (lastStatus != "success")
+                {
+                    Console.WriteLine($"Error: model creation failed with status: {lastStatus}");
+                    System.Environment.Exit(1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error creating model: {ex.Message}");
+                System.Environment.Exit(1);
             }
         }
 
@@ -1942,6 +2601,53 @@ namespace osync
             {
                 Console.WriteLine($"Error getting modelfile: {e.Message}");
                 return (null, null, null);
+            }
+        }
+
+        /// <summary>
+        /// Gets remote model parameters as a raw dictionary preserving JSON types.
+        /// </summary>
+        private async Task<Dictionary<string, object>?> GetRemoteModelParametersRaw(HttpClient httpClient, string modelName)
+        {
+            try
+            {
+                var showRequest = new { name = modelName };
+                string showJson = JsonSerializer.Serialize(showRequest);
+                var content = new StringContent(showJson, Encoding.UTF8, "application/json");
+
+                var response = await httpClient.PostAsync("api/show", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                string json = await response.Content.ReadAsStringAsync();
+                var showResponse = JsonSerializer.Deserialize<JsonDocument>(json);
+                if (showResponse == null)
+                {
+                    return null;
+                }
+
+                if (showResponse.RootElement.TryGetProperty("parameters", out var parametersElement))
+                {
+                    if (parametersElement.ValueKind == JsonValueKind.Object)
+                    {
+                        var result = new Dictionary<string, object>();
+                        foreach (var param in parametersElement.EnumerateObject())
+                        {
+                            // Deserialize each value to its proper type
+                            result[param.Name] = JsonSerializer.Deserialize<object>(param.Value.GetRawText())!;
+                        }
+                        return result;
+                    }
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -2511,8 +3217,9 @@ namespace osync
                 Pattern = null;
             }
 
-            // If pattern is provided but doesn't contain a wildcard, append * to match prefix
-            // This makes "osync ls qw" work the same as "osync ls qw*"
+            // If pattern is provided but doesn't contain a wildcard, append * for prefix match
+            // This makes "osync ls code" work the same as "osync ls code*" (models starting with "code")
+            // To search for "contains", use leading wildcard: "osync ls *code" or "osync ls *code*"
             if (!string.IsNullOrEmpty(Pattern) && !Pattern.Contains("*"))
             {
                 Pattern = Pattern + "*";
@@ -2642,14 +3349,13 @@ namespace osync
                                     {
                                         totalSize = manifest.layers.Sum(l => l.size);
                                     }
-                                    if (manifest?.config?.digest != null)
-                                    {
-                                        string digest = manifest.config.digest;
-                                        if (digest.StartsWith("sha256:"))
-                                        {
-                                            modelId = digest.Substring(7, 12);
-                                        }
-                                    }
+
+                                    // Compute SHA256 of manifest file content (same as ollama ls)
+                                    var manifestBytes = System.IO.File.ReadAllBytes(tagFile);
+                                    using var sha256 = System.Security.Cryptography.SHA256.Create();
+                                    var hashBytes = sha256.ComputeHash(manifestBytes);
+                                    var fullDigest = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                                    modelId = fullDigest.Substring(0, 12);
                                 }
                                 catch { }
 
@@ -3275,6 +3981,14 @@ namespace osync
                 isHuggingFaceModel = true;
             }
 
+            // Check for wildcard in tag
+            if (modelName.Contains(":") && modelName.Contains("*"))
+            {
+                // Wildcard tag expansion - pull multiple models
+                ActionPullWithWildcardAsync(modelName, destination, isHuggingFaceModel).GetAwaiter().GetResult();
+                return;
+            }
+
             // Add :latest tag ONLY if:
             // 1. No tag is specified (doesn't contain ':')
             // 2. NOT a HuggingFace model (HF models always have explicit tags)
@@ -3298,6 +4012,80 @@ namespace osync
                 }
                 PullRemoteModel(modelName, destination).GetAwaiter().GetResult();
             }
+        }
+
+        /// <summary>
+        /// Handles pull with wildcard tag patterns (e.g., "gemma3:1b-it-q*", "hf.co/user/repo:IQ2*").
+        /// </summary>
+        private async Task ActionPullWithWildcardAsync(string modelPattern, string? destination, bool isHuggingFaceModel)
+        {
+            // Split into model source and tag pattern
+            var colonIndex = modelPattern.LastIndexOf(':');
+            if (colonIndex < 0)
+            {
+                Console.WriteLine("Error: Invalid pattern format. Expected model:tag*");
+                System.Environment.Exit(1);
+                return;
+            }
+
+            var modelSource = modelPattern.Substring(0, colonIndex);
+            var tagPattern = modelPattern.Substring(colonIndex + 1);
+
+            Console.WriteLine($"Resolving tag pattern '{tagPattern}' for {modelSource}...");
+
+            var resolver = new ModelTagResolver(client);
+            var resolvedTags = await resolver.ResolveTagPatternAsync(modelSource, tagPattern);
+
+            if (resolvedTags.Count == 0)
+            {
+                Console.WriteLine($"No tags found matching pattern '{tagPattern}'");
+                System.Environment.Exit(1);
+                return;
+            }
+
+            Console.WriteLine($"Found {resolvedTags.Count} matching tag(s):");
+            foreach (var tag in resolvedTags)
+            {
+                Console.WriteLine($"  - {tag.Tag}");
+            }
+            Console.WriteLine();
+
+            // Pull each matching model
+            int successCount = 0;
+            int failCount = 0;
+
+            foreach (var tag in resolvedTags)
+            {
+                var fullModelName = tag.GetFullModelName();
+                Console.WriteLine($"Pulling {fullModelName}...");
+
+                try
+                {
+                    if (string.IsNullOrEmpty(destination))
+                    {
+                        PullLocalModel(fullModelName);
+                    }
+                    else
+                    {
+                        if (!ValidateServerUrl(destination, silent: true))
+                        {
+                            Console.WriteLine($"Error: Invalid destination URL: {destination}");
+                            failCount++;
+                            continue;
+                        }
+                        await PullRemoteModel(fullModelName, destination);
+                    }
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error pulling {fullModelName}: {ex.Message}");
+                    failCount++;
+                }
+                Console.WriteLine();
+            }
+
+            Console.WriteLine($"Pull complete: {successCount} succeeded, {failCount} failed");
         }
 
         private bool IsHuggingFaceUrl(string input)
@@ -5209,6 +5997,102 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
     }
     internal class Program
     {
+        /// <summary>
+        /// Handles shell wildcard expansion for pattern-based commands.
+        /// On Linux/Unix, unquoted wildcards like "llama*" get expanded by the shell to matching files.
+        /// This method detects that scenario and consolidates to a single pattern with a warning.
+        /// </summary>
+        static string[] HandleShellExpansion(string[] args)
+        {
+            if (args.Length < 3) return args;
+
+            // Commands that accept wildcard patterns
+            string[] patternCommands = { "ls", "list", "rm", "remove", "del", "delete", "update" };
+            string command = args[0].ToLower();
+
+            if (!patternCommands.Contains(command)) return args;
+
+            // Collect all positional (non-flag) arguments after the command
+            var positionalArgs = new List<(int index, string value)>();
+            var flagsRequiringValue = new HashSet<string> { "-d", "-bt", "-buffersize" };
+
+            for (int i = 1; i < args.Length; i++)
+            {
+                string arg = args[i];
+
+                // Skip flags and their values
+                if (arg.StartsWith("-"))
+                {
+                    // If this flag requires a value, skip the next arg too
+                    if (flagsRequiringValue.Contains(arg.ToLower()) && i + 1 < args.Length)
+                        i++;
+                    continue;
+                }
+
+                // Skip URLs (destination servers)
+                if (arg.StartsWith("http://") || arg.StartsWith("https://"))
+                    continue;
+
+                positionalArgs.Add((i, arg));
+            }
+
+            // If we have multiple positional args, this might be shell expansion
+            if (positionalArgs.Count > 1)
+            {
+                // Check if they look like shell-expanded local files/directories
+                bool looksLikeShellExpansion = positionalArgs.Skip(1).Any(p =>
+                    System.IO.File.Exists(p.value) || System.IO.Directory.Exists(p.value) ||
+                    !p.value.Contains(":"));  // Model names typically have ":" for tags
+
+                if (looksLikeShellExpansion)
+                {
+                    // Try to find common prefix for better message
+                    string firstArg = positionalArgs[0].value;
+                    string commonPrefix = FindCommonPrefix(positionalArgs.Select(p => p.value).ToList());
+
+                    System.Console.ForegroundColor = ConsoleColor.Yellow;
+                    System.Console.WriteLine($"Warning: Multiple arguments detected. Shell may have expanded your wildcard pattern.");
+                    System.Console.WriteLine($"Tip: Use quotes to prevent shell expansion: osync {command} '{commonPrefix}*'");
+                    System.Console.ResetColor();
+                    System.Console.WriteLine();
+                }
+
+                // Keep only the first positional argument, remove extras
+                var newArgs = new List<string>();
+                var indicesToRemove = new HashSet<int>(positionalArgs.Skip(1).Select(p => p.index));
+
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (!indicesToRemove.Contains(i))
+                        newArgs.Add(args[i]);
+                }
+
+                return newArgs.ToArray();
+            }
+
+            return args;
+        }
+
+        /// <summary>
+        /// Finds the longest common prefix among a list of strings.
+        /// </summary>
+        static string FindCommonPrefix(List<string> strings)
+        {
+            if (strings == null || strings.Count == 0) return "";
+            if (strings.Count == 1) return strings[0];
+
+            string prefix = strings[0];
+            foreach (string s in strings.Skip(1))
+            {
+                while (!s.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && prefix.Length > 0)
+                {
+                    prefix = prefix.Substring(0, prefix.Length - 1);
+                }
+                if (prefix.Length == 0) break;
+            }
+            return prefix;
+        }
+
         static string[] ReorderArguments(string[] args)
         {
             if (args.Length < 2) return args;
@@ -5255,10 +6139,21 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         {
             try
             {
-                Console.WriteLine($"osync {OsyncProgram.GetFullVersion()}");
-                System.Console.WriteLine();
-                Console.ResetColors();
+                // Skip startup banner for version command to avoid duplicate output
+                bool isVersionCommand = args.Length > 0 &&
+                    (args[0].Equals("showversion", StringComparison.OrdinalIgnoreCase) ||
+                     args[0].Equals("-v", StringComparison.OrdinalIgnoreCase) ||
+                     args[0].Equals("version", StringComparison.OrdinalIgnoreCase));
 
+                if (!isVersionCommand)
+                {
+                    Console.WriteLine($"osync {OsyncProgram.GetFullVersion()}");
+                    System.Console.WriteLine();
+                }
+                System.Console.ResetColor();
+
+                // Handle shell wildcard expansion (Linux/macOS expand unquoted wildcards)
+                args = HandleShellExpansion(args);
                 args = ReorderArguments(args);
 
                 if (args.Length == 0)

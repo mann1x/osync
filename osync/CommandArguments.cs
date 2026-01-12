@@ -233,11 +233,14 @@ namespace osync
         [ArgDescription("Verbose output: show judgment details (question ID, score, reason)"), ArgShortcut("--verbose")]
         public bool Verbose { get; set; }
 
-        [ArgDescription("Context length for judge model (default: 12288)"), ArgShortcut("--judge-ctxsize")]
-        public int JudgeCtxSize { get; set; } = 12288;
+        [ArgDescription("Context length for judge model (0 = auto: test_ctx*2 + 2048)"), ArgShortcut("--judge-ctxsize")]
+        public int JudgeCtxSize { get; set; } = 0;
 
         [ArgDescription("Pull models on-demand if not available, then remove after testing"), ArgShortcut("--ondemand")]
         public bool OnDemand { get; set; }
+
+        [ArgDescription("Repository URL for the model source (saved in results file)"), ArgShortcut("--repo")]
+        public string Repository { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
@@ -246,10 +249,23 @@ namespace osync
         [ArgRequired, ArgPosition(1), ArgDescription("Results file to view"), ArgShortcut("-F")]
         public string FileName { get; set; } = string.Empty;
 
-        [ArgDescription("Output format: table, json (default: table)"), ArgShortcut("-Fo")]
+        [ArgDescription("Output format: table, json, md, html, pdf (default: table)"), ArgShortcut("-Fo")]
         public string Format { get; set; } = "table";
 
         [ArgDescription("Output filename (default: console)"), ArgShortcut("-O")]
         public string OutputFile { get; set; } = string.Empty;
+
+        [ArgDescription("Repository URL (overrides value from results file if specified)"), ArgShortcut("--repo")]
+        public string Repository { get; set; } = string.Empty;
+
+        [ArgDescription("Ignore judgment data, show only metrics-based scores"), ArgShortcut("--metricsonly")]
+        public bool MetricsOnly { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
+    public class VersionArgs
+    {
+        [ArgDescription("Show detailed version and environment information"), ArgShortcut("--verbose")]
+        public bool Verbose { get; set; }
     }
 }

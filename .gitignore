@@ -343,3 +343,6 @@ healthchecksdb
 *.bak
 /osync/.claude
 .claude
+
+# Claude Code temp files
+tmpclaude*

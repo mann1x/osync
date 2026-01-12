@@ -85,7 +85,7 @@ namespace osync
         private int _quantColumnWidth = 6;
         private int _familyColumnWidth = 10;
         private int _modifiedColumnWidth = 10;
-        private int _idColumnWidth = 8;
+        private int _idColumnWidth = 12;
 
         // Session state for copy operation
         private string? _lastCopyDestinationServer = null;
@@ -495,7 +495,7 @@ namespace osync
             _quantColumnWidth = Math.Max(contentQuantWidth, 6);
             _familyColumnWidth = Math.Max(contentFamilyWidth, 6);
             _modifiedColumnWidth = Math.Max(contentModifiedWidth, 3); // Minimum width for "now", "1y", etc.
-            _idColumnWidth = 8; // ID is always 8 characters from digest
+            _idColumnWidth = 12; // ID is always 12 characters from digest (same as ollama ls)
 
             // Calculate total fixed width (checkbox + columns + spaces between)
             // Format: "[x] name size params quant family modified id"
@@ -585,14 +585,13 @@ namespace osync
                                 {
                                     totalSize = manifest.layers.Sum(l => l.size);
                                 }
-                                if (manifest?.config?.digest != null)
-                                {
-                                    string digest = manifest.config.digest;
-                                    if (digest.StartsWith("sha256:"))
-                                    {
-                                        modelId = digest.Substring(7, 12);
-                                    }
-                                }
+
+                                // Compute SHA256 of manifest file content (same as ollama ls)
+                                var manifestBytes = System.IO.File.ReadAllBytes(tagFile);
+                                using var sha256 = System.Security.Cryptography.SHA256.Create();
+                                var hashBytes = sha256.ComputeHash(manifestBytes);
+                                var fullDigest = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                                modelId = fullDigest.Substring(0, 12);
                             }
                             catch { }
 
@@ -924,9 +923,9 @@ namespace osync
             var family = (string.IsNullOrEmpty(model.Family) ? "" : model.Family).PadLeft(_familyColumnWidth);
             var modified = model.ModifiedFormatted.PadLeft(_modifiedColumnWidth);
 
-            // Format ID: take first 8 chars from digest, right-align to exactly 8 chars
+            // Format ID: take first 12 chars from digest (same as ollama ls), right-align
             var shortId = string.IsNullOrEmpty(model.ShortId) ? "".PadLeft(_idColumnWidth) :
-                          (model.ShortId.Length >= 8 ? model.ShortId.Substring(0, 8) : model.ShortId).PadLeft(_idColumnWidth);
+                          (model.ShortId.Length >= 12 ? model.ShortId.Substring(0, 12) : model.ShortId).PadLeft(_idColumnWidth);
 
             // Note: Terminal.Gui ListView doesn't support per-row coloring natively
             // The isEvenRow parameter is kept for potential future enhancements
@@ -2253,15 +2252,24 @@ namespace osync
         {
             if (_modelListView == null || _filteredModels.Count == 0) return;
 
-            var index = _modelListView.SelectedItem;
-            if (index < 0 || index >= _filteredModels.Count) return;
+            // Get selected models (checked) or current model if none checked
+            var selectedModels = _filteredModels.Where(m => m.IsSelected).ToList();
+            bool isBatchDelete = selectedModels.Count > 0;
 
-            var model = _filteredModels[index];
+            if (!isBatchDelete)
+            {
+                var index = _modelListView.SelectedItem;
+                if (index < 0 || index >= _filteredModels.Count) return;
+                selectedModels = new List<ManageModelInfo> { _filteredModels[index] };
+            }
 
-            // Confirm deletion
-            var result = MessageBox.Query("Confirm Delete",
-                $"Are you sure you want to delete '{model.Name}'?\n\nThis action cannot be undone.",
-                "Cancel", "Delete");
+            // Confirm deletion - show all model names for batch delete
+            string confirmMessage = isBatchDelete
+                ? $"Are you sure you want to delete {selectedModels.Count} models?\n\n{string.Join("\n", selectedModels.Select(m => m.Name))}\n\nThis action cannot be undone."
+                : $"Are you sure you want to delete '{selectedModels[0].Name}'?\n\nThis action cannot be undone.";
+
+            string dialogTitle = isBatchDelete ? $"Confirm Delete ({selectedModels.Count} models)" : "Confirm Delete";
+            var result = MessageBox.Query(dialogTitle, confirmMessage, "Cancel", "Delete");
 
             if (result == 1)  // Delete button was pressed
             {
@@ -2277,45 +2285,63 @@ namespace osync
                         Timeout = TimeSpan.FromSeconds(30)
                     };
 
-                    // Send delete request
-                    var deleteRequest = new
-                    {
-                        name = model.Name
-                    };
+                    int successCount = 0;
+                    int failCount = 0;
+                    string? lastError = null;
 
-                    var jsonContent = JsonSerializer.Serialize(deleteRequest);
-                    var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
-
-                    var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
+                    foreach (var model in selectedModels)
                     {
-                        Content = httpContent
-                    };
+                        try
+                        {
+                            // Send delete request
+                            var deleteRequest = new
+                            {
+                                name = model.Name
+                            };
 
-                    var response = httpClient.SendAsync(requestMessage).Result;
-                    response.EnsureSuccessStatusCode();
+                            var jsonContent = JsonSerializer.Serialize(deleteRequest);
+                            var httpContent = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 
-                    // Calculate next selection: prefer model below, or above if last
-                    string? nextModelName = null;
-                    if (index + 1 < _filteredModels.Count)
-                    {
-                        // Select model below
-                        nextModelName = _filteredModels[index + 1].Name;
-                    }
-                    else if (index > 0)
-                    {
-                        // Select model above (was last in list)
-                        nextModelName = _filteredModels[index - 1].Name;
+                            var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
+                            {
+                                Content = httpContent
+                            };
+
+                            var response = httpClient.SendAsync(requestMessage).Result;
+                            response.EnsureSuccessStatusCode();
+                            successCount++;
+                        }
+                        catch (Exception ex)
+                        {
+                            failCount++;
+                            lastError = ex.Message;
+                        }
                     }
 
                     // Refresh model list
-                    _selectedModelName = nextModelName;
+                    _selectedModelName = null;
                     LoadModels();
 
-                    MessageBox.Query("Success", $"{model.Name} deleted successfully", "OK");
+                    // Show result
+                    if (failCount == 0)
+                    {
+                        string successMsg = isBatchDelete
+                            ? $"{successCount} model(s) deleted successfully"
+                            : $"{selectedModels[0].Name} deleted successfully";
+                        MessageBox.Query("Success", successMsg, "OK");
+                    }
+                    else if (successCount == 0)
+                    {
+                        MessageBox.ErrorQuery("Error", $"Failed to delete model(s): {lastError}", "OK");
+                    }
+                    else
+                    {
+                        MessageBox.Query("Partial Success", $"{successCount} deleted, {failCount} failed\nLast error: {lastError}", "OK");
+                    }
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.ErrorQuery("Error", $"Failed to delete model: {ex.Message}", "OK");
+                    MessageBox.ErrorQuery("Error", $"Failed to delete model(s): {ex.Message}", "OK");
                 }
             }
         }

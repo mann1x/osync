@@ -50,7 +50,8 @@ namespace osync
                 BasePromptTokensPerSecond = basePromptTps,
                 Options = resultsFile.Options,
                 TestSuiteName = resultsFile.TestSuiteName,
-                TotalQuestions = baseResult.QuestionResults.Count
+                TotalQuestions = baseResult.QuestionResults.Count,
+                RepositoryUrl = resultsFile.RepositoryUrl
             };
 
             // Calculate scores for each quantization (excluding base)
@@ -85,16 +86,23 @@ namespace osync
                 Tag = quantResult.Tag,
                 DiskSizeBytes = quantResult.DiskSizeBytes,
                 QuantizationType = quantResult.QuantizationType,
+                EnhancedQuantization = quantResult.EnhancedQuantization,
                 QuestionScores = new List<QuestionScore>()
             };
 
             // Calculate per-question scores
             var categoryScores = new Dictionary<string, List<double>>();
             var categoryJudgmentScores = new Dictionary<string, List<double>>();
+            var categoryBestAnswers = new Dictionary<string, List<string>>();
             double totalConfidence = 0;
             double totalJudgment = 0;
             int questionCount = 0;
             int judgmentCount = 0;
+
+            // Best answer tracking
+            int bestCount = 0;   // B wins (quant better)
+            int worstCount = 0;  // A wins (base better)
+            int tieCount = 0;    // AB (tie)
 
             foreach (var baseQuestion in baseResult.QuestionResults)
             {
@@ -127,6 +135,29 @@ namespace osync
 
                     categoryJudgmentScores[questionScore.Category].Add(questionScore.JudgmentScore.Value);
                 }
+
+                // Track best answer statistics
+                if (!string.IsNullOrEmpty(questionScore.BestAnswer))
+                {
+                    // Accumulate per-category best answers
+                    if (!categoryBestAnswers.ContainsKey(questionScore.Category))
+                        categoryBestAnswers[questionScore.Category] = new List<string>();
+                    categoryBestAnswers[questionScore.Category].Add(questionScore.BestAnswer);
+
+                    // Count totals: B = quant wins, A = base wins, AB = tie
+                    switch (questionScore.BestAnswer)
+                    {
+                        case "B":
+                            bestCount++;
+                            break;
+                        case "A":
+                            worstCount++;
+                            break;
+                        case "AB":
+                            tieCount++;
+                            break;
+                    }
+                }
             }
 
             // Calculate category averages (metrics)
@@ -139,6 +170,43 @@ namespace osync
             foreach (var category in categoryJudgmentScores)
             {
                 scoreResult.CategoryJudgmentScores[category.Key] = category.Value.Average();
+            }
+
+            // Calculate category-level best answer statistics
+            foreach (var category in categoryBestAnswers)
+            {
+                var answers = category.Value;
+                var catBest = answers.Count(a => a == "B");
+                var catWorst = answers.Count(a => a == "A");
+                var catTie = answers.Count(a => a == "AB");
+                var catNonTie = catBest + catWorst;
+
+                var catTotal = catBest + catWorst + catTie;
+                scoreResult.CategoryBestStats[category.Key] = new CategoryBestStats
+                {
+                    BestCount = catBest,
+                    WorstCount = catWorst,
+                    TieCount = catTie,
+                    // B / (A + B + AB) - ties count toward total but not as wins
+                    BestPercentage = catTotal > 0 ? (catBest * 100.0 / catTotal) : null
+                };
+            }
+
+            // Set overall best answer counts
+            scoreResult.BestCount = bestCount;
+            scoreResult.WorstCount = worstCount;
+            scoreResult.TieCount = tieCount;
+
+            // Calculate percentages (ties count as wins for base/A)
+            int totalJudgedWithBest = bestCount + worstCount + tieCount;
+
+            if (totalJudgedWithBest > 0)
+            {
+                // Best% = B / total - ties count toward total but not as B wins
+                scoreResult.BestPercentage = (bestCount * 100.0) / totalJudgedWithBest;
+                // Worst% = (A + AB) / total - ties count as wins for base
+                scoreResult.WorstPercentage = ((worstCount + tieCount) * 100.0) / totalJudgedWithBest;
+                scoreResult.TiePercentage = (tieCount * 100.0) / totalJudgedWithBest;
             }
 
             // Calculate overall confidence score (metrics only)
@@ -197,10 +265,11 @@ namespace osync
                 (score.LengthConsistencyScore * LENGTH_CONSISTENCY_WEIGHT) +
                 (score.PerplexityScore * PERPLEXITY_WEIGHT);
 
-            // Include judgment score if available
+            // Include judgment score and best answer if available
             if (quantQuestion.Judgment != null)
             {
                 score.JudgmentScore = quantQuestion.Judgment.Score;
+                score.BestAnswer = quantQuestion.Judgment.BestAnswer;
             }
 
             return score;
