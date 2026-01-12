@@ -1026,6 +1026,11 @@ v1.2.7
 - **Load/Unload URL Format Support** - Both commands now accept URL format with embedded model name
   - Supports `osync load http://host:port/modelname` in addition to `osync load modelname -d host`
   - Same URL parsing for unload command
+- **Fixed --rejudge Model Pulling** - Rejudge mode no longer attempts to download test models
+  - When using `--rejudge` with existing results, only the judge model is needed
+  - Wildcard expansion now filters to only tags present in the results file
+  - Skips model verification for all existing results in rejudge mode
+  - Properly queues partial results for re-judgment without resuming tests
 
 v1.2.6
 - **QcView Multiple Output Formats** - Export results to various formats

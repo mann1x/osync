@@ -422,6 +422,32 @@ Output your judgment:
                     return 1;
                 }
 
+                // When --rejudge is set, only process tags that already exist in results file
+                // This prevents pulling models that were never tested when we just want to re-judge
+                if (_args.Rejudge && _resultsFile.Results.Count > 0)
+                {
+                    var existingTags = _resultsFile.Results.Select(r => r.Tag).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var filteredTags = quantTags.Where(tag =>
+                    {
+                        // Extract just the tag portion if it contains a colon
+                        var tagPortion = tag.Contains(':') ? tag.Substring(tag.LastIndexOf(':') + 1) : tag;
+                        return existingTags.Contains(tagPortion);
+                    }).ToList();
+
+                    if (filteredTags.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[yellow]No matching results found for re-judgment[/]");
+                        return 0;
+                    }
+
+                    if (filteredTags.Count < quantTags.Count)
+                    {
+                        AnsiConsole.MarkupLine($"[dim]Rejudge mode: filtered to {filteredTags.Count} existing result(s)[/]");
+                    }
+
+                    quantTags = filteredTags;
+                }
+
                 // Verify judge model exists at startup (if enabled)
                 if (_judgeEnabled)
                 {
@@ -526,6 +552,13 @@ Output your judgment:
                         if (!string.IsNullOrEmpty(existingResult.ModelName))
                         {
                             modelFullName = existingResult.ModelName;
+                        }
+
+                        // In rejudge mode, skip verification entirely - we only need the judge model, not test models
+                        // The responses are already saved in results file
+                        if (_args.Rejudge)
+                        {
+                            continue;
                         }
 
                         if (!_args.Force)
@@ -634,6 +667,24 @@ Output your judgment:
 
                         // Check if this is a complete result
                         var isComplete = existingResult.QuestionResults.Count >= _testSuite.TotalQuestions;
+
+                        // In rejudge mode, skip testing entirely and just queue for re-judgment
+                        if (_args.Rejudge)
+                        {
+                            if (existingResult.QuestionResults.Count > 0)
+                            {
+                                if (!existingResult.IsBase && (NeedsJudgment(existingResult) || NeedsJudgeBest(existingResult)))
+                                {
+                                    quantsNeedingJudgment.Add(existingResult);
+                                }
+                                AnsiConsole.MarkupLine($"[dim]Queued {modelFullName} for re-judgment ({existingResult.QuestionResults.Count} responses)[/]");
+                            }
+                            else
+                            {
+                                AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (no responses to judge)[/]");
+                            }
+                            continue;
+                        }
 
                         if (isComplete && !_args.Force)
                         {
