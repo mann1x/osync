@@ -588,6 +588,33 @@ When judgment scoring is enabled:
 - Results display shows separate columns for Final Score, Metrics Score, and Judge Score
 - Existing judgments are skipped unless `--force`, `--rejudge` is used, or a different judge model is specified
 
+**Separate Best Answer Judge Model:**
+
+Use `--judgebest` to specify a different model for best answer determination (A/B/tie judgment):
+
+```bash
+# Same model for similarity and best answer (when using --judge alone)
+osync qc -M llama3.2 -Q q4_k_m --judge mistral
+
+# Different model for best answer judgment
+osync qc -M llama3.2 -Q q4_k_m --judge mistral --judgebest llama3.3
+
+# Best answer judgment only (no similarity scoring)
+osync qc -M llama3.2 -Q q4_k_m --judgebest llama3.3
+
+# Remote best answer judge
+osync qc -M llama3.2 -Q q4_k_m --judge mistral --judgebest http://192.168.1.200:11434/llama3.3
+
+# Re-run only best answer judgment with new model
+osync qc -M llama3.2 -Q q4_k_m --judgebest llama3.3 --rejudge
+```
+
+When `--judgebest` is specified:
+- Per quantization: similarity judgment runs first (if `--judge` is used), then best answer judgment
+- Best answer model uses a quality-focused prompt (no similarity scoring)
+- Results store `JudgeModelBestAnswer`, `ReasonBestAnswer`, and `JudgedBestAnswerAt` timestamps
+- QcView outputs show both judge models when different
+
 **Judge Execution Modes:**
 
 - **Serial mode (default):** After testing each quantization, all questions are judged sequentially before moving to the next quantization. Simple and predictable execution.
@@ -962,6 +989,43 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.7
+- **Separate Best Answer Judge Model (--judgebest)** - New command-line argument for best answer determination
+  - Use a different model for best answer judgment vs similarity scoring (--judge)
+  - `--judgebest` can be used alone or combined with `--judge` for different models
+  - Same configuration options as `--judge`: local model name or `http://host:port/model` for remote
+  - New system prompt focused purely on qualitative best answer determination
+  - Supports both serial and parallel execution modes
+  - Works with `--rejudge` to re-run only best answer judgment with new model
+- **Version Tracking in QC Results** - Record osync and Ollama versions in test results
+  - `OsyncVersion` - Version of osync used for testing
+  - `OllamaVersion` - Ollama server version for test quantizations
+  - `OllamaJudgeVersion` - Ollama version for judge server (similarity scoring)
+  - `OllamaJudgeBestAnswerVersion` - Ollama version for best answer judge server
+  - Versions captured automatically from Ollama `/api/version` endpoint
+- **QCView Output Updates** - All output formats updated with new information
+  - Table output shows Best Answer Judge model (when different from Judge) and versions
+  - JSON output includes all version fields and JudgeModelBestAnswer
+  - Markdown output includes Best Answer Judge and versions in header
+  - HTML output shows Best Answer Judge in info grid and versions row
+  - PDF output includes Best Answer Judge and versions in header tables
+- **Manage TUI Multi-Select Delete Fix** - Fixed batch delete for multiple selected models
+  - Multi-selection delete now works correctly (previously only deleted single model)
+  - Added batch confirmation dialog showing count and list of models to be deleted
+- **Judge Retry Output Improvements** - Better visibility into retry attempts during judgment
+  - Both judge and judgebest operations now show retry warnings with error codes at each attempt
+  - Displays retry delay countdown before each retry attempt
+- **Fixed Copy to Remote Server** - Resolved HTTP 500 errors when loading copied models
+  - Fixed `stop` parameter serialization (now correctly sent as array instead of string)
+  - Fixed numeric/boolean parameter type conversion (top_k, temperature, seed, etc.)
+  - New `ConvertParameterValue` helper ensures correct JSON types for all Ollama model parameters
+- **Fixed HuggingFace Model Copy** - Correct path resolution for `hf.co/...` models
+  - HuggingFace models now use correct manifest path (not under registry.ollama.ai)
+  - Fixed cross-platform path separator handling for model paths with forward slashes
+- **Load/Unload URL Format Support** - Both commands now accept URL format with embedded model name
+  - Supports `osync load http://host:port/modelname` in addition to `osync load modelname -d host`
+  - Same URL parsing for unload command
 
 v1.2.6
 - **QcView Multiple Output Formats** - Export results to various formats

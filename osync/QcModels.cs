@@ -67,6 +67,22 @@ namespace osync
         /// </summary>
         public string? RepositoryUrl { get; set; }
         /// <summary>
+        /// osync version used to run the tests
+        /// </summary>
+        public string? OsyncVersion { get; set; }
+        /// <summary>
+        /// Ollama server version used for testing base and quantizations
+        /// </summary>
+        public string? OllamaVersion { get; set; }
+        /// <summary>
+        /// Ollama server version used for judge model (similarity scoring)
+        /// </summary>
+        public string? OllamaJudgeVersion { get; set; }
+        /// <summary>
+        /// Ollama server version used for judge best answer model
+        /// </summary>
+        public string? OllamaJudgeBestAnswerVersion { get; set; }
+        /// <summary>
         /// Maximum tokens to generate per answer (test suite setting)
         /// </summary>
         public int? NumPredict { get; set; }
@@ -151,12 +167,24 @@ namespace osync
     {
         public string JudgeModel { get; set; } = string.Empty;
         public int Score { get; set; }  // 1-100
-        public string Reason { get; set; } = string.Empty;  // Judge's reasoning for the score
+        public string Reason { get; set; } = string.Empty;  // Judge's reasoning for the similarity score
         /// <summary>
         /// Which answer is qualitatively better: "A" (base), "B" (quant), or "AB" (tie)
         /// </summary>
         public string? BestAnswer { get; set; }
+        /// <summary>
+        /// Model used to determine the best answer (when --judgebest is used)
+        /// </summary>
+        public string? JudgeModelBestAnswer { get; set; }
+        /// <summary>
+        /// Reasoning from the best answer judge model
+        /// </summary>
+        public string? ReasonBestAnswer { get; set; }
         public DateTime JudgedAt { get; set; }
+        /// <summary>
+        /// Timestamp when best answer judgment was performed (when --judgebest is used)
+        /// </summary>
+        public DateTime? JudgedBestAnswerAt { get; set; }
         /// <summary>
         /// Raw JSON response from judge, only populated when reason parsing failed (for debugging)
         /// </summary>
@@ -316,11 +344,18 @@ namespace osync
         // Judgment scoring info
         public bool HasJudgmentScoring { get; set; }
         public string? JudgeModel { get; set; }
+        public string? JudgeModelBestAnswer { get; set; }
 
         /// <summary>
         /// URL to the source repository for the model
         /// </summary>
         public string? RepositoryUrl { get; set; }
+
+        // Version information
+        public string? OsyncVersion { get; set; }
+        public string? OllamaVersion { get; set; }
+        public string? OllamaJudgeVersion { get; set; }
+        public string? OllamaJudgeBestAnswerVersion { get; set; }
     }
 
     /// <summary>

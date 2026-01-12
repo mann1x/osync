@@ -19,11 +19,17 @@ namespace osync
         private ITestSuite _testSuite = null!;  // Initialized in ExecuteAsync before use
         private QcResultsFile _resultsFile = null!;  // Initialized in ExecuteAsync before use
 
-        // Judge model fields
+        // Judge model fields (for similarity scoring)
         private HttpClient? _judgeHttpClient;
         private string? _judgeBaseUrl;
         private string? _judgeModelName;
         private bool _judgeEnabled;
+
+        // Judge best answer model fields (for best answer determination)
+        private HttpClient? _judgeBestHttpClient;
+        private string? _judgeBestBaseUrl;
+        private string? _judgeBestModelName;
+        private bool _judgeBestEnabled;
 
         // Cancellation support for graceful shutdown
         private CancellationTokenSource _cts = new CancellationTokenSource();
@@ -104,6 +110,48 @@ Remember:
 - bestanswer: 'A' if A is better, 'B' if B is better, 'AB' if tied
 - Do NOT judge quality, correctness, or format for the similarity SCORE (but DO for bestanswer)";
 
+        // System prompt for the judge best answer model - only determines which response is better
+        private const string JUDGE_BEST_SYSTEM_PROMPT = @"You are a QUALITY JUDGE. You compare two AI-generated responses (A and B) to a question and determine which response is qualitatively BETTER.
+
+YOUR TASK:
+Determine which response is qualitatively BETTER based on:
+- Completeness of the answer
+- Correctness of the information/code
+- Clarity of explanation
+- Practical usefulness
+
+BESTANSWER VALUES:
+- 'A' = RESPONSE A is qualitatively better
+- 'B' = RESPONSE B is qualitatively better
+- 'AB' = Both responses are equally good (tie)
+
+EVALUATION CRITERIA:
+- More complete and thorough answers are better
+- More correct and accurate information is better
+- Better explained and clearer responses are better
+- More practical and useful responses are better
+- If both responses are essentially equivalent in quality, choose 'AB'
+
+CRITICAL RULES:
+- Focus ONLY on which response is BETTER, not on how similar they are
+- Consider the QUESTION when evaluating which answer is more appropriate
+- Do NOT mention JSON, format compliance, or scoring
+- Be objective and fair in your evaluation
+
+REASON FORMAT: Explain why you chose A, B, or AB by comparing the key differences in quality between the two responses.";
+
+        private const string JUDGE_BEST_USER_INSTRUCTIONS = @"Compare RESPONSE A and RESPONSE B below and determine which one is the BETTER answer to the question.
+
+Evaluate based on:
+- Completeness and thoroughness
+- Correctness and accuracy
+- Clarity of explanation
+- Practical usefulness
+
+Output your judgment:
+- bestanswer: 'A' if RESPONSE A is better, 'B' if RESPONSE B is better, 'AB' if tied
+- reason: Explain why you made this choice";
+
         public QcCommand(QcArgs args, string baseUrl = "http://localhost:11434")
         {
             _args = args;
@@ -135,6 +183,12 @@ Remember:
             if (!string.IsNullOrEmpty(_args.Judge))
             {
                 ParseJudgeArgument(_args.Judge);
+            }
+
+            // Initialize judge best if specified
+            if (!string.IsNullOrEmpty(_args.JudgeBest))
+            {
+                ParseJudgeBestArgument(_args.JudgeBest);
             }
         }
 
@@ -184,6 +238,51 @@ Remember:
         }
 
         /// <summary>
+        /// Parse the --judgebest argument to extract base URL and model name
+        /// Supports: "modelname", "http://host:port/modelname"
+        /// </summary>
+        private void ParseJudgeBestArgument(string judgeBest)
+        {
+            if (judgeBest.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                judgeBest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                // Remote judge: http://host:port/modelname
+                var match = Regex.Match(judgeBest, @"^(https?://[^/]+)/(.+)$", RegexOptions.IgnoreCase);
+                if (match.Success)
+                {
+                    _judgeBestBaseUrl = match.Groups[1].Value;
+                    _judgeBestModelName = match.Groups[2].Value;
+                }
+                else
+                {
+                    // URL without model name - invalid
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid judgebest URL format. Expected http://host:port/modelname[/]");
+                    return;
+                }
+            }
+            else
+            {
+                // Local judge: just model name, use local server
+                _judgeBestBaseUrl = "http://localhost:11434";
+                _judgeBestModelName = judgeBest;
+            }
+
+            // Add :latest if no tag specified
+            if (!_judgeBestModelName.Contains(':'))
+            {
+                _judgeBestModelName += ":latest";
+            }
+
+            _judgeBestHttpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(_args.Timeout)
+            };
+
+            _judgeBestEnabled = true;
+            AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ {_judgeBestBaseUrl}[/]");
+        }
+
+        /// <summary>
         /// Check if running in serial judgment mode (default)
         /// </summary>
         private bool IsSerialMode()
@@ -225,6 +324,44 @@ Remember:
                 if (question.Judgment.JudgeModel != _judgeModelName)
                 {
                     // Different judge model was used
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Check if a quantization result needs best answer judgment
+        /// Returns true if: no best answer judgment exists, or was done with a different model
+        /// </summary>
+        private bool NeedsJudgeBest(QuantResult quantResult)
+        {
+            if (!_judgeBestEnabled || _judgeBestModelName == null)
+                return false;
+
+            // If --rejudge is set, always re-run judgment
+            if (_args.Rejudge)
+                return true;
+
+            // Check each question - if ANY question is missing best answer judgment or has different model, needs re-judgment
+            foreach (var question in quantResult.QuestionResults)
+            {
+                if (question.Judgment == null)
+                {
+                    // No judgment at all - need to run best answer judgment
+                    return true;
+                }
+
+                if (string.IsNullOrEmpty(question.Judgment.BestAnswer))
+                {
+                    // No best answer set
+                    return true;
+                }
+
+                if (question.Judgment.JudgeModelBestAnswer != _judgeBestModelName)
+                {
+                    // Different judge best model was used (or never set)
                     return true;
                 }
             }
@@ -296,6 +433,31 @@ Remember:
                         return 1;
                     }
                     AnsiConsole.MarkupLine($"[dim]Judge model verified: {_judgeModelName}[/]");
+
+                    // Capture judge server Ollama version
+                    if (_judgeHttpClient != null && _judgeBaseUrl != null)
+                    {
+                        _resultsFile.OllamaJudgeVersion = await GetOllamaVersionAsync(_judgeHttpClient, _judgeBaseUrl);
+                    }
+                }
+
+                // Verify judge best answer model exists at startup (if enabled)
+                if (_judgeBestEnabled)
+                {
+                    AnsiConsole.MarkupLine($"[dim]Verifying judge best answer model exists...[/]");
+                    if (!await VerifyJudgeBestModelExistsAsync())
+                    {
+                        AnsiConsole.MarkupLine($"[red]Error: Judge BestAnswer model '{_judgeBestModelName}' not found on server {_judgeBestBaseUrl}[/]");
+                        AnsiConsole.MarkupLine($"[yellow]Make sure the judge best answer model is pulled. Try: ollama pull {_judgeBestModelName}[/]");
+                        return 1;
+                    }
+                    AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model verified: {_judgeBestModelName}[/]");
+
+                    // Capture judge best answer server Ollama version
+                    if (_judgeBestHttpClient != null && _judgeBestBaseUrl != null)
+                    {
+                        _resultsFile.OllamaJudgeBestAnswerVersion = await GetOllamaVersionAsync(_judgeBestHttpClient, _judgeBestBaseUrl);
+                    }
                 }
 
                 // Check if we have a base model in results
@@ -477,8 +639,8 @@ Remember:
                         {
                             AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (already tested, use --force to re-run)[/]");
 
-                            // Check if this existing result needs judgment
-                            if (_judgeEnabled && !existingResult.IsBase && NeedsJudgment(existingResult))
+                            // Check if this existing result needs judgment (similarity or best answer)
+                            if (!existingResult.IsBase && (NeedsJudgment(existingResult) || NeedsJudgeBest(existingResult)))
                             {
                                 quantsNeedingJudgment.Add(existingResult);
                             }
@@ -652,12 +814,21 @@ Remember:
                         }
 
                         // Run serial judgment if enabled and not base model
-                        if (_judgeEnabled && !quantResult.IsBase && IsSerialMode())
+                        if (!quantResult.IsBase && IsSerialMode())
                         {
                             var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
                             if (baseResult != null)
                             {
-                                await RunJudgmentSerialAsync(quantResult, baseResult);
+                                // Run similarity judgment first
+                                if (_judgeEnabled)
+                                {
+                                    await RunJudgmentSerialAsync(quantResult, baseResult);
+                                }
+                                // Then run best answer judgment
+                                if (_judgeBestEnabled)
+                                {
+                                    await RunJudgeBestSerialAsync(quantResult, baseResult);
+                                }
                             }
                         }
 
@@ -684,7 +855,7 @@ Remember:
                 }
 
                 // Run judgment for existing quantizations that need it
-                if (_judgeEnabled && quantsNeedingJudgment.Count > 0)
+                if ((_judgeEnabled || _judgeBestEnabled) && quantsNeedingJudgment.Count > 0)
                 {
                     var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
                     if (baseResult != null)
@@ -694,7 +865,16 @@ Remember:
                             AnsiConsole.MarkupLine($"\n[cyan]Running judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
                             foreach (var quantResult in quantsNeedingJudgment)
                             {
-                                await RunJudgmentSerialAsync(quantResult, baseResult);
+                                // Run similarity judgment first
+                                if (_judgeEnabled)
+                                {
+                                    await RunJudgmentSerialAsync(quantResult, baseResult);
+                                }
+                                // Then run best answer judgment
+                                if (_judgeBestEnabled)
+                                {
+                                    await RunJudgeBestSerialAsync(quantResult, baseResult);
+                                }
                             }
                         }
                         else if (IsParallelMode())
@@ -703,7 +883,16 @@ Remember:
                             AnsiConsole.MarkupLine($"\n[magenta]Running parallel judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
                             foreach (var quantResult in quantsNeedingJudgment)
                             {
-                                await RunJudgmentParallelAsync(quantResult, baseResult);
+                                // Run similarity judgment first
+                                if (_judgeEnabled)
+                                {
+                                    await RunJudgmentParallelAsync(quantResult, baseResult);
+                                }
+                                // Then run best answer judgment
+                                if (_judgeBestEnabled)
+                                {
+                                    await RunJudgeBestParallelAsync(quantResult, baseResult);
+                                }
                             }
                         }
                     }
@@ -716,6 +905,23 @@ Remember:
 
                     // Save final results with all judgments complete
                     SaveResultsFile();
+
+                    // Run judge best for quantizations that had background similarity judgment (parallel mode)
+                    if (_judgeBestEnabled)
+                    {
+                        var baseResult = _resultsFile.Results.FirstOrDefault(r => r.IsBase);
+                        if (baseResult != null)
+                        {
+                            foreach (var tag in allBackgroundJudgmentTasks.Keys)
+                            {
+                                var quantResult = _resultsFile.Results.FirstOrDefault(r => r.Tag == tag);
+                                if (quantResult != null && !quantResult.IsBase)
+                                {
+                                    await RunJudgeBestParallelAsync(quantResult, baseResult);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Clean up on-demand models after all testing and judgment is complete
@@ -1217,12 +1423,17 @@ Remember:
                 }
             }
 
+            // Get Ollama version from test server
+            var ollamaVersion = await GetOllamaVersionAsync(_httpClient, _baseUrl);
+
             // Create new results file
             _resultsFile = new QcResultsFile
             {
                 TestSuiteName = _testSuite.Name,
                 ModelName = _args.ModelName,
                 RepositoryUrl = string.IsNullOrWhiteSpace(_args.Repository) ? null : _args.Repository,
+                OsyncVersion = OsyncProgram.GetFullVersion(),
+                OllamaVersion = ollamaVersion,
                 NumPredict = _testSuite.NumPredict,
                 ContextLength = _testSuite.ContextLength,
                 Options = new QcTestOptions
@@ -2050,6 +2261,65 @@ Remember:
             }
         }
 
+        private void WriteVerboseJudgeBest(string questionId, JudgmentResult? judgment)
+        {
+            if (judgment == null)
+                return;
+
+            var bestColor = judgment.BestAnswer == "B" ? "lime" : judgment.BestAnswer == "A" ? "red" : "yellow";
+            var bestDisplay = judgment.BestAnswer ?? "?";
+
+            lock (_verboseOutputLock)
+            {
+                var completed = Interlocked.Increment(ref _verboseCompletedCount);
+                var total = _verboseTotalCount;
+                var percent = total > 0 ? (completed * 100 / total) : 0;
+
+                AnsiConsole.Markup($"[magenta]Best answer {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Best: [{bestColor}]{bestDisplay}[/] [dim]({completed}/{total} {percent}%)[/]");
+                AnsiConsole.WriteLine("");
+
+                if (string.IsNullOrWhiteSpace(judgment.ReasonBestAnswer))
+                {
+                    AnsiConsole.MarkupLine("[dim]    (no reason provided)[/]");
+                }
+                else
+                {
+                    // Word-wrap the reason into 4 lines at console width (minus indent)
+                    int consoleWidth = 120;
+                    try { consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120; } catch { }
+                    var lineWidth = consoleWidth - 4; // 4 chars for indent
+                    var words = judgment.ReasonBestAnswer.Replace("\r", "").Replace("\n", " ").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    var lines = new List<string>();
+                    var currentLine = new StringBuilder();
+
+                    foreach (var word in words)
+                    {
+                        if (currentLine.Length + word.Length + 1 > lineWidth)
+                        {
+                            if (currentLine.Length > 0)
+                            {
+                                lines.Add(currentLine.ToString());
+                                if (lines.Count >= 4) break;
+                                currentLine.Clear();
+                            }
+                        }
+                        if (currentLine.Length > 0) currentLine.Append(' ');
+                        currentLine.Append(word);
+                    }
+
+                    if (currentLine.Length > 0 && lines.Count < 4)
+                    {
+                        lines.Add(currentLine.ToString());
+                    }
+
+                    foreach (var line in lines)
+                    {
+                        AnsiConsole.MarkupLine($"[dim]    {Markup.Escape(line)}[/]");
+                    }
+                }
+            }
+        }
+
         private void ResetVerboseProgress(int total, string tag)
         {
             _verboseCompletedCount = 0;
@@ -2190,6 +2460,136 @@ Remember:
         }
 
         /// <summary>
+        /// Run best answer determination for a quantization (serial mode)
+        /// Called after similarity judgment completes
+        /// </summary>
+        private async Task RunJudgeBestSerialAsync(QuantResult quantResult, QuantResult baseResult)
+        {
+            if (!_judgeBestEnabled || _judgeBestHttpClient == null || _judgeBestModelName == null)
+                return;
+
+            AnsiConsole.MarkupLine($"[cyan]Running best answer judgment for: {quantResult.Tag}[/]");
+
+            var judgedCount = 0;
+            var skippedCount = 0;
+
+            // In verbose mode, skip progress bar and just show verbose output with text progress
+            if (_args.Verbose)
+            {
+                // Count questions that need best answer judging
+                var questionsToJudge = quantResult.QuestionResults.Count(q =>
+                {
+                    var baseQ = baseResult.QuestionResults.FirstOrDefault(b => b.QuestionId == q.QuestionId);
+                    return baseQ != null && (q.Judgment == null || q.Judgment.JudgeModelBestAnswer != _judgeBestModelName ||
+                        q.Judgment.BestAnswer == null || _args.Force || _args.Rejudge);
+                });
+                ResetVerboseProgress(questionsToJudge, quantResult.Tag);
+
+                foreach (var quantQuestion in quantResult.QuestionResults)
+                {
+                    // Check for cancellation
+                    if (_cancellationRequested)
+                    {
+                        _cts.Token.ThrowIfCancellationRequested();
+                    }
+
+                    // Find corresponding base question
+                    var baseQuestion = baseResult.QuestionResults
+                        .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                    if (baseQuestion == null)
+                    {
+                        continue;
+                    }
+
+                    // Check if already judged best with same model
+                    if (quantQuestion.Judgment != null &&
+                        quantQuestion.Judgment.JudgeModelBestAnswer == _judgeBestModelName &&
+                        quantQuestion.Judgment.BestAnswer != null &&
+                        !_args.Force && !_args.Rejudge)
+                    {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    // Run best answer judgment
+                    var success = await JudgeBestQuestionAsync(baseQuestion, quantQuestion);
+                    if (success)
+                    {
+                        judgedCount++;
+                        WriteVerboseJudgeBest(quantQuestion.QuestionId, quantQuestion.Judgment);
+                    }
+                }
+
+                AnsiConsole.MarkupLine($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
+            }
+            else
+            {
+                await AnsiConsole.Progress()
+                    .AutoClear(false)
+                    .Columns(new ProgressColumn[]
+                    {
+                        new TaskDescriptionColumn(),
+                        new ProgressBarColumn(),
+                        new PercentageColumn(),
+                        new ElapsedTimeColumn(),
+                        new SpinnerColumn()
+                    })
+                    .StartAsync(async ctx =>
+                    {
+                        var task = ctx.AddTask($"[magenta]Best answer {quantResult.Tag}[/]", maxValue: quantResult.QuestionResults.Count);
+
+                        foreach (var quantQuestion in quantResult.QuestionResults)
+                        {
+                            // Check for cancellation
+                            if (_cancellationRequested)
+                            {
+                                task.Description = $"[yellow]Cancelled {quantResult.Tag}[/]";
+                                _cts.Token.ThrowIfCancellationRequested();
+                            }
+
+                            // Find corresponding base question
+                            var baseQuestion = baseResult.QuestionResults
+                                .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                            if (baseQuestion == null)
+                            {
+                                task.Increment(1);
+                                continue;
+                            }
+
+                            // Check if already judged best with same model
+                            if (quantQuestion.Judgment != null &&
+                                quantQuestion.Judgment.JudgeModelBestAnswer == _judgeBestModelName &&
+                                quantQuestion.Judgment.BestAnswer != null &&
+                                !_args.Force && !_args.Rejudge)
+                            {
+                                skippedCount++;
+                                task.Increment(1);
+                                continue;
+                            }
+
+                            task.Description = $"[magenta]Best answer {quantResult.Tag}[/] [dim]{quantQuestion.Category} Q{quantQuestion.QuestionId}[/]";
+
+                            // Run best answer judgment
+                            var success = await JudgeBestQuestionAsync(baseQuestion, quantQuestion);
+                            if (success)
+                            {
+                                judgedCount++;
+                            }
+
+                            task.Increment(1);
+                        }
+
+                        task.Description = $"[green]✓ Best answer {quantResult.Tag} complete[/]";
+                    });
+            }
+
+            AnsiConsole.MarkupLine($"[dim]Best answer judged: {judgedCount}, Skipped: {skippedCount}[/]");
+            SaveResultsFile();
+        }
+
+        /// <summary>
         /// Run judgment scoring for a quantization with per-question parallelism
         /// All questions are judged concurrently with progress tracking
         /// </summary>
@@ -2287,6 +2687,101 @@ Remember:
             }
 
             AnsiConsole.MarkupLine($"[dim]Judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
+            SaveResultsFile();
+        }
+
+        /// <summary>
+        /// Run best answer determination for a quantization with per-question parallelism
+        /// Called after similarity judgment completes
+        /// </summary>
+        private async Task RunJudgeBestParallelAsync(QuantResult quantResult, QuantResult baseResult)
+        {
+            if (!_judgeBestEnabled || _judgeBestHttpClient == null || _judgeBestModelName == null)
+                return;
+
+            var questionsToJudge = new List<(QuestionResult quantQuestion, QuestionResult baseQuestion)>();
+            int skippedCount = 0;
+
+            foreach (var quantQuestion in quantResult.QuestionResults)
+            {
+                // Find corresponding base question
+                var baseQuestion = baseResult.QuestionResults
+                    .FirstOrDefault(q => q.QuestionId == quantQuestion.QuestionId);
+
+                if (baseQuestion == null)
+                {
+                    skippedCount++;
+                    continue;
+                }
+
+                // Check if already judged best with same model
+                if (quantQuestion.Judgment != null &&
+                    quantQuestion.Judgment.JudgeModelBestAnswer == _judgeBestModelName &&
+                    quantQuestion.Judgment.BestAnswer != null &&
+                    !_args.Force && !_args.Rejudge)
+                {
+                    skippedCount++;
+                    continue;
+                }
+
+                questionsToJudge.Add((quantQuestion, baseQuestion));
+            }
+
+            if (questionsToJudge.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[dim]All questions already have best answer judgment for {quantResult.Tag}[/]");
+                return;
+            }
+
+            int completedCount = 0;
+
+            // In verbose mode, skip progress bar and just show verbose output with text progress
+            if (_args.Verbose)
+            {
+                ResetVerboseProgress(questionsToJudge.Count, quantResult.Tag);
+
+                var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                {
+                    var success = await JudgeBestQuestionAsync(pair.baseQuestion, pair.quantQuestion);
+                    if (success)
+                    {
+                        WriteVerboseJudgeBest(pair.quantQuestion.QuestionId, pair.quantQuestion.Judgment);
+                    }
+                    Interlocked.Increment(ref completedCount);
+                })).ToList();
+
+                await Task.WhenAll(judgmentTasks);
+                AnsiConsole.MarkupLine($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
+            }
+            else
+            {
+                await AnsiConsole.Progress()
+                    .AutoClear(false)
+                    .Columns(new ProgressColumn[]
+                    {
+                        new TaskDescriptionColumn(),
+                        new ProgressBarColumn(),
+                        new PercentageColumn(),
+                        new ElapsedTimeColumn(),
+                        new SpinnerColumn()
+                    })
+                    .StartAsync(async ctx =>
+                    {
+                        var task = ctx.AddTask($"[magenta]Best answer {quantResult.Tag}[/]", maxValue: questionsToJudge.Count);
+
+                        var judgmentTasks = questionsToJudge.Select(pair => Task.Run(async () =>
+                        {
+                            await JudgeBestQuestionAsync(pair.baseQuestion, pair.quantQuestion);
+                            Interlocked.Increment(ref completedCount);
+                            task.Increment(1);
+                        })).ToList();
+
+                        await Task.WhenAll(judgmentTasks);
+                        task.Description = $"[green]✓ Best answer {quantResult.Tag} complete[/]";
+                    });
+            }
+
+            AnsiConsole.MarkupLine($"[dim]Best answer judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
         }
 
@@ -2853,6 +3348,271 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
         }
 
         /// <summary>
+        /// Judge best answer for a single question (with extended retry for resilience)
+        /// Updates the existing Judgment with BestAnswer, JudgeModelBestAnswer, ReasonBestAnswer
+        /// </summary>
+        private async Task<bool> JudgeBestQuestionAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeBestHttpClient == null || _judgeBestModelName == null || _judgeBestBaseUrl == null)
+                return false;
+
+            return await ExecuteJudgeBestWithRetryAsync(
+                () => JudgeBestQuestionCoreAsync(baseQuestion, quantQuestion),
+                $"judge best Q{baseQuestion.QuestionId}");
+        }
+
+        /// <summary>
+        /// Execute judge best with retry wrapper
+        /// </summary>
+        private async Task<bool> ExecuteJudgeBestWithRetryAsync(Func<Task<bool>> operation, string operationName)
+        {
+            for (int attempt = 1; attempt <= JUDGE_MAX_RETRY_ATTEMPTS; attempt++)
+            {
+                try
+                {
+                    return await operation();
+                }
+                catch (OperationCanceledException)
+                {
+                    // Don't retry on cancellation
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt >= JUDGE_MAX_RETRY_ATTEMPTS)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failures. Last error: {Markup.Escape(ex.Message)}[/]");
+                        return false;
+                    }
+
+                    // Calculate delay with progressive increase
+                    var delayProgress = (double)(attempt - 1) / (JUDGE_MAX_RETRY_ATTEMPTS - 1);
+                    var delayMs = (int)(JUDGE_RETRY_DELAY_START_MS + delayProgress * (JUDGE_RETRY_DELAY_END_MS - JUDGE_RETRY_DELAY_START_MS));
+                    var delaySec = delayMs / 1000.0;
+
+                    // Show retry warning with error and delay info
+                    AnsiConsole.MarkupLine($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed: {Markup.Escape(ex.Message)}[/]");
+                    AnsiConsole.MarkupLine($"[dim]  Retrying in {delaySec:F0}s...[/]");
+
+                    await Task.Delay(delayMs, _cts.Token);
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Core implementation for judging best answer for a single question
+        /// </summary>
+        private async Task<bool> JudgeBestQuestionCoreAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeBestHttpClient == null || _judgeBestModelName == null || _judgeBestBaseUrl == null)
+                return false;
+
+            // Ensure the quant question has a Judgment object (may be null if --judgebest is used without --judge)
+            quantQuestion.Judgment ??= new JudgmentResult();
+
+            const int maxReasonRetries = 5;
+
+            for (int attempt = 1; attempt <= maxReasonRetries; attempt++)
+            {
+                var (success, bestAnswer, reason) = await JudgeBestQuestionSingleAttemptAsync(baseQuestion, quantQuestion);
+                if (!success)
+                    return false;
+
+                // Update the judgment with best answer info
+                quantQuestion.Judgment.BestAnswer = bestAnswer;
+                quantQuestion.Judgment.JudgeModelBestAnswer = _judgeBestModelName;
+                quantQuestion.Judgment.ReasonBestAnswer = reason;
+                quantQuestion.Judgment.JudgedBestAnswerAt = DateTime.UtcNow;
+
+                // Check if reason is present
+                if (!string.IsNullOrWhiteSpace(reason))
+                    return true;
+
+                // Reason is missing, retry if we have attempts left
+                if (attempt < maxReasonRetries)
+                {
+                    await Task.Delay(500, _cts.Token);
+                    continue;
+                }
+
+                // After all retries, return success but with warning
+                AnsiConsole.MarkupLine($"[yellow]Warning: Judge BestAnswer returned without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Single attempt at judging best answer for a question
+        /// </summary>
+        private async Task<(bool success, string? bestAnswer, string? reason)> JudgeBestQuestionSingleAttemptAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_judgeBestHttpClient == null || _judgeBestModelName == null || _judgeBestBaseUrl == null)
+                return (false, null, null);
+
+            // Build the judgment prompt
+            var userMessage = $@"{JUDGE_BEST_USER_INSTRUCTIONS}
+
+--- QUESTION ---
+{baseQuestion.Question}
+--- END QUESTION ---
+
+--- RESPONSE A ---
+{baseQuestion.Answer}
+--- END RESPONSE A ---
+
+--- RESPONSE B ---
+{quantQuestion.Answer}
+--- END RESPONSE B ---
+
+Which response is better? Provide bestanswer and reason.";
+
+            // Calculate judge context length: if auto (0), use test_ctx * 2 + 2048
+            int judgeContextLength;
+            if (_args.JudgeCtxSize > 0)
+            {
+                judgeContextLength = _args.JudgeCtxSize;
+            }
+            else
+            {
+                var testCtx = quantQuestion.ContextLength
+                    ?? baseQuestion.ContextLength
+                    ?? _testSuite?.ContextLength
+                    ?? DEFAULT_TEST_CONTEXT_LENGTH;
+                judgeContextLength = testCtx * 2 + 2048;
+            }
+
+            var request = new
+            {
+                model = _judgeBestModelName,
+                messages = new object[]
+                {
+                    new { role = "system", content = JUDGE_BEST_SYSTEM_PROMPT },
+                    new { role = "user", content = userMessage }
+                },
+                stream = false,
+                format = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        bestanswer = new
+                        {
+                            type = "string",
+                            description = "Which answer is qualitatively better: 'A' if Response A is better, 'B' if Response B is better, 'AB' if tied/equal"
+                        },
+                        reason = new
+                        {
+                            type = "string",
+                            description = "Explanation of why you chose A, B, or AB"
+                        }
+                    },
+                    required = new[] { "bestanswer", "reason" }
+                },
+                options = new
+                {
+                    temperature = 0.0,
+                    seed = 42,
+                    num_predict = 800,
+                    num_ctx = judgeContextLength
+                }
+            };
+
+            var jsonContent = JsonSerializer.Serialize(request);
+            var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+            // Check for cancellation before making the request
+            _cts.Token.ThrowIfCancellationRequested();
+
+            var response = await _judgeBestHttpClient.PostAsync($"{_judgeBestBaseUrl}/api/chat", content, _cts.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(_cts.Token);
+                throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {errorBody}");
+            }
+
+            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
+            using var doc = JsonDocument.Parse(responseJson);
+            var root = doc.RootElement;
+
+            // Chat API returns message.content
+            if (!root.TryGetProperty("message", out var messageElement))
+            {
+                throw new InvalidOperationException($"No 'message' field in API response: {responseJson}");
+            }
+
+            if (!messageElement.TryGetProperty("content", out var contentElement))
+            {
+                throw new InvalidOperationException($"No 'content' field in message: {responseJson}");
+            }
+
+            var responseText = (contentElement.GetString() ?? "").Trim();
+
+            // Parse the structured JSON response
+            string? bestAnswer = null;
+            string reason = "";
+
+            // Try JSON parsing first
+            try
+            {
+                using var scoreDoc = JsonDocument.Parse(responseText);
+                var scoreRoot = scoreDoc.RootElement;
+
+                // Extract bestanswer
+                if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "bestanswer", "best_answer", "best", "winner", "better" }, out var bestElement))
+                {
+                    bestAnswer = NormalizeBestAnswer(bestElement.GetString());
+                }
+
+                // Extract reason
+                if (TryGetPropertyCaseInsensitive(scoreRoot, new[] { "reason", "response", "explanation" }, out var reasonElement))
+                {
+                    reason = reasonElement.GetString() ?? "";
+                }
+            }
+            catch
+            {
+                // JSON parsing failed, try regex fallbacks
+            }
+
+            // Regex fallback for bestanswer
+            if (bestAnswer == null)
+            {
+                var bestMatch = Regex.Match(responseText, @"""?(?:bestanswer|best_answer|best|winner|better)""?\s*:\s*""?([^"",}\s]+)""?", RegexOptions.IgnoreCase);
+                if (bestMatch.Success)
+                {
+                    bestAnswer = NormalizeBestAnswer(bestMatch.Groups[1].Value);
+                }
+            }
+
+            // Regex fallback for reason
+            if (string.IsNullOrWhiteSpace(reason))
+            {
+                Match reasonMatch = Match.Empty;
+
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"""(?:reason|response|explanation)""\s*:\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (!reasonMatch.Success)
+                    reasonMatch = Regex.Match(responseText, @"[""']?(?:reason|response|explanation)[""']?\s*:\s*[""']([^""']+)[""']", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+                if (reasonMatch.Success && reasonMatch.Groups.Count > 1)
+                {
+                    reason = reasonMatch.Groups[1].Value
+                        .Replace("\\n", "\n")
+                        .Replace("\\r", "\r")
+                        .Replace("\\\"", "\"")
+                        .Replace("\\\\", "\\");
+                }
+            }
+
+            return (true, bestAnswer, reason);
+        }
+
+        /// <summary>
         /// Normalizes various bestanswer values to A, B, or AB.
         /// Handles: "A", "B", "AB", "Response A", "RESPONSE_A", "Tie", "identical", "equal", etc.
         /// </summary>
@@ -2917,6 +3677,52 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Verify judge best answer model exists on the server (doesn't preload, just checks existence)
+        /// </summary>
+        private async Task<bool> VerifyJudgeBestModelExistsAsync()
+        {
+            if (_judgeBestHttpClient == null || _judgeBestModelName == null || _judgeBestBaseUrl == null)
+                return false;
+
+            try
+            {
+                // Use /api/show to check if model exists
+                var request = new { name = _judgeBestModelName };
+                var response = await _judgeBestHttpClient.PostAsJsonAsync($"{_judgeBestBaseUrl}/api/show", request);
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Get Ollama version from a server
+        /// </summary>
+        private async Task<string?> GetOllamaVersionAsync(HttpClient httpClient, string baseUrl)
+        {
+            try
+            {
+                var response = await httpClient.GetAsync($"{baseUrl}/api/version");
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync();
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("version", out var versionElement))
+                    {
+                        return versionElement.GetString();
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore errors - version is optional metadata
+            }
+            return null;
         }
 
         /// <summary>

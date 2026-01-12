@@ -224,6 +224,9 @@ namespace osync
         [ArgDescription("Judge model for similarity scoring (local model name or http://host:port/model for remote)"), ArgShortcut("--judge")]
         public string Judge { get; set; } = string.Empty;
 
+        [ArgDescription("Judge model for best answer determination (local model name or http://host:port/model for remote)"), ArgShortcut("--judgebest")]
+        public string JudgeBest { get; set; } = string.Empty;
+
         [ArgDescription("Judge execution mode: serial (default) or parallel"), ArgShortcut("--mode")]
         public string JudgeMode { get; set; } = "serial";
 

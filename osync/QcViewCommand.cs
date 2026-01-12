@@ -334,11 +334,31 @@ namespace osync
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
                 headerText += $"\nJudge Model: [magenta]{Markup.Escape(results.JudgeModel)}[/] [dim](50% metrics + 50% judgment)[/]";
+                // Show best answer judge if different from similarity judge
+                if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                {
+                    headerText += $"\nBest Answer Judge: [magenta]{Markup.Escape(results.JudgeModelBestAnswer)}[/]";
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
             {
                 headerText += $"\nRepository: [blue]{Markup.Escape(results.RepositoryUrl)}[/]";
+            }
+
+            // Version information
+            var versionParts = new List<string>();
+            if (!string.IsNullOrEmpty(results.OsyncVersion))
+                versionParts.Add($"osync {results.OsyncVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaVersion))
+                versionParts.Add($"Ollama {results.OllamaVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
+                versionParts.Add($"Judge Ollama {results.OllamaJudgeVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
+                versionParts.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
+            if (versionParts.Count > 0)
+            {
+                headerText += $"\n[dim]Versions: {string.Join(" | ", versionParts)}[/]";
             }
 
             var panel = new Panel(headerText)
@@ -719,11 +739,30 @@ namespace osync
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
                 sb.AppendLine($"**Judge Model:** {results.JudgeModel} (50% metrics + 50% judgment)  ");
+                if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                {
+                    sb.AppendLine($"**Best Answer Judge:** {results.JudgeModelBestAnswer}  ");
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
             {
                 sb.AppendLine($"**Repository:** [{results.RepositoryUrl}]({results.RepositoryUrl})  ");
+            }
+
+            // Version information
+            var versionParts = new List<string>();
+            if (!string.IsNullOrEmpty(results.OsyncVersion))
+                versionParts.Add($"osync {results.OsyncVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaVersion))
+                versionParts.Add($"Ollama {results.OllamaVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
+                versionParts.Add($"Judge Ollama {results.OllamaJudgeVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
+                versionParts.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
+            if (versionParts.Count > 0)
+            {
+                sb.AppendLine($"**Versions:** {string.Join(" | ", versionParts)}  ");
             }
 
             sb.AppendLine();
@@ -1165,6 +1204,10 @@ namespace osync
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
                 sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Judge Model</span><span class=\"info-value\">{EscapeHtml(results.JudgeModel)}</span></div>");
+                if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                {
+                    sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Best Answer Judge</span><span class=\"info-value\">{EscapeHtml(results.JudgeModelBestAnswer)}</span></div>");
+                }
             }
 
             sb.AppendLine("</div>"); // Close info-grid
@@ -1173,6 +1216,21 @@ namespace osync
             if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
             {
                 sb.AppendLine($"<div class=\"info-item\" style=\"grid-column: 1 / -1; margin-top: 0.5rem;\"><span class=\"info-label\">Repository</span><span class=\"info-value\"><a href=\"{EscapeHtml(results.RepositoryUrl)}\" target=\"_blank\">{EscapeHtml(results.RepositoryUrl)}</a></span></div>");
+            }
+
+            // Version information
+            var htmlVersionParts = new List<string>();
+            if (!string.IsNullOrEmpty(results.OsyncVersion))
+                htmlVersionParts.Add($"osync {EscapeHtml(results.OsyncVersion)}");
+            if (!string.IsNullOrEmpty(results.OllamaVersion))
+                htmlVersionParts.Add($"Ollama {EscapeHtml(results.OllamaVersion)}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
+                htmlVersionParts.Add($"Judge Ollama {EscapeHtml(results.OllamaJudgeVersion)}");
+            if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
+                htmlVersionParts.Add($"Best Judge Ollama {EscapeHtml(results.OllamaJudgeBestAnswerVersion)}");
+            if (htmlVersionParts.Count > 0)
+            {
+                sb.AppendLine($"<div class=\"info-item\" style=\"grid-column: 1 / -1; margin-top: 0.5rem;\"><span class=\"info-label\">Versions</span><span class=\"info-value\" style=\"color: var(--text-secondary);\">{string.Join(" | ", htmlVersionParts)}</span></div>");
             }
 
             sb.AppendLine("</div>"); // Close header-card
@@ -1546,6 +1604,17 @@ namespace osync
                                     }
                                     infoTable.Cell().Text("");
                                     infoTable.Cell().Text("");
+
+                                    // Row 3: Best Answer Judge (if different) and empty cells
+                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                                    {
+                                        infoTable.Cell().Text("Best Judge:").Bold().FontSize(9);
+                                        infoTable.Cell().Text(results.JudgeModelBestAnswer).FontSize(9);
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                    }
                                 });
 
                                 // Repository if available
@@ -1555,6 +1624,25 @@ namespace osync
                                     {
                                         r.ConstantItem(60).Text("Repository:").Bold().FontSize(8);
                                         r.RelativeItem().Text(results.RepositoryUrl).FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    });
+                                }
+
+                                // Version information
+                                var pdfVersionParts = new List<string>();
+                                if (!string.IsNullOrEmpty(results.OsyncVersion))
+                                    pdfVersionParts.Add($"osync {results.OsyncVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaVersion))
+                                    pdfVersionParts.Add($"Ollama {results.OllamaVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
+                                    pdfVersionParts.Add($"Judge Ollama {results.OllamaJudgeVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
+                                    pdfVersionParts.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
+                                if (pdfVersionParts.Count > 0)
+                                {
+                                    col.Item().PaddingTop(3).Row(r =>
+                                    {
+                                        r.ConstantItem(60).Text("Versions:").Bold().FontSize(8);
+                                        r.RelativeItem().Text(string.Join(" | ", pdfVersionParts)).FontSize(8).FontColor(Colors.Grey.Darken1);
                                     });
                                 }
 
@@ -2128,6 +2216,17 @@ namespace osync
                                     }
                                     infoTable.Cell().Text("");
                                     infoTable.Cell().Text("");
+
+                                    // Row 3: Best Answer Judge (if different) and empty cells
+                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                                    {
+                                        infoTable.Cell().Text("Best Judge:").Bold().FontSize(9);
+                                        infoTable.Cell().Text(results.JudgeModelBestAnswer).FontSize(9);
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                        infoTable.Cell().Text("");
+                                    }
                                 });
                                 if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
                                 {
@@ -2137,6 +2236,26 @@ namespace osync
                                         r.RelativeItem().Text(results.RepositoryUrl).FontSize(8).FontColor(Colors.Grey.Darken1);
                                     });
                                 }
+
+                                // Version information
+                                var pdfVersionPartsProgress = new List<string>();
+                                if (!string.IsNullOrEmpty(results.OsyncVersion))
+                                    pdfVersionPartsProgress.Add($"osync {results.OsyncVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaVersion))
+                                    pdfVersionPartsProgress.Add($"Ollama {results.OllamaVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
+                                    pdfVersionPartsProgress.Add($"Judge Ollama {results.OllamaJudgeVersion}");
+                                if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
+                                    pdfVersionPartsProgress.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
+                                if (pdfVersionPartsProgress.Count > 0)
+                                {
+                                    col.Item().PaddingTop(3).Row(r =>
+                                    {
+                                        r.ConstantItem(60).Text("Versions:").Bold().FontSize(8);
+                                        r.RelativeItem().Text(string.Join(" | ", pdfVersionPartsProgress)).FontSize(8).FontColor(Colors.Grey.Darken1);
+                                    });
+                                }
+
                                 col.Item().PaddingTop(5).LineHorizontal(1).LineColor(Colors.Grey.Medium);
                             });
                         });

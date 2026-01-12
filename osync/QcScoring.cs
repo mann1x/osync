@@ -51,7 +51,12 @@ namespace osync
                 Options = resultsFile.Options,
                 TestSuiteName = resultsFile.TestSuiteName,
                 TotalQuestions = baseResult.QuestionResults.Count,
-                RepositoryUrl = resultsFile.RepositoryUrl
+                RepositoryUrl = resultsFile.RepositoryUrl,
+                // Version information
+                OsyncVersion = resultsFile.OsyncVersion,
+                OllamaVersion = resultsFile.OllamaVersion,
+                OllamaJudgeVersion = resultsFile.OllamaJudgeVersion,
+                OllamaJudgeBestAnswerVersion = resultsFile.OllamaJudgeBestAnswerVersion
             };
 
             // Calculate scores for each quantization (excluding base)
@@ -65,12 +70,13 @@ namespace osync
             var allHaveJudgment = scoringResults.QuantScores.All(q => q.HasJudgmentScoring);
             scoringResults.HasJudgmentScoring = allHaveJudgment;
 
-            // Get judge model name from first quantization that has judgment
+            // Get judge model names from first quantization that has judgment
             if (allHaveJudgment && resultsFile.Results.Any(r => !r.IsBase))
             {
                 var firstQuant = resultsFile.Results.FirstOrDefault(r => !r.IsBase);
                 var firstQuestion = firstQuant?.QuestionResults.FirstOrDefault(q => q.Judgment != null);
                 scoringResults.JudgeModel = firstQuestion?.Judgment?.JudgeModel;
+                scoringResults.JudgeModelBestAnswer = firstQuestion?.Judgment?.JudgeModelBestAnswer;
             }
 
             return scoringResults;

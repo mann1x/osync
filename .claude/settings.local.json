@@ -43,7 +43,8 @@
       "Bash(./osync/bin/Release/net8.0-windows10.0.22621.0/osync.exe:*)",
       "Bash(timeout:*)",
       "Bash(ls:*)",
-      "Bash(start \"\" \"D:\\\\INSTALL\\\\osync\\\\test\\\\test-output2.pdf\")"
+      "Bash(start \"\" \"D:\\\\INSTALL\\\\osync\\\\test\\\\test-output2.pdf\")",
+      "Bash(ollama list:*)"
     ]
   },
   "model": "opus"

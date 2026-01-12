@@ -35,7 +35,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
     public class OsyncProgram
     {
-        static string version = "1.2.6";
+        static string version = "1.2.7";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -412,28 +412,42 @@ namespace osync
             {
                 Console.WriteLine("Error: Model name is required");
                 Console.WriteLine("Usage: osync load <model-name> [-d <server-url>]");
+                Console.WriteLine("   or: osync load <server-url>/<model-name>");
                 System.Environment.Exit(1);
             }
 
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
+            string modelName = args.ModelName;
+            string ollamaHost;
 
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            // Check if ModelName is a URL with embedded model name (e.g., http://host:port/modelname)
+            if (modelName.StartsWith("http://") || modelName.StartsWith("https://"))
             {
-                ollamaHost = "http://localhost:11434";
+                var (serverUrl, parsedModel) = ParseRemoteSource(modelName);
+                ollamaHost = serverUrl;
+                modelName = parsedModel;
             }
-
-            // Ensure the URL has a protocol
-            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            else
             {
-                ollamaHost = "http://" + ollamaHost;
+                // Get Ollama host from -d argument, environment variable, or default
+                ollamaHost = !string.IsNullOrEmpty(args.Destination)
+                    ? args.Destination
+                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                    ?? "http://localhost:11434";
+
+                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+                {
+                    ollamaHost = "http://localhost:11434";
+                }
+
+                // Ensure the URL has a protocol
+                if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+                {
+                    ollamaHost = "http://" + ollamaHost;
+                }
             }
 
             // Ensure model has a tag
-            var modelName = args.ModelName;
             if (!modelName.Contains(':'))
             {
                 modelName += ":latest";
@@ -515,21 +529,35 @@ namespace osync
         [ArgActionMethod, ArgDescription("Unload a model (or all models) from memory")]
         public async Task Unload(UnloadArgs args)
         {
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
+            string? inputModelName = args.ModelName;
+            string ollamaHost;
 
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            // Check if ModelName is a URL with embedded model name (e.g., http://host:port/modelname)
+            if (!string.IsNullOrWhiteSpace(inputModelName) && (inputModelName.StartsWith("http://") || inputModelName.StartsWith("https://")))
             {
-                ollamaHost = "http://localhost:11434";
+                var (serverUrl, parsedModel) = ParseRemoteSource(inputModelName);
+                ollamaHost = serverUrl;
+                inputModelName = parsedModel;
             }
-
-            // Ensure the URL has a protocol
-            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            else
             {
-                ollamaHost = "http://" + ollamaHost;
+                // Get Ollama host from -d argument, environment variable, or default
+                ollamaHost = !string.IsNullOrEmpty(args.Destination)
+                    ? args.Destination
+                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                    ?? "http://localhost:11434";
+
+                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+                {
+                    ollamaHost = "http://localhost:11434";
+                }
+
+                // Ensure the URL has a protocol
+                if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+                {
+                    ollamaHost = "http://" + ollamaHost;
+                }
             }
 
             try
@@ -543,9 +571,9 @@ namespace osync
                 List<string> modelsToUnload = new List<string>();
 
                 // If model name is specified, unload just that model
-                if (!string.IsNullOrWhiteSpace(args.ModelName))
+                if (!string.IsNullOrWhiteSpace(inputModelName))
                 {
-                    var modelName = args.ModelName;
+                    var modelName = inputModelName;
                     if (!modelName.Contains(':'))
                     {
                         modelName += ":latest";
@@ -1162,6 +1190,77 @@ namespace osync
                 // Ignore - cursor visibility not supported in this terminal
             }
         }
+
+        /// <summary>
+        /// Convert model parameter value to proper type for JSON serialization.
+        /// Ollama API expects specific types for parameters (integers, floats, booleans).
+        /// </summary>
+        private static object ConvertParameterValue(string key, string value)
+        {
+            // Integer parameters
+            var intParams = new HashSet<string> {
+                "num_ctx", "num_gpu", "num_predict", "top_k", "seed", "mirostat",
+                "num_keep", "num_thread", "num_batch", "main_gpu", "low_vram",
+                "vocab_only", "repeat_last_n"
+            };
+
+            // Float parameters
+            var floatParams = new HashSet<string> {
+                "temperature", "top_p", "repeat_penalty", "min_p", "typical_p",
+                "presence_penalty", "frequency_penalty", "tfs_z", "mirostat_tau",
+                "mirostat_eta", "rope_frequency_base", "rope_frequency_scale"
+            };
+
+            // Boolean parameters
+            var boolParams = new HashSet<string> {
+                "numa", "penalize_newline", "f16_kv", "use_mlock", "use_mmap",
+                "low_vram", "vocab_only"
+            };
+
+            // Try to convert to integer
+            if (intParams.Contains(key))
+            {
+                if (int.TryParse(value, out int intVal))
+                    return intVal;
+                // Try as float and convert to int
+                if (double.TryParse(value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double dVal))
+                    return (int)dVal;
+            }
+
+            // Try to convert to float
+            if (floatParams.Contains(key))
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double floatVal))
+                    return floatVal;
+            }
+
+            // Try to convert to boolean
+            if (boolParams.Contains(key))
+            {
+                if (bool.TryParse(value, out bool boolVal))
+                    return boolVal;
+                // Also handle "1"/"0" as true/false
+                if (value == "1" || value.ToLower() == "true")
+                    return true;
+                if (value == "0" || value.ToLower() == "false")
+                    return false;
+            }
+
+            // For unknown parameters, try to auto-detect type
+            if (int.TryParse(value, out int autoInt))
+                return autoInt;
+            if (double.TryParse(value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out double autoFloat))
+                return autoFloat;
+            if (bool.TryParse(value, out bool autoBool))
+                return autoBool;
+
+            // Return as string (default)
+            return value;
+        }
+
         public bool ValidateServer(string RemoteServer, bool silent = false)
         {
             try
@@ -1448,12 +1547,34 @@ namespace osync
                     modelCreate["system"] = system;
                 if (parameters != null && parameters.Count > 0)
                 {
-                    var paramDict = new Dictionary<string, string>();
+                    var paramDict = new Dictionary<string, object>();
                     foreach (var param in parameters)
                     {
                         var parts = param.Split(new[] { ' ' }, 2);
                         if (parts.Length == 2)
-                            paramDict[parts[0]] = parts[1];
+                        {
+                            var key = parts[0];
+                            var value = parts[1];
+
+                            // "stop" parameter must be an array
+                            if (key == "stop")
+                            {
+                                // Check if there's an existing stop array to add to
+                                if (paramDict.ContainsKey("stop") && paramDict["stop"] is List<string> existingStops)
+                                {
+                                    existingStops.Add(value);
+                                }
+                                else
+                                {
+                                    paramDict["stop"] = new List<string> { value };
+                                }
+                            }
+                            else
+                            {
+                                // Convert to proper type based on parameter name
+                                paramDict[key] = ConvertParameterValue(key, value);
+                            }
+                        }
                     }
                     if (paramDict.Count > 0)
                         modelCreate["parameters"] = paramDict;
@@ -1750,8 +1871,16 @@ namespace osync
                 manifest_file = Source.Replace(":", separator);
             }
 
+            // Convert forward slashes to platform separator for path construction
+            manifest_file = manifest_file.Replace("/", separator);
+
             if (modelBase == "hub")
             {
+                modelDir = Path.Combine(ollama_models, "manifests", manifest_file);
+            }
+            else if (modelBase == "hf.co")
+            {
+                // HuggingFace models are stored directly under manifests/hf.co/... (not under registry.ollama.ai)
                 modelDir = Path.Combine(ollama_models, "manifests", manifest_file);
             }
             else if (modelBase == "")
@@ -1769,10 +1898,14 @@ namespace osync
                 if (!Source.Contains(":"))
                 {
                     string latestSource = $"{Source}:latest";
-                    string latestManifestFile = latestSource.Replace(":", separator);
+                    string latestManifestFile = latestSource.Replace(":", separator).Replace("/", separator);
                     string latestModelDir;
 
                     if (modelBase == "hub")
+                    {
+                        latestModelDir = Path.Combine(ollama_models, "manifests", latestManifestFile);
+                    }
+                    else if (modelBase == "hf.co")
                     {
                         latestModelDir = Path.Combine(ollama_models, "manifests", latestManifestFile);
                     }
@@ -2667,12 +2800,34 @@ namespace osync
                     modelCreate["system"] = system;
                 if (parameters != null && parameters.Count > 0)
                 {
-                    var paramDict = new Dictionary<string, string>();
+                    var paramDict = new Dictionary<string, object>();
                     foreach (var param in parameters)
                     {
                         var parts = param.Split(new[] { ' ' }, 2);
                         if (parts.Length == 2)
-                            paramDict[parts[0]] = parts[1];
+                        {
+                            var key = parts[0];
+                            var value = parts[1];
+
+                            // "stop" parameter must be an array
+                            if (key == "stop")
+                            {
+                                // Check if there's an existing stop array to add to
+                                if (paramDict.ContainsKey("stop") && paramDict["stop"] is List<string> existingStops)
+                                {
+                                    existingStops.Add(value);
+                                }
+                                else
+                                {
+                                    paramDict["stop"] = new List<string> { value };
+                                }
+                            }
+                            else
+                            {
+                                // Convert to proper type based on parameter name
+                                paramDict[key] = ConvertParameterValue(key, value);
+                            }
+                        }
                     }
                     if (paramDict.Count > 0)
                         modelCreate["parameters"] = paramDict;
