@@ -43,8 +43,12 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `ChatSession.cs` - Interactive chat session management
 - `ManageCommand.cs` - TUI implementation with themes
 - `QcCommand.cs` - Quantization comparison implementation
+- `QcViewCommand.cs` - QC results viewer with PDF/HTML/Markdown output generation
+- `QcModels.cs` - Data models for QC results (JudgmentResult, QuantResult, etc.)
+- `QcScoring.cs` - Score calculation logic for QC results
 - `OllamaModels.cs` - Ollama API data models
 - `ThrottledStream.cs` - Bandwidth limiting for transfers
+- `CloudProviders/` - Cloud AI provider implementations for judge models
 
 ### Test Structure
 
@@ -62,8 +66,34 @@ BDD tests using SpecFlow + xUnit in `osync.Tests/`:
 ### Dependencies
 
 Core: PowerArgs (CLI), Spectre.Console (formatting), Terminal.Gui (TUI), TqdmSharp (progress bars)
+PDF: iText7 (AGPL-3.0 licensed) - used for PDF report generation in QcView
+AI SDKs: Anthropic, OpenAI, Azure.AI.OpenAI - for cloud judge providers
 Test: xUnit, SpecFlow, FluentAssertions
+
+### Test Data
+
+QC test result files for testing qcview output are located in `d:\install\osync\test\`
 
 ## Important Guidelines
 
-- **Never change the program version** unless explicitly asked by the user. When updating the changelog in README.md, add new entries under the existing version - do not create a new version number.
+### Version and Changelog
+
+- **Never change the program version** unless explicitly asked by the user
+- **Always check the current version** before updating the changelog - check `Program.cs` for the version constant or recent git tags
+- **Check GitHub releases** at https://github.com/mann1x/osync/releases to see what's already been released before adding changelog entries
+- When updating changelog, create a new version section if needed - don't add new features under an already-released version
+
+### Spectre.Console Quirks
+
+- **File access checks with confirmation prompts** must happen BEFORE starting a Progress display
+- `AnsiConsole.Confirm()` cannot run inside a Progress context - causes "concurrent interactive functions" error
+- When adding file output with overwrite confirmation, check access before `AnsiConsole.Progress().StartAsync()`
+
+### iText7 PDF Generation
+
+- Standard Type1 fonts (Helvetica, Courier) have limited Unicode support
+- **Text corruption issue**: Long text with certain patterns (e.g., Python format strings with `%`) can cause character scrambling
+- **Solution**: Add text line-by-line as separate `Text` elements instead of passing entire string to Paragraph
+- Use `CreateCodeParagraph()` helper in QcViewCommand.cs for code/answer content
+- Use `SanitizeForPdf()` to replace problematic Unicode characters with ASCII equivalents
+- Courier font is better for code content than Helvetica

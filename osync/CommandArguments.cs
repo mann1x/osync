@@ -179,7 +179,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]
     public class QcArgs
     {
-        [ArgRequired, ArgDescription("Model name without tag"), ArgShortcut("-M")]
+        [ArgDescription("Model name without tag (required unless --help-cloud is specified)"), ArgShortcut("-M")]
         public string ModelName { get; set; } = string.Empty;
 
         [ArgDescription("Remote server URL"), ArgShortcut("-D")]
@@ -191,7 +191,7 @@ namespace osync
         [ArgDescription("Base quantization tag for comparison (default: fp16, or existing base from results file)"), ArgShortcut("-B")]
         public string BaseTag { get; set; } = string.Empty;
 
-        [ArgRequired, ArgDescription("Quantization tags to compare (comma-separated, supports wildcards e.g., Q4*,IQ*)"), ArgShortcut("-Q")]
+        [ArgDescription("Quantization tags to compare (comma-separated, supports wildcards e.g., Q4*,IQ*) - required unless --help-cloud"), ArgShortcut("-Q")]
         public string Quants { get; set; } = string.Empty;
 
         [ArgDescription("Test suite: v1base (50 questions), v1quick (v1base with 10 questions), v1code (50 questions coding-focused) or path to external JSON file (default: v1base)"), ArgShortcut("-T")]
@@ -221,10 +221,10 @@ namespace osync
         [ArgDescription("Re-run judgment process for existing test results"), ArgShortcut("--rejudge")]
         public bool Rejudge { get; set; }
 
-        [ArgDescription("Judge model for similarity scoring (local model name or http://host:port/model for remote)"), ArgShortcut("--judge")]
+        [ArgDescription("Judge model for similarity scoring. Ollama: model_name or http://host:port/model. Cloud: @provider[:key]/model (see 'osync qc --help-cloud' for details)"), ArgShortcut("--judge")]
         public string Judge { get; set; } = string.Empty;
 
-        [ArgDescription("Judge model for best answer determination (local model name or http://host:port/model for remote)"), ArgShortcut("--judgebest")]
+        [ArgDescription("Judge model for best answer determination. Ollama: model_name or http://host:port/model. Cloud: @provider[:key]/model (see 'osync qc --help-cloud' for details)"), ArgShortcut("--judgebest")]
         public string JudgeBest { get; set; } = string.Empty;
 
         [ArgDescription("Judge execution mode: serial (default) or parallel"), ArgShortcut("--mode")]
@@ -244,6 +244,9 @@ namespace osync
 
         [ArgDescription("Repository URL for the model source (saved in results file)"), ArgShortcut("--repo")]
         public string Repository { get; set; } = string.Empty;
+
+        [ArgDescription("Show detailed help for cloud provider integration"), ArgShortcut("--help-cloud")]
+        public bool HelpCloud { get; set; }
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling)]

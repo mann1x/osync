@@ -3,10 +3,23 @@
 using System.Text;
 using System.Text.Json;
 using ByteSizeLib;
-using QuestPDF.Fluent;
-using QuestPDF.Helpers;
-using QuestPDF.Infrastructure;
+using iText.Kernel.Pdf;
+using iText.Kernel.Colors;
+using iText.Kernel.Font;
+using iText.Kernel.Geom;
+using iText.Layout;
+using iText.Layout.Element;
+using iText.Layout.Properties;
+using iText.IO.Font.Constants;
 using Spectre.Console;
+using iTextDocument = iText.Layout.Document;
+using iTextTable = iText.Layout.Element.Table;
+using iTextCell = iText.Layout.Element.Cell;
+using iTextParagraph = iText.Layout.Element.Paragraph;
+using iTextText = iText.Layout.Element.Text;
+using iTextColor = iText.Kernel.Colors.Color;
+using SpectreTable = Spectre.Console.Table;
+using Path = System.IO.Path;
 
 namespace osync
 {
@@ -91,6 +104,27 @@ namespace osync
                 var format = string.IsNullOrWhiteSpace(_args.Format) ? "table" : _args.Format.ToLower();
                 var isFileOutput = !string.IsNullOrEmpty(_args.OutputFile) && format != "table";
 
+                // Check file access BEFORE starting progress bar to avoid concurrent display errors
+                if (isFileOutput)
+                {
+                    var outputFile = _args.OutputFile;
+                    if (string.IsNullOrWhiteSpace(outputFile))
+                    {
+                        // Determine default extension based on format
+                        var ext = format switch
+                        {
+                            "json" => ".json",
+                            "md" or "markdown" => ".md",
+                            "html" => ".html",
+                            "pdf" => ".pdf",
+                            _ => ".txt"
+                        };
+                        outputFile = Path.ChangeExtension(_args.FileName, ext);
+                    }
+                    if (!CheckOutputFileAccess(outputFile))
+                        return 0;
+                }
+
                 if (isFileOutput)
                 {
                     // File output with progress bar
@@ -112,20 +146,21 @@ namespace osync
                             mainTask.Increment(20);
 
                             // Generate output based on format
+                            // skipFileAccessCheck: true because we already checked before starting progress bar
                             switch (format)
                             {
                                 case "json":
                                     mainTask.Description = "[cyan]Writing JSON...[/]";
-                                    await DisplayJsonAsync(scoringResults);
+                                    await DisplayJsonAsync(scoringResults, skipFileAccessCheck: true);
                                     break;
                                 case "md":
                                 case "markdown":
                                     mainTask.Description = "[cyan]Generating Markdown...[/]";
-                                    await OutputMarkdownAsync(scoringResults, resultsFile);
+                                    await OutputMarkdownAsync(scoringResults, resultsFile, skipFileAccessCheck: true);
                                     break;
                                 case "html":
                                     mainTask.Description = "[cyan]Generating HTML...[/]";
-                                    await OutputHtmlAsync(scoringResults, resultsFile);
+                                    await OutputHtmlAsync(scoringResults, resultsFile, skipFileAccessCheck: true);
                                     break;
                                 case "pdf":
                                     mainTask.Description = "[cyan]Generating PDF (this may take a while)...[/]";
@@ -178,6 +213,10 @@ namespace osync
         {
             if (!string.IsNullOrEmpty(_args.OutputFile))
             {
+                // Check file access before proceeding
+                if (!CheckOutputFileAccess(_args.OutputFile))
+                    return;
+
                 // Output to file as plain text
                 var sb = new StringBuilder();
                 sb.AppendLine("Quantization Comparison Results");
@@ -186,7 +225,15 @@ namespace osync
 
                 if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
                 {
-                    sb.AppendLine($"Judge Model: {results.JudgeModel} (50% metrics + 50% judgment)");
+                    var judgeProviderText = FormatCloudProviderPdf(results.JudgeProvider, results.JudgeApiVersion);
+                    var judgeProviderSuffix = judgeProviderText != null ? $" {judgeProviderText}" : "";
+                    sb.AppendLine($"Judge Model: {results.JudgeModel}{judgeProviderSuffix} (50% metrics + 50% judgment)");
+                    if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                    {
+                        var bestProviderText = FormatCloudProviderPdf(results.JudgeBestProvider, results.JudgeBestApiVersion);
+                        var bestProviderSuffix = bestProviderText != null ? $" {bestProviderText}" : "";
+                        sb.AppendLine($"Best Answer Judge: {results.JudgeModelBestAnswer}{bestProviderSuffix}");
+                    }
                 }
 
                 if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
@@ -333,11 +380,15 @@ namespace osync
 
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
-                headerText += $"\nJudge Model: [magenta]{Markup.Escape(results.JudgeModel)}[/] [dim](50% metrics + 50% judgment)[/]";
+                var judgeProviderBadge = FormatCloudProviderConsole(results.JudgeProvider, results.JudgeApiVersion);
+                var judgeProviderSuffix = judgeProviderBadge != null ? $" {judgeProviderBadge}" : "";
+                headerText += $"\nJudge Model: [magenta]{Markup.Escape(results.JudgeModel)}[/]{judgeProviderSuffix} [dim](50% metrics + 50% judgment)[/]";
                 // Show best answer judge if different from similarity judge
                 if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
                 {
-                    headerText += $"\nBest Answer Judge: [magenta]{Markup.Escape(results.JudgeModelBestAnswer)}[/]";
+                    var bestProviderBadge = FormatCloudProviderConsole(results.JudgeBestProvider, results.JudgeBestApiVersion);
+                    var bestProviderSuffix = bestProviderBadge != null ? $" {bestProviderBadge}" : "";
+                    headerText += $"\nBest Answer Judge: [magenta]{Markup.Escape(results.JudgeModelBestAnswer)}[/]{bestProviderSuffix}";
                 }
             }
 
@@ -386,7 +437,7 @@ namespace osync
             AnsiConsole.WriteLine("");
 
             // Main results table
-            var table = new Table();
+            var table = new SpectreTable();
             table.Border = TableBorder.Rounded;
 
             // Update title based on judgment availability
@@ -531,7 +582,7 @@ namespace osync
             if (categories.Count == 0)
                 return;
 
-            var table = new Table();
+            var table = new SpectreTable();
             table.Border = TableBorder.Rounded;
 
             // Update title based on judgment availability
@@ -697,7 +748,7 @@ namespace osync
         /// <summary>
         /// Output results as JSON (console or file)
         /// </summary>
-        private async Task DisplayJsonAsync(QcScoringResults results)
+        private async Task DisplayJsonAsync(QcScoringResults results, bool skipFileAccessCheck = false)
         {
             var options = new JsonSerializerOptions
             {
@@ -714,6 +765,10 @@ namespace osync
             }
             else
             {
+                // Check file access before proceeding (skip if already checked)
+                if (!skipFileAccessCheck && !CheckOutputFileAccess(_args.OutputFile))
+                    return;
+
                 // Output to file
                 await File.WriteAllTextAsync(_args.OutputFile, json);
                 var fileInfo = new FileInfo(_args.OutputFile);
@@ -724,7 +779,7 @@ namespace osync
         /// <summary>
         /// Output results as Markdown file
         /// </summary>
-        private async Task OutputMarkdownAsync(QcScoringResults results, QcResultsFile resultsFile)
+        private async Task OutputMarkdownAsync(QcScoringResults results, QcResultsFile resultsFile, bool skipFileAccessCheck = false)
         {
             var sb = new StringBuilder();
 
@@ -738,10 +793,14 @@ namespace osync
 
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
-                sb.AppendLine($"**Judge Model:** {results.JudgeModel} (50% metrics + 50% judgment)  ");
+                var judgeProviderBadge = FormatCloudProviderMarkdown(results.JudgeProvider, results.JudgeApiVersion);
+                var judgeProviderSuffix = judgeProviderBadge != null ? $" {judgeProviderBadge}" : "";
+                sb.AppendLine($"**Judge Model:** {results.JudgeModel}{judgeProviderSuffix} (50% metrics + 50% judgment)  ");
                 if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
                 {
-                    sb.AppendLine($"**Best Answer Judge:** {results.JudgeModelBestAnswer}  ");
+                    var bestProviderBadge = FormatCloudProviderMarkdown(results.JudgeBestProvider, results.JudgeBestApiVersion);
+                    var bestProviderSuffix = bestProviderBadge != null ? $" {bestProviderBadge}" : "";
+                    sb.AppendLine($"**Best Answer Judge:** {results.JudgeModelBestAnswer}{bestProviderSuffix}  ");
                 }
             }
 
@@ -984,6 +1043,10 @@ namespace osync
                 outputFile = Path.ChangeExtension(_args.FileName, ".md");
             }
 
+            // Check file access before proceeding (skip if already checked)
+            if (!skipFileAccessCheck && !CheckOutputFileAccess(outputFile))
+                return;
+
             await File.WriteAllTextAsync(outputFile, sb.ToString());
             var fileInfo = new FileInfo(outputFile);
             AnsiConsole.MarkupLine($"[green]Markdown results saved to: {outputFile} ({ByteSize.FromBytes(fileInfo.Length)})[/]");
@@ -992,7 +1055,7 @@ namespace osync
         /// <summary>
         /// Output results as HTML file with interactive features
         /// </summary>
-        private async Task OutputHtmlAsync(QcScoringResults results, QcResultsFile resultsFile)
+        private async Task OutputHtmlAsync(QcScoringResults results, QcResultsFile resultsFile, bool skipFileAccessCheck = false)
         {
             var sb = new StringBuilder();
 
@@ -1087,6 +1150,17 @@ namespace osync
         .speed-high { color: var(--accent-green); font-weight: 700; }
         .speed-mid { color: var(--accent-yellow); font-weight: 600; }
         .speed-low { color: var(--accent-red); font-weight: 600; }
+        .cloud-provider-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            background: linear-gradient(135deg, rgba(147, 112, 219, 0.2), rgba(88, 166, 255, 0.2));
+            border: 1px solid rgba(147, 112, 219, 0.4);
+            border-radius: 12px;
+            font-size: 0.75em;
+            color: var(--accent-purple);
+            font-weight: 500;
+            margin-left: 8px;
+        }
         .collapsible {
             background: var(--bg-secondary);
             color: var(--text-primary);
@@ -1203,10 +1277,19 @@ namespace osync
 
             if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
             {
-                sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Judge Model</span><span class=\"info-value\">{EscapeHtml(results.JudgeModel)}</span></div>");
+                var judgeProviderBadge = FormatCloudProviderHtml(results.JudgeProvider, results.JudgeApiVersion);
+                var judgeModelDisplay = judgeProviderBadge != null
+                    ? $"{EscapeHtml(results.JudgeModel)} {judgeProviderBadge}"
+                    : EscapeHtml(results.JudgeModel);
+                sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Judge Model</span><span class=\"info-value\">{judgeModelDisplay}</span></div>");
+
                 if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
                 {
-                    sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Best Answer Judge</span><span class=\"info-value\">{EscapeHtml(results.JudgeModelBestAnswer)}</span></div>");
+                    var bestProviderBadge = FormatCloudProviderHtml(results.JudgeBestProvider, results.JudgeBestApiVersion);
+                    var bestModelDisplay = bestProviderBadge != null
+                        ? $"{EscapeHtml(results.JudgeModelBestAnswer)} {bestProviderBadge}"
+                        : EscapeHtml(results.JudgeModelBestAnswer);
+                    sb.AppendLine($"<div class=\"info-item\"><span class=\"info-label\">Best Answer Judge</span><span class=\"info-value\">{bestModelDisplay}</span></div>");
                 }
             }
 
@@ -1466,7 +1549,11 @@ namespace osync
                         sb.AppendLine($"<span class=\"judgment-badge badge-score\">Score: {question.Judgment.Score}%</span>");
                         if (!string.IsNullOrWhiteSpace(question.Judgment.Reason))
                         {
-                            sb.AppendLine($"<div class=\"reason-text\">💭 {EscapeHtml(question.Judgment.Reason)}</div>");
+                            sb.AppendLine($"<div class=\"reason-text\">💭 [Similarity] {EscapeHtml(question.Judgment.Reason)}</div>");
+                        }
+                        if (!string.IsNullOrWhiteSpace(question.Judgment.ReasonBestAnswer))
+                        {
+                            sb.AppendLine($"<div class=\"reason-text\">💭 [BestAnswer] {EscapeHtml(question.Judgment.ReasonBestAnswer)}</div>");
                         }
                     }
 
@@ -1518,618 +1605,349 @@ namespace osync
                 outputFile = Path.ChangeExtension(_args.FileName, ".html");
             }
 
+            // Check file access before proceeding (skip if already checked)
+            if (!skipFileAccessCheck && !CheckOutputFileAccess(outputFile))
+                return;
+
             await File.WriteAllTextAsync(outputFile, sb.ToString());
             var fileInfo = new FileInfo(outputFile);
             AnsiConsole.MarkupLine($"[green]HTML results saved to: {outputFile} ({ByteSize.FromBytes(fileInfo.Length)})[/]");
         }
 
         /// <summary>
-        /// Output results as PDF file using QuestPDF
+        /// Output results as PDF file using iText7 (non-progress version for default file output)
         /// </summary>
         private async Task OutputPdfAsync(QcScoringResults results, QcResultsFile resultsFile)
         {
-            // Set QuestPDF license for community use
-            QuestPDF.Settings.License = LicenseType.Community;
-
             var outputFile = _args.OutputFile;
             if (string.IsNullOrWhiteSpace(outputFile))
             {
                 outputFile = Path.ChangeExtension(_args.FileName, ".pdf");
             }
 
-            // Colors
-            var headerBg = Colors.Blue.Darken3;
-            var headerText = Colors.White;
-            var altRowBg = Colors.Grey.Lighten4;
+            // Check file access before proceeding
+            if (!CheckOutputFileAccess(outputFile))
+                return;
 
-            // Helper function for score colors
-            QuestPDF.Infrastructure.Color GetScoreColor(double score) => score >= 80 ? Colors.Green.Darken1 : score >= 60 ? Colors.Orange.Darken1 : Colors.Red.Darken1;
-
-            // Helper function for speed performance colors (>= 100% green, >= 95% orange, < 95% red)
-            QuestPDF.Infrastructure.Color GetSpeedColor(double performancePercent) => performancePercent >= 100 ? Colors.Green.Darken1 : performancePercent >= 95 ? Colors.Orange.Darken1 : Colors.Red.Darken1;
-
-            // Sort quantizations by FinalScore for all PDF sections
-            var quantScoresForPdf = results.QuantScores.OrderByDescending(q => q.FinalScore).ToList();
-
-            await Task.Run(() =>
-            {
-                Document.Create(container =>
-                {
-                    container.Page(page =>
-                    {
-                        page.Size(PageSizes.A4.Landscape());
-                        page.Margin(0.8f, Unit.Centimetre);
-                        page.DefaultTextStyle(x => x.FontSize(8));
-
-                        page.Header().Element(header =>
-                        {
-                            header.Column(col =>
-                            {
-                                // Title
-                                col.Item().Text("Quantization Comparison Results").FontSize(18).Bold().FontColor(Colors.Blue.Darken2);
-
-                                // Header info table for aligned layout
-                                col.Item().PaddingTop(8).Table(infoTable =>
-                                {
-                                    infoTable.ColumnsDefinition(c =>
-                                    {
-                                        c.ConstantColumn(60);  // Label
-                                        c.RelativeColumn(2);   // Value
-                                        c.ConstantColumn(60);  // Label
-                                        c.RelativeColumn(2);   // Value
-                                        c.ConstantColumn(50);  // Label
-                                        c.RelativeColumn(1);   // Value
-                                    });
-
-                                    // Row 1: Model, Family, Size
-                                    infoTable.Cell().Text("Model:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseModelName).FontSize(9);
-                                    infoTable.Cell().Text("Family:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseFamily).FontSize(9);
-                                    infoTable.Cell().Text("Size:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseParameterSize).FontSize(9);
-
-                                    // Row 2: Test Suite, Judge (if available)
-                                    infoTable.Cell().Text("Test Suite:").Bold().FontSize(9);
-                                    infoTable.Cell().Text($"{results.TestSuiteName} ({results.TotalQuestions} questions)").FontSize(9);
-                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
-                                    {
-                                        infoTable.Cell().Text("Judge:").Bold().FontSize(9);
-                                        infoTable.Cell().Text(results.JudgeModel).FontSize(9);
-                                    }
-                                    else
-                                    {
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                    }
-                                    infoTable.Cell().Text("");
-                                    infoTable.Cell().Text("");
-
-                                    // Row 3: Best Answer Judge (if different) and empty cells
-                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
-                                    {
-                                        infoTable.Cell().Text("Best Judge:").Bold().FontSize(9);
-                                        infoTable.Cell().Text(results.JudgeModelBestAnswer).FontSize(9);
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                    }
-                                });
-
-                                // Repository if available
-                                if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
-                                {
-                                    col.Item().PaddingTop(3).Row(r =>
-                                    {
-                                        r.ConstantItem(60).Text("Repository:").Bold().FontSize(8);
-                                        r.RelativeItem().Text(results.RepositoryUrl).FontSize(8).FontColor(Colors.Grey.Darken1);
-                                    });
-                                }
-
-                                // Version information
-                                var pdfVersionParts = new List<string>();
-                                if (!string.IsNullOrEmpty(results.OsyncVersion))
-                                    pdfVersionParts.Add($"osync {results.OsyncVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaVersion))
-                                    pdfVersionParts.Add($"Ollama {results.OllamaVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
-                                    pdfVersionParts.Add($"Judge Ollama {results.OllamaJudgeVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
-                                    pdfVersionParts.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
-                                if (pdfVersionParts.Count > 0)
-                                {
-                                    col.Item().PaddingTop(3).Row(r =>
-                                    {
-                                        r.ConstantItem(60).Text("Versions:").Bold().FontSize(8);
-                                        r.RelativeItem().Text(string.Join(" | ", pdfVersionParts)).FontSize(8).FontColor(Colors.Grey.Darken1);
-                                    });
-                                }
-
-                                col.Item().PaddingTop(5).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                            });
-                        });
-
-                        page.Content().Element(content =>
-                        {
-                            content.PaddingVertical(8).Column(col =>
-                            {
-                                // Base Info Section
-                                col.Item().Row(row =>
-                                {
-                                    row.RelativeItem().Text(text =>
-                                    {
-                                        text.Span("Base Quantization: ").Bold().FontSize(10);
-                                        text.Span(results.BaseTag).FontSize(10);
-                                    });
-                                });
-                                col.Item().PaddingBottom(5).Text($"Type: {results.BaseQuantizationType} | Size: {ByteSize.FromBytes(results.BaseDiskSizeBytes)} | Eval: {results.BaseEvalTokensPerSecond:F1} tok/s | Prompt: {results.BasePromptTokensPerSecond:F1} tok/s").FontSize(8);
-
-                                // Main Results Table
-                                col.Item().PaddingTop(8).Text("Quantization Quality & Performance").FontSize(11).Bold();
-                                col.Item().PaddingTop(4).Table(table =>
-                                {
-                                    // Define columns with better proportions
-                                    table.ColumnsDefinition(columns =>
-                                    {
-                                        columns.RelativeColumn(1.8f); // Tag - narrower
-                                        columns.RelativeColumn(2.2f); // Quant - wider to prevent wrapping
-                                        columns.RelativeColumn(1.1f); // Size
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            columns.RelativeColumn(0.9f); // Final
-                                            columns.RelativeColumn(0.9f); // Metrics
-                                            columns.RelativeColumn(0.9f); // Judge
-                                            columns.RelativeColumn(1.8f); // Best
-                                        }
-                                        else
-                                        {
-                                            columns.RelativeColumn(0.9f); // Score
-                                        }
-                                        columns.RelativeColumn(0.9f); // Token
-                                        columns.RelativeColumn(0.9f); // Logprobs
-                                        columns.RelativeColumn(0.9f); // Length
-                                        columns.RelativeColumn(0.9f); // Perplexity
-                                        columns.RelativeColumn(0.8f); // Eval
-                                        columns.RelativeColumn(0.8f); // Prompt
-                                    });
-
-                                    // Header row
-                                    table.Header(header =>
-                                    {
-                                        header.Cell().Background(headerBg).Padding(3).Text("Tag").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Quant").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Size").FontColor(headerText).Bold().FontSize(7);
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            header.Cell().Background(headerBg).Padding(3).Text("Final").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Metrics").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Judge").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Best Ans").FontColor(headerText).Bold().FontSize(7);
-                                        }
-                                        else
-                                        {
-                                            header.Cell().Background(headerBg).Padding(3).Text("Score").FontColor(headerText).Bold().FontSize(7);
-                                        }
-                                        header.Cell().Background(headerBg).Padding(3).Text("Token").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Logprobs").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Length").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Perplexity").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Eval").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Prompt").FontColor(headerText).Bold().FontSize(7);
-                                    });
-
-                                    // Data rows
-                                    int rowIndex = 0;
-                                    foreach (var quant in quantScoresForPdf)
-                                    {
-                                        var rowBg = rowIndex % 2 == 0 ? Colors.White : altRowBg;
-                                        var quantDisplay = quant.EnhancedQuantization ?? quant.QuantizationType;
-                                        var tokenScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.TokenSimilarityScore) : 0;
-                                        var logprobsScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LogprobsDivergenceScore) : 0;
-                                        var lengthScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LengthConsistencyScore) : 0;
-                                        var perplexityScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.PerplexityScore) : 0;
-
-                                        table.Cell().Background(rowBg).Padding(2).Text(quant.Tag).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text(quantDisplay).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text(ByteSize.FromBytes(quant.DiskSizeBytes).ToString()).FontSize(7);
-
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.FinalScore:F1}%").FontColor(GetScoreColor(quant.FinalScore)).FontSize(7);
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.TotalConfidenceScore:F1}%").FontColor(GetScoreColor(quant.TotalConfidenceScore)).FontSize(7);
-                                            var judgeScore = quant.AverageJudgmentScore ?? 0;
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.AverageJudgmentScore?.ToString("F1") ?? "N/A"}%").FontColor(GetScoreColor(judgeScore)).FontSize(7);
-                                            table.Cell().Background(rowBg).Padding(2).Text(FormatBestStatsPlain(quant)).FontSize(7);
-                                        }
-                                        else
-                                        {
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.TotalConfidenceScore:F1}%").FontColor(GetScoreColor(quant.TotalConfidenceScore)).FontSize(7);
-                                        }
-
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{tokenScore:F1}%").FontColor(GetScoreColor(tokenScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{logprobsScore:F1}%").FontColor(GetScoreColor(logprobsScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{lengthScore:F1}%").FontColor(GetScoreColor(lengthScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{perplexityScore:F1}%").FontColor(GetScoreColor(perplexityScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{quant.EvalPerformancePercent:F0}%").FontColor(GetSpeedColor(quant.EvalPerformancePercent)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{quant.PromptPerformancePercent:F0}%").FontColor(GetSpeedColor(quant.PromptPerformancePercent)).FontSize(7);
-
-                                        rowIndex++;
-                                    }
-                                });
-
-                                // Category Scores Section - use ShowEntire to prevent page break within section
-                                if (quantScoresForPdf.Any() && quantScoresForPdf.First().CategoryScores.Any())
-                                {
-                                    col.Item().ShowEntire().Column(catSection =>
-                                    {
-                                        catSection.Item().PaddingTop(12).Text("Scores by Category").FontSize(11).Bold();
-                                        catSection.Item().PaddingTop(4).Table(catTable =>
-                                        {
-                                            var categories = quantScoresForPdf.First().CategoryScores.Keys.ToList();
-
-                                            catTable.ColumnsDefinition(c =>
-                                            {
-                                                c.RelativeColumn(2f); // Tag
-                                            foreach (var _ in categories)
-                                            {
-                                                c.RelativeColumn(1f); // Category Metrics
-                                                if (results.HasJudgmentScoring)
-                                                    c.RelativeColumn(1f); // Category Judge
-                                            }
-                                        });
-
-                                        catTable.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).Bold().FontSize(7);
-                                            foreach (var cat in categories)
-                                            {
-                                                h.Cell().Background(headerBg).Padding(2).Text($"{cat}\nMetrics").FontColor(headerText).Bold().FontSize(6);
-                                                if (results.HasJudgmentScoring)
-                                                    h.Cell().Background(headerBg).Padding(2).Text($"{cat}\nJudge").FontColor(headerText).Bold().FontSize(6);
-                                            }
-                                        });
-
-                                        int catRowIndex = 0;
-                                        foreach (var quant in quantScoresForPdf)
-                                        {
-                                            var rowBg = catRowIndex % 2 == 0 ? Colors.White : altRowBg;
-                                            catTable.Cell().Background(rowBg).Padding(2).Text(quant.Tag).FontSize(7);
-
-                                            foreach (var cat in categories)
-                                            {
-                                                var metricScore = quant.CategoryScores.GetValueOrDefault(cat);
-                                                catTable.Cell().Background(rowBg).Padding(2).Text($"{metricScore:F1}%").FontColor(GetScoreColor(metricScore)).FontSize(7);
-
-                                                if (results.HasJudgmentScoring)
-                                                {
-                                                    var judgeScore = quant.CategoryJudgmentScores.GetValueOrDefault(cat);
-                                                    catTable.Cell().Background(rowBg).Padding(2).Text($"{judgeScore:F1}%").FontColor(GetScoreColor(judgeScore)).FontSize(7);
-                                                }
-                                            }
-                                            catRowIndex++;
-                                        }
-                                        });
-                                    });
-                                }
-
-                                // Rankings Section - each ranking table on its own page for clean layout
-                                // Rankings are on a separate page to avoid layout issues with main content
-                            });
-                        });
-
-                        page.Footer().AlignCenter().Text(text =>
-                        {
-                            text.Span($"Generated by osync qcview on {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Page ");
-                            text.CurrentPageNumber();
-                            text.Span(" of ");
-                            text.TotalPages();
-                        });
-                    });
-
-                    // Rankings Page - separate page for rankings tables
-                    container.Page(rankingsPage =>
-                    {
-                        rankingsPage.Size(PageSizes.A4.Landscape());
-                        rankingsPage.Margin(0.8f, Unit.Centimetre);
-                        rankingsPage.DefaultTextStyle(x => x.FontSize(8));
-
-                        rankingsPage.Header().Column(h =>
-                        {
-                            h.Item().Text("Rankings").FontSize(14).Bold().FontColor(Colors.Blue.Darken2);
-                            h.Item().PaddingTop(3).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                        });
-
-                        rankingsPage.Content().PaddingVertical(8).Column(rankCol =>
-                        {
-                            // Row 1: Final Score and Eval Speed side by side
-                            rankCol.Item().ShowEntire().Row(row1 =>
-                            {
-                                // By Final/Metrics Score
-                                row1.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text($"By {(results.HasJudgmentScoring ? "Final Score" : "Metrics Score")}").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Score").FontColor(headerText).FontSize(7);
-                                        });
-                                        for (int i = 0; i < quantScoresForPdf.Count; i++)
-                                        {
-                                            var q = quantScoresForPdf[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.FinalScore:F1}%").FontColor(GetScoreColor(q.FinalScore)).FontSize(7);
-                                        }
-                                    });
-                                });
-
-                                // By Eval Speed
-                                row1.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Eval Speed").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                            c.ConstantColumn(45);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("tok/s").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("vs Base").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByEval = quantScoresForPdf.OrderByDescending(q => q.EvalTokensPerSecond).ToList();
-                                        for (int i = 0; i < rankByEval.Count; i++)
-                                        {
-                                            var q = rankByEval[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.EvalTokensPerSecond:F1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.EvalPerformancePercent:F0}%").FontColor(GetSpeedColor(q.EvalPerformancePercent)).FontSize(7);
-                                        }
-                                    });
-                                });
-                            });
-
-                            // Row 2: Perplexity and Prompt Speed side by side
-                            rankCol.Item().ShowEntire().PaddingTop(10).Row(row2 =>
-                            {
-                                // By Perplexity Score
-                                row2.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Perplexity Score").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Score").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByPerplexity = quantScoresForPdf.OrderByDescending(q =>
-                                            q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0).ToList();
-                                        for (int i = 0; i < rankByPerplexity.Count; i++)
-                                        {
-                                            var q = rankByPerplexity[i];
-                                            var perplexityScore = q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0;
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{perplexityScore:F1}%").FontColor(GetScoreColor(perplexityScore)).FontSize(7);
-                                        }
-                                    });
-                                });
-
-                                // By Prompt Speed
-                                row2.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Prompt Speed").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                            c.ConstantColumn(45);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("tok/s").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("vs Base").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByPrompt = quantScoresForPdf.OrderByDescending(q => q.PromptTokensPerSecond).ToList();
-                                        for (int i = 0; i < rankByPrompt.Count; i++)
-                                        {
-                                            var q = rankByPrompt[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.PromptTokensPerSecond:F1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.PromptPerformancePercent:F0}%").FontColor(GetSpeedColor(q.PromptPerformancePercent)).FontSize(7);
-                                        }
-                                    });
-                                });
-                            });
-
-                            // Row 3: Best Answers (only if judgment scoring)
-                            if (results.HasJudgmentScoring)
-                            {
-                                rankCol.Item().ShowEntire().PaddingTop(10).Row(row3 =>
-                                {
-                                    row3.RelativeItem().Column(col =>
-                                    {
-                                        col.Item().Text("By Best Answers").FontSize(10).Bold();
-                                        col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                        {
-                                            t.ColumnsDefinition(c =>
-                                            {
-                                                c.ConstantColumn(20);
-                                                c.RelativeColumn(2f);
-                                                c.RelativeColumn(1.5f);
-                                                c.ConstantColumn(50);
-                                            });
-                                            t.Header(h =>
-                                            {
-                                                h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Win %").FontColor(headerText).FontSize(7);
-                                            });
-                                            var rankByBest = quantScoresForPdf.OrderByDescending(q =>
-                                            {
-                                                var total = q.BestCount + q.WorstCount + q.TieCount;
-                                                return total > 0 ? (q.BestCount * 100.0 / total) : 0;
-                                            }).ToList();
-                                            for (int i = 0; i < rankByBest.Count; i++)
-                                            {
-                                                var q = rankByBest[i];
-                                                var total = q.BestCount + q.WorstCount + q.TieCount;
-                                                var winPct = total > 0 ? (q.BestCount * 100.0 / total) : 0;
-                                                var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                                var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                                t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text($"{winPct:F0}%").FontColor(GetScoreColor(winPct)).FontSize(7);
-                                            }
-                                        });
-                                    });
-                                    row3.RelativeItem(); // Empty right side for balance
-                                });
-                            }
-                        });
-
-                        rankingsPage.Footer().AlignCenter().Text(text =>
-                        {
-                            text.Span($"Generated by osync qcview on {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Page ");
-                            text.CurrentPageNumber();
-                            text.Span(" of ");
-                            text.TotalPages();
-                        });
-                    });
-
-                    // Q&A Section - each quantization gets pages for its Q&A (full content, no truncation)
-                    var baseResult = resultsFile.Results.FirstOrDefault(r => r.IsBase);
-
-                    // Helper for safe text display
-                    string SafeText(string? text) => string.IsNullOrEmpty(text) ? "N/A" : text;
-
-                    // All quantizations ordered by score (no filtering)
-                    var resultsForPdf = resultsFile.Results.Where(r => !r.IsBase)
-                        .OrderByDescending(r => quantScoresForPdf.FirstOrDefault(q => q.Tag == r.Tag)?.FinalScore ?? 0);
-
-                    foreach (var quantResult in resultsForPdf)
-                    {
-                        var quantScore = quantScoresForPdf.FirstOrDefault(q => q.Tag == quantResult.Tag);
-
-                        container.Page(qaPage =>
-                        {
-                            qaPage.Size(PageSizes.A4);
-                            qaPage.Margin(1, Unit.Centimetre);
-                            qaPage.DefaultTextStyle(x => x.FontSize(7));
-
-                            qaPage.Header().Column(h =>
-                            {
-                                h.Item().Text($"Q&A: {quantResult.Tag}").FontSize(12).Bold().FontColor(Colors.Blue.Darken2);
-                                if (quantScore != null)
-                                {
-                                    h.Item().Text($"Score: {quantScore.FinalScore:F1}% | {quantScore.EnhancedQuantization ?? quantScore.QuantizationType}").FontSize(9);
-                                }
-                                h.Item().PaddingTop(3).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                            });
-
-                            // Flat layout - each question element added directly to content column
-                            qaPage.Content().PaddingVertical(3).Column(qaCol =>
-                            {
-                                foreach (var question in quantResult.QuestionResults)
-                                {
-                                    var baseQuestion = baseResult?.QuestionResults.FirstOrDefault(q => q.QuestionId == question.QuestionId);
-
-                                    // Question header (simple text, no nesting)
-                                    qaCol.Item().PaddingTop(6).LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
-                                    qaCol.Item().PaddingTop(3).Text($"Q{question.QuestionId}: {SafeText(question.Question)}").Bold().FontSize(8);
-
-                                    // Judgment line (simple text)
-                                    if (question.Judgment != null)
-                                    {
-                                        var bestLabel = question.Judgment.BestAnswer == "B" ? "✓ Quant Better" :
-                                                       question.Judgment.BestAnswer == "A" ? "✗ Base Better" : "= Tied";
-                                        qaCol.Item().PaddingTop(2).Text($"[{bestLabel}] Score: {question.Judgment.Score}%").FontSize(7).FontColor(
-                                            question.Judgment.BestAnswer == "B" ? Colors.Green.Darken1 :
-                                            question.Judgment.BestAnswer == "A" ? Colors.Red.Darken1 : Colors.Orange.Darken1);
-
-                                        if (!string.IsNullOrWhiteSpace(question.Judgment.Reason))
-                                        {
-                                            qaCol.Item().Text($"Reason: {SafeText(question.Judgment.Reason)}").FontSize(6).Italic().FontColor(Colors.Grey.Darken2);
-                                        }
-                                    }
-
-                                    // Base Answer - simplified
-                                    qaCol.Item().PaddingTop(4).Text("Base (A):").Bold().FontSize(7);
-                                    qaCol.Item().Background(Colors.Grey.Lighten4).Padding(3).Text(SafeText(baseQuestion?.Answer)).FontSize(6);
-
-                                    // Quant Answer - simplified
-                                    qaCol.Item().PaddingTop(3).Text("Quant (B):").Bold().FontSize(7);
-                                    qaCol.Item().Background(Colors.Blue.Lighten5).Padding(3).Text(SafeText(question.Answer)).FontSize(6);
-                                }
-                            });
-
-                            qaPage.Footer().AlignCenter().Text(text =>
-                            {
-                                text.Span($"osync qcview | Page ");
-                                text.CurrentPageNumber();
-                                text.Span("/");
-                                text.TotalPages();
-                            });
-                        });
-                    }
-                }).GeneratePdf(outputFile);
-            });
+            await Task.Run(() => GeneratePdfWithIText7(results, resultsFile, outputFile));
 
             var fileInfo = new FileInfo(outputFile);
             AnsiConsole.MarkupLine($"[green]PDF results saved to: {outputFile} ({ByteSize.FromBytes(fileInfo.Length)})[/]");
+        }
+
+        /// <summary>
+        /// Core PDF generation using iText7 (called by both sync and progress methods)
+        /// </summary>
+        private void GeneratePdfWithIText7(QcScoringResults results, QcResultsFile resultsFile, string outputFile, Action<string, int>? progressCallback = null)
+        {
+            // Fonts
+            var normalFont = PdfFontFactory.CreateFont(StandardFonts.HELVETICA);
+            var boldFont = PdfFontFactory.CreateFont(StandardFonts.HELVETICA_BOLD);
+            var codeFont = PdfFontFactory.CreateFont(StandardFonts.COURIER); // Monospace for code/answers
+
+            // Colors
+            var headerBg = new DeviceRgb(30, 58, 138); // Blue
+            var headerText = ColorConstants.WHITE;
+            var altRowBg = new DeviceRgb(243, 244, 246); // Light gray
+            var greenColor = new DeviceRgb(21, 128, 61);
+            var orangeColor = new DeviceRgb(194, 65, 12);
+            var redColor = new DeviceRgb(185, 28, 28);
+            var blueTitle = new DeviceRgb(30, 64, 175);
+            var grayText = new DeviceRgb(107, 114, 128);
+            var lightBlue = new DeviceRgb(239, 246, 255);
+
+            // Helper functions
+            DeviceRgb GetScoreColor(double score) => score >= 80 ? greenColor : score >= 60 ? orangeColor : redColor;
+            DeviceRgb GetSpeedColor(double pct) => pct >= 100 ? greenColor : pct >= 95 ? orangeColor : redColor;
+            string SafeText(string? text) => string.IsNullOrEmpty(text) ? "N/A" : text;
+
+            var quantScoresForPdf = results.QuantScores.OrderByDescending(q => q.FinalScore).ToList();
+            var baseResult = resultsFile.Results.FirstOrDefault(r => r.IsBase);
+
+            using var writer = new PdfWriter(outputFile);
+            using var pdf = new PdfDocument(writer);
+            using var document = new iTextDocument(pdf, PageSize.A4.Rotate());
+            document.SetMargins(23, 23, 23, 23); // ~0.8cm
+
+            progressCallback?.Invoke("Building header...", 5);
+
+            // === PAGE 1: Main Results ===
+            // Compact header - Title and info on same line area
+            document.Add(new iTextParagraph("Quantization Comparison Results")
+                .SetFontSize(14).SetFont(boldFont).SetFontColor(blueTitle).SetMarginBottom(4));
+
+            // Compact header info - single line format
+            var headerParts = new List<string>();
+            headerParts.Add($"Model: {results.BaseModelName}");
+            headerParts.Add($"Family: {results.BaseFamily}");
+            headerParts.Add($"Size: {results.BaseParameterSize}");
+            headerParts.Add($"Test: {results.TestSuiteName} ({results.TotalQuestions}q)");
+            if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
+            {
+                var judgeDisplay = FormatCloudProviderPdf(results.JudgeProvider, results.JudgeApiVersion) is { } badge
+                    ? $"{results.JudgeModel} {badge}" : results.JudgeModel;
+                headerParts.Add($"Judge: {judgeDisplay}");
+
+                // Add BestAnswer judge if different from main judge
+                if (!string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
+                {
+                    var bestJudgeDisplay = FormatCloudProviderPdf(results.JudgeBestProvider, results.JudgeBestApiVersion) is { } bestBadge
+                        ? $"{results.JudgeModelBestAnswer} {bestBadge}" : results.JudgeModelBestAnswer;
+                    headerParts.Add($"Best Judge: {bestJudgeDisplay}");
+                }
+            }
+            document.Add(new iTextParagraph(string.Join(" | ", headerParts))
+                .SetFontSize(8).SetFontColor(grayText));
+
+            // Version info (compact)
+            var versionParts = new List<string>();
+            if (!string.IsNullOrEmpty(results.OsyncVersion)) versionParts.Add($"osync {results.OsyncVersion}");
+            if (!string.IsNullOrEmpty(results.OllamaVersion)) versionParts.Add($"Ollama {results.OllamaVersion}");
+            if (versionParts.Count > 0)
+            {
+                document.Add(new iTextParagraph($"Versions: {string.Join(" | ", versionParts)}")
+                    .SetFontSize(7).SetFontColor(grayText).SetMarginTop(2));
+            }
+
+            // Base info (compact)
+            document.Add(new iTextParagraph($"Base: {results.BaseTag} ({results.BaseQuantizationType}) | {ByteSize.FromBytes(results.BaseDiskSizeBytes)} | Eval: {results.BaseEvalTokensPerSecond:F1} tok/s | Prompt: {results.BasePromptTokensPerSecond:F1} tok/s")
+                .SetFontSize(7).SetMarginTop(4));
+
+            progressCallback?.Invoke("Building main table...", 15);
+
+            // Main Results Table
+            document.Add(new iTextParagraph("Quantization Quality & Performance")
+                .SetFontSize(10).SetFont(boldFont).SetMarginTop(8));
+
+            var numCols = results.HasJudgmentScoring ? 13 : 10;
+            var mainTable = new iTextTable(numCols).UseAllAvailableWidth().SetFontSize(7).SetMarginTop(4);
+
+            // Header row
+            void AddHeader(string text) => mainTable.AddHeaderCell(new iTextCell()
+                .Add(new iTextParagraph(text).SetFont(boldFont).SetFontColor(headerText))
+                .SetBackgroundColor(headerBg).SetPadding(3));
+
+            AddHeader("Tag"); AddHeader("Quant"); AddHeader("Size");
+            if (results.HasJudgmentScoring) { AddHeader("Final"); AddHeader("Metrics"); AddHeader("Judge"); AddHeader("Best Ans"); }
+            else { AddHeader("Score"); }
+            AddHeader("Token"); AddHeader("Logprobs"); AddHeader("Length"); AddHeader("Perplexity"); AddHeader("Eval"); AddHeader("Prompt");
+
+            // Data rows
+            for (int i = 0; i < quantScoresForPdf.Count; i++)
+            {
+                var quant = quantScoresForPdf[i];
+                var bg = i % 2 == 0 ? ColorConstants.WHITE : altRowBg;
+                var quantDisplay = quant.EnhancedQuantization ?? quant.QuantizationType;
+                var tokenScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.TokenSimilarityScore) : 0;
+                var logprobsScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LogprobsDivergenceScore) : 0;
+                var lengthScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LengthConsistencyScore) : 0;
+                var perplexityScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.PerplexityScore) : 0;
+
+                void AddDataCell(string text, iTextColor? color = null) => mainTable.AddCell(new iTextCell()
+                    .Add(new iTextParagraph(text).SetFontColor(color ?? ColorConstants.BLACK))
+                    .SetBackgroundColor(bg).SetPadding(2));
+
+                AddDataCell(quant.Tag); AddDataCell(quantDisplay);
+                AddDataCell(ByteSize.FromBytes(quant.DiskSizeBytes).ToString());
+
+                if (results.HasJudgmentScoring)
+                {
+                    AddDataCell($"{quant.FinalScore:F1}%", GetScoreColor(quant.FinalScore));
+                    AddDataCell($"{quant.TotalConfidenceScore:F1}%", GetScoreColor(quant.TotalConfidenceScore));
+                    var js = quant.AverageJudgmentScore ?? 0;
+                    AddDataCell($"{quant.AverageJudgmentScore?.ToString("F1") ?? "N/A"}%", GetScoreColor(js));
+                    AddDataCell(FormatBestStatsPlain(quant));
+                }
+                else { AddDataCell($"{quant.TotalConfidenceScore:F1}%", GetScoreColor(quant.TotalConfidenceScore)); }
+
+                AddDataCell($"{tokenScore:F1}%", GetScoreColor(tokenScore));
+                AddDataCell($"{logprobsScore:F1}%", GetScoreColor(logprobsScore));
+                AddDataCell($"{lengthScore:F1}%", GetScoreColor(lengthScore));
+                AddDataCell($"{perplexityScore:F1}%", GetScoreColor(perplexityScore));
+                AddDataCell($"{quant.EvalPerformancePercent:F0}%", GetSpeedColor(quant.EvalPerformancePercent));
+                AddDataCell($"{quant.PromptPerformancePercent:F0}%", GetSpeedColor(quant.PromptPerformancePercent));
+            }
+            document.Add(mainTable);
+
+            progressCallback?.Invoke("Building category scores...", 25);
+
+            // Category Scores (if available)
+            if (quantScoresForPdf.Any() && quantScoresForPdf.First().CategoryScores.Any())
+            {
+                var categories = quantScoresForPdf.First().CategoryScores.Keys.ToList();
+                document.Add(new iTextParagraph("Scores by Category").SetFontSize(11).SetFont(boldFont).SetMarginTop(12));
+
+                var catColCount = 1 + categories.Count * (results.HasJudgmentScoring ? 2 : 1);
+                var catTable = new iTextTable(catColCount).UseAllAvailableWidth().SetFontSize(7).SetMarginTop(4);
+
+                catTable.AddHeaderCell(new iTextCell().Add(new iTextParagraph("Tag").SetFont(boldFont).SetFontColor(headerText)).SetBackgroundColor(headerBg).SetPadding(2));
+                foreach (var cat in categories)
+                {
+                    catTable.AddHeaderCell(new iTextCell().Add(new iTextParagraph($"{cat}\nMetrics").SetFont(boldFont).SetFontColor(headerText).SetFontSize(6)).SetBackgroundColor(headerBg).SetPadding(2));
+                    if (results.HasJudgmentScoring)
+                        catTable.AddHeaderCell(new iTextCell().Add(new iTextParagraph($"{cat}\nJudge").SetFont(boldFont).SetFontColor(headerText).SetFontSize(6)).SetBackgroundColor(headerBg).SetPadding(2));
+                }
+
+                for (int i = 0; i < quantScoresForPdf.Count; i++)
+                {
+                    var quant = quantScoresForPdf[i];
+                    var bg = i % 2 == 0 ? ColorConstants.WHITE : altRowBg;
+                    catTable.AddCell(new iTextCell().Add(new iTextParagraph(quant.Tag)).SetBackgroundColor(bg).SetPadding(2));
+                    foreach (var cat in categories)
+                    {
+                        var metricScore = quant.CategoryScores.GetValueOrDefault(cat);
+                        catTable.AddCell(new iTextCell().Add(new iTextParagraph($"{metricScore:F1}%").SetFontColor(GetScoreColor(metricScore))).SetBackgroundColor(bg).SetPadding(2));
+                        if (results.HasJudgmentScoring)
+                        {
+                            var judgeScore = quant.CategoryJudgmentScores.GetValueOrDefault(cat);
+                            catTable.AddCell(new iTextCell().Add(new iTextParagraph($"{judgeScore:F1}%").SetFontColor(GetScoreColor(judgeScore))).SetBackgroundColor(bg).SetPadding(2));
+                        }
+                    }
+                }
+                document.Add(catTable);
+            }
+
+            // Footer for first page
+            document.Add(new iTextParagraph($"Generated by osync qcview on {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
+                .SetFontSize(8).SetTextAlignment(TextAlignment.CENTER).SetMarginTop(15));
+
+            progressCallback?.Invoke("Building rankings...", 35);
+
+            // === PAGE 2: Rankings ===
+            document.Add(new AreaBreak(AreaBreakType.NEXT_PAGE));
+            document.Add(new iTextParagraph("Rankings").SetFontSize(14).SetFont(boldFont).SetFontColor(blueTitle));
+
+            // Rankings tables - wrapped in Div with KeepTogether to prevent page breaks
+            void AddRankingTable(string title, List<(string tag, string quant, string value, DeviceRgb color)> data)
+            {
+                var container = new Div().SetKeepTogether(true);
+                container.Add(new iTextParagraph(title).SetFontSize(10).SetFont(boldFont).SetMarginTop(10));
+                var rt = new iTextTable(4).UseAllAvailableWidth().SetFontSize(7).SetMarginTop(2);
+                rt.AddHeaderCell(new iTextCell().Add(new iTextParagraph("#").SetFont(boldFont).SetFontColor(headerText)).SetBackgroundColor(headerBg).SetPadding(2));
+                rt.AddHeaderCell(new iTextCell().Add(new iTextParagraph("Tag").SetFont(boldFont).SetFontColor(headerText)).SetBackgroundColor(headerBg).SetPadding(2));
+                rt.AddHeaderCell(new iTextCell().Add(new iTextParagraph("Quant").SetFont(boldFont).SetFontColor(headerText)).SetBackgroundColor(headerBg).SetPadding(2));
+                rt.AddHeaderCell(new iTextCell().Add(new iTextParagraph("Score").SetFont(boldFont).SetFontColor(headerText)).SetBackgroundColor(headerBg).SetPadding(2));
+                for (int i = 0; i < data.Count; i++)
+                {
+                    var (tag, quant, value, color) = data[i];
+                    var bg = i % 2 == 0 ? ColorConstants.WHITE : altRowBg;
+                    rt.AddCell(new iTextCell().Add(new iTextParagraph($"{i + 1}")).SetBackgroundColor(bg).SetPadding(2));
+                    rt.AddCell(new iTextCell().Add(new iTextParagraph(tag)).SetBackgroundColor(bg).SetPadding(2));
+                    rt.AddCell(new iTextCell().Add(new iTextParagraph(quant)).SetBackgroundColor(bg).SetPadding(2));
+                    rt.AddCell(new iTextCell().Add(new iTextParagraph(value).SetFontColor(color)).SetBackgroundColor(bg).SetPadding(2));
+                }
+                container.Add(rt);
+                document.Add(container);
+            }
+
+            AddRankingTable($"By {(results.HasJudgmentScoring ? "Final Score" : "Metrics Score")}",
+                quantScoresForPdf.Select(q => (q.Tag, q.EnhancedQuantization ?? q.QuantizationType, $"{q.FinalScore:F1}%", GetScoreColor(q.FinalScore))).ToList());
+
+            AddRankingTable("By Eval Speed",
+                quantScoresForPdf.OrderByDescending(q => q.EvalTokensPerSecond)
+                    .Select(q => (q.Tag, q.EnhancedQuantization ?? q.QuantizationType, $"{q.EvalTokensPerSecond:F1} tok/s", GetSpeedColor(q.EvalPerformancePercent))).ToList());
+
+            AddRankingTable("By Prompt Speed",
+                quantScoresForPdf.OrderByDescending(q => q.PromptTokensPerSecond)
+                    .Select(q => (q.Tag, q.EnhancedQuantization ?? q.QuantizationType, $"{q.PromptTokensPerSecond:F1} tok/s", GetSpeedColor(q.PromptPerformancePercent))).ToList());
+
+            AddRankingTable("By Perplexity Score",
+                quantScoresForPdf.OrderByDescending(q => q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0)
+                    .Select(q => {
+                        var ps = q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0;
+                        return (q.Tag, q.EnhancedQuantization ?? q.QuantizationType, $"{ps:F1}%", GetScoreColor(ps));
+                    }).ToList());
+
+            if (results.HasJudgmentScoring)
+            {
+                AddRankingTable("By Best Answers",
+                    quantScoresForPdf.OrderByDescending(q => { var t = q.BestCount + q.WorstCount + q.TieCount; return t > 0 ? q.BestCount * 100.0 / t : 0; })
+                        .Select(q => {
+                            var t = q.BestCount + q.WorstCount + q.TieCount;
+                            var wp = t > 0 ? q.BestCount * 100.0 / t : 0;
+                            return (q.Tag, q.EnhancedQuantization ?? q.QuantizationType, $"{wp:F0}%", GetScoreColor(wp));
+                        }).ToList());
+            }
+
+            progressCallback?.Invoke("Building Q&A pages...", 45);
+
+            // === Q&A Pages (Portrait orientation) ===
+            var resultsForPdf = resultsFile.Results.Where(r => !r.IsBase)
+                .OrderByDescending(r => quantScoresForPdf.FirstOrDefault(q => q.Tag == r.Tag)?.FinalScore ?? 0).ToList();
+
+            int qaProgress = 0;
+            int qaTotal = resultsForPdf.Count;
+
+            // Set default page size to portrait BEFORE creating Q&A pages
+            pdf.SetDefaultPageSize(PageSize.A4);
+
+            foreach (var quantResult in resultsForPdf)
+            {
+                var quantScore = quantScoresForPdf.FirstOrDefault(q => q.Tag == quantResult.Tag);
+
+                // Add page break - new pages will use the portrait default size
+                document.Add(new AreaBreak(AreaBreakType.NEXT_PAGE));
+
+                document.Add(new iTextParagraph($"Q&A: {quantResult.Tag}").SetFontSize(12).SetFont(boldFont).SetFontColor(blueTitle));
+                if (quantScore != null)
+                    document.Add(new iTextParagraph($"Score: {quantScore.FinalScore:F1}% | {quantScore.EnhancedQuantization ?? quantScore.QuantizationType}").SetFontSize(9));
+
+                foreach (var question in quantResult.QuestionResults)
+                {
+                    var baseQuestion = baseResult?.QuestionResults.FirstOrDefault(q => q.QuestionId == question.QuestionId);
+
+                    // Question header with separator
+                    document.Add(new iTextParagraph($"Q{question.QuestionId}: {SafeText(question.Question)}")
+                        .SetFont(boldFont).SetFontSize(8).SetMarginTop(10).SetBorderTop(new iText.Layout.Borders.SolidBorder(grayText, 0.5f)).SetPaddingTop(4));
+
+                    if (question.Judgment != null)
+                    {
+                        var bestLabel = question.Judgment.BestAnswer == "B" ? "Quant Better" :
+                                        question.Judgment.BestAnswer == "A" ? "Base Better" : "Tied";
+                        var jColor = question.Judgment.BestAnswer == "B" ? greenColor :
+                                     question.Judgment.BestAnswer == "A" ? redColor : orangeColor;
+                        document.Add(new iTextParagraph($"[{bestLabel}] Similarity: {question.Judgment.Score}%")
+                            .SetFontSize(7).SetFontColor(jColor).SetMarginTop(2));
+
+                        // Add Similarity reason if available
+                        if (!string.IsNullOrEmpty(question.Judgment.Reason))
+                        {
+                            document.Add(new iTextParagraph($"Similarity Reason: {question.Judgment.Reason}")
+                                .SetFontSize(6).SetFixedLeading(8).SetFontColor(grayText).SetMarginTop(1));
+                        }
+
+                        // Add BestAnswer reason if available
+                        if (!string.IsNullOrEmpty(question.Judgment.ReasonBestAnswer))
+                        {
+                            document.Add(new iTextParagraph($"Best Answer Reason: {question.Judgment.ReasonBestAnswer}")
+                                .SetFontSize(6).SetFixedLeading(8).SetFontColor(grayText).SetMarginTop(1));
+                        }
+                    }
+
+                    // Base answer with monospace font for code content
+                    document.Add(new iTextParagraph("Base (A):").SetFont(boldFont).SetFontSize(7).SetMarginTop(4));
+                    document.Add(CreateCodeParagraph(SanitizeForPdf(baseQuestion?.Answer), codeFont, 5, 7, altRowBg));
+
+                    // Quant answer with monospace font for code content
+                    document.Add(new iTextParagraph("Quant (B):").SetFont(boldFont).SetFontSize(7).SetMarginTop(3));
+                    document.Add(CreateCodeParagraph(SanitizeForPdf(question.Answer), codeFont, 5, 7, lightBlue));
+                }
+
+                qaProgress++;
+                progressCallback?.Invoke($"Building Q&A pages ({qaProgress}/{qaTotal})...", 45 + (qaProgress * 45 / qaTotal));
+            }
+
+            progressCallback?.Invoke("Finalizing...", 95);
+        }
+
+        /// <summary>
+        /// Create a simple info cell for the header table
+        /// </summary>
+        private static iTextCell CreateInfoCell(string text, PdfFont? boldFont = null)
+        {
+            var para = new iTextParagraph(text);
+            if (boldFont != null) para.SetFont(boldFont);
+            return new iTextCell().Add(para).SetBorder(iText.Layout.Borders.Border.NO_BORDER);
         }
 
         /// <summary>
@@ -2137,591 +1955,34 @@ namespace osync
         /// </summary>
         private async Task OutputPdfWithProgressAsync(QcScoringResults results, QcResultsFile resultsFile, ProgressTask progressTask)
         {
-            // Set QuestPDF license for community use
-            QuestPDF.Settings.License = LicenseType.Community;
-
             var outputFile = _args.OutputFile;
             if (string.IsNullOrWhiteSpace(outputFile))
             {
                 outputFile = Path.ChangeExtension(_args.FileName, ".pdf");
             }
 
-            // Colors
-            var headerBg = Colors.Blue.Darken3;
-            var headerText = Colors.White;
-            var altRowBg = Colors.Grey.Lighten4;
+            // Note: File access check is done BEFORE progress bar starts in ExecuteAsync
+            // to avoid concurrent interactive display errors
 
-            // Helper function for score colors
-            QuestPDF.Infrastructure.Color GetScoreColor(double score) => score >= 80 ? Colors.Green.Darken1 : score >= 60 ? Colors.Orange.Darken1 : Colors.Red.Darken1;
-
-            // Helper function for speed performance colors (>= 100% green, >= 95% orange, < 95% red)
-            QuestPDF.Infrastructure.Color GetSpeedColor(double performancePercent) => performancePercent >= 100 ? Colors.Green.Darken1 : performancePercent >= 95 ? Colors.Orange.Darken1 : Colors.Red.Darken1;
-
-            // Sort quantizations by FinalScore for all PDF sections
-            var quantScoresForPdf = results.QuantScores.OrderByDescending(q => q.FinalScore).ToList();
-
-            // Get base result for Q&A comparison
-            var baseResult = resultsFile.Results.FirstOrDefault(r => r.IsBase);
-
-            progressTask.Description = "[cyan]Generating main tables...[/]";
+            progressTask.Description = "[cyan]Preparing PDF document...[/]";
             progressTask.Increment(5);
 
             await Task.Run(() =>
             {
-                // Helper for safe text display
-                string SafeText(string? text) => string.IsNullOrEmpty(text) ? "N/A" : text;
-
-                Document.Create(container =>
+                GeneratePdfWithIText7(results, resultsFile, outputFile, (description, progress) =>
                 {
-                    // Main page with tables
-                    container.Page(page =>
-                    {
-                        page.Size(PageSizes.A4.Landscape());
-                        page.Margin(0.8f, Unit.Centimetre);
-                        page.DefaultTextStyle(x => x.FontSize(8));
-
-                        page.Header().Element(header =>
-                        {
-                            header.Column(col =>
-                            {
-                                col.Item().Text("Quantization Comparison Results").FontSize(18).Bold().FontColor(Colors.Blue.Darken2);
-                                col.Item().PaddingTop(8).Table(infoTable =>
-                                {
-                                    infoTable.ColumnsDefinition(c =>
-                                    {
-                                        c.ConstantColumn(60);
-                                        c.RelativeColumn(2);
-                                        c.ConstantColumn(60);
-                                        c.RelativeColumn(2);
-                                        c.ConstantColumn(50);
-                                        c.RelativeColumn(1);
-                                    });
-                                    infoTable.Cell().Text("Model:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseModelName).FontSize(9);
-                                    infoTable.Cell().Text("Family:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseFamily).FontSize(9);
-                                    infoTable.Cell().Text("Size:").Bold().FontSize(9);
-                                    infoTable.Cell().Text(results.BaseParameterSize).FontSize(9);
-                                    infoTable.Cell().Text("Test Suite:").Bold().FontSize(9);
-                                    infoTable.Cell().Text($"{results.TestSuiteName} ({results.TotalQuestions} questions)").FontSize(9);
-                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModel))
-                                    {
-                                        infoTable.Cell().Text("Judge:").Bold().FontSize(9);
-                                        infoTable.Cell().Text(results.JudgeModel).FontSize(9);
-                                    }
-                                    else
-                                    {
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                    }
-                                    infoTable.Cell().Text("");
-                                    infoTable.Cell().Text("");
-
-                                    // Row 3: Best Answer Judge (if different) and empty cells
-                                    if (results.HasJudgmentScoring && !string.IsNullOrEmpty(results.JudgeModelBestAnswer) && results.JudgeModelBestAnswer != results.JudgeModel)
-                                    {
-                                        infoTable.Cell().Text("Best Judge:").Bold().FontSize(9);
-                                        infoTable.Cell().Text(results.JudgeModelBestAnswer).FontSize(9);
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                        infoTable.Cell().Text("");
-                                    }
-                                });
-                                if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
-                                {
-                                    col.Item().PaddingTop(3).Row(r =>
-                                    {
-                                        r.ConstantItem(60).Text("Repository:").Bold().FontSize(8);
-                                        r.RelativeItem().Text(results.RepositoryUrl).FontSize(8).FontColor(Colors.Grey.Darken1);
-                                    });
-                                }
-
-                                // Version information
-                                var pdfVersionPartsProgress = new List<string>();
-                                if (!string.IsNullOrEmpty(results.OsyncVersion))
-                                    pdfVersionPartsProgress.Add($"osync {results.OsyncVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaVersion))
-                                    pdfVersionPartsProgress.Add($"Ollama {results.OllamaVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaJudgeVersion) && results.OllamaJudgeVersion != results.OllamaVersion)
-                                    pdfVersionPartsProgress.Add($"Judge Ollama {results.OllamaJudgeVersion}");
-                                if (!string.IsNullOrEmpty(results.OllamaJudgeBestAnswerVersion) && results.OllamaJudgeBestAnswerVersion != results.OllamaJudgeVersion)
-                                    pdfVersionPartsProgress.Add($"Best Judge Ollama {results.OllamaJudgeBestAnswerVersion}");
-                                if (pdfVersionPartsProgress.Count > 0)
-                                {
-                                    col.Item().PaddingTop(3).Row(r =>
-                                    {
-                                        r.ConstantItem(60).Text("Versions:").Bold().FontSize(8);
-                                        r.RelativeItem().Text(string.Join(" | ", pdfVersionPartsProgress)).FontSize(8).FontColor(Colors.Grey.Darken1);
-                                    });
-                                }
-
-                                col.Item().PaddingTop(5).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                            });
-                        });
-
-                        page.Content().Element(content =>
-                        {
-                            content.PaddingVertical(8).Column(col =>
-                            {
-                                col.Item().Row(row =>
-                                {
-                                    row.RelativeItem().Text(text =>
-                                    {
-                                        text.Span("Base Quantization: ").Bold().FontSize(10);
-                                        text.Span(results.BaseTag).FontSize(10);
-                                    });
-                                });
-                                col.Item().PaddingBottom(5).Text($"Type: {results.BaseQuantizationType} | Size: {ByteSize.FromBytes(results.BaseDiskSizeBytes)} | Eval: {results.BaseEvalTokensPerSecond:F1} tok/s | Prompt: {results.BasePromptTokensPerSecond:F1} tok/s").FontSize(8);
-
-                                // Main Results Table
-                                col.Item().PaddingTop(8).Text("Quantization Quality & Performance").FontSize(11).Bold();
-                                col.Item().PaddingTop(4).Table(table =>
-                                {
-                                    table.ColumnsDefinition(columns =>
-                                    {
-                                        columns.RelativeColumn(1.8f);
-                                        columns.RelativeColumn(2.2f);
-                                        columns.RelativeColumn(1.1f);
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            columns.RelativeColumn(0.9f);
-                                            columns.RelativeColumn(0.9f);
-                                            columns.RelativeColumn(0.9f);
-                                            columns.RelativeColumn(1.8f);
-                                        }
-                                        else
-                                        {
-                                            columns.RelativeColumn(0.9f);
-                                        }
-                                        columns.RelativeColumn(0.9f);
-                                        columns.RelativeColumn(0.9f);
-                                        columns.RelativeColumn(0.9f);
-                                        columns.RelativeColumn(0.9f);
-                                        columns.RelativeColumn(0.8f);
-                                        columns.RelativeColumn(0.8f);
-                                    });
-
-                                    table.Header(header =>
-                                    {
-                                        header.Cell().Background(headerBg).Padding(3).Text("Tag").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Quant").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Size").FontColor(headerText).Bold().FontSize(7);
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            header.Cell().Background(headerBg).Padding(3).Text("Final").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Metrics").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Judge").FontColor(headerText).Bold().FontSize(7);
-                                            header.Cell().Background(headerBg).Padding(3).Text("Best Ans").FontColor(headerText).Bold().FontSize(7);
-                                        }
-                                        else
-                                        {
-                                            header.Cell().Background(headerBg).Padding(3).Text("Score").FontColor(headerText).Bold().FontSize(7);
-                                        }
-                                        header.Cell().Background(headerBg).Padding(3).Text("Token").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Logprobs").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Length").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Perplexity").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Eval").FontColor(headerText).Bold().FontSize(7);
-                                        header.Cell().Background(headerBg).Padding(3).Text("Prompt").FontColor(headerText).Bold().FontSize(7);
-                                    });
-
-                                    int rowIndex = 0;
-                                    foreach (var quant in quantScoresForPdf)
-                                    {
-                                        var rowBg = rowIndex % 2 == 0 ? Colors.White : altRowBg;
-                                        var quantDisplay = quant.EnhancedQuantization ?? quant.QuantizationType;
-                                        var tokenScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.TokenSimilarityScore) : 0;
-                                        var logprobsScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LogprobsDivergenceScore) : 0;
-                                        var lengthScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.LengthConsistencyScore) : 0;
-                                        var perplexityScore = quant.QuestionScores?.Count > 0 ? quant.QuestionScores.Average(q => q.PerplexityScore) : 0;
-
-                                        table.Cell().Background(rowBg).Padding(2).Text(quant.Tag).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text(quantDisplay).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text(ByteSize.FromBytes(quant.DiskSizeBytes).ToString()).FontSize(7);
-
-                                        if (results.HasJudgmentScoring)
-                                        {
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.FinalScore:F1}%").FontColor(GetScoreColor(quant.FinalScore)).FontSize(7);
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.TotalConfidenceScore:F1}%").FontColor(GetScoreColor(quant.TotalConfidenceScore)).FontSize(7);
-                                            var judgeScore = quant.AverageJudgmentScore ?? 0;
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.AverageJudgmentScore?.ToString("F1") ?? "N/A"}%").FontColor(GetScoreColor(judgeScore)).FontSize(7);
-                                            table.Cell().Background(rowBg).Padding(2).Text(FormatBestStatsPlain(quant)).FontSize(7);
-                                        }
-                                        else
-                                        {
-                                            table.Cell().Background(rowBg).Padding(2).Text($"{quant.TotalConfidenceScore:F1}%").FontColor(GetScoreColor(quant.TotalConfidenceScore)).FontSize(7);
-                                        }
-
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{tokenScore:F1}%").FontColor(GetScoreColor(tokenScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{logprobsScore:F1}%").FontColor(GetScoreColor(logprobsScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{lengthScore:F1}%").FontColor(GetScoreColor(lengthScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{perplexityScore:F1}%").FontColor(GetScoreColor(perplexityScore)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{quant.EvalPerformancePercent:F0}%").FontColor(GetSpeedColor(quant.EvalPerformancePercent)).FontSize(7);
-                                        table.Cell().Background(rowBg).Padding(2).Text($"{quant.PromptPerformancePercent:F0}%").FontColor(GetSpeedColor(quant.PromptPerformancePercent)).FontSize(7);
-
-                                        rowIndex++;
-                                    }
-                                });
-
-                                // Category Scores Section - use ShowEntire to prevent page break within section
-                                if (quantScoresForPdf.Any() && quantScoresForPdf.First().CategoryScores.Any())
-                                {
-                                    col.Item().ShowEntire().Column(catSection =>
-                                    {
-                                        catSection.Item().PaddingTop(12).Text("Scores by Category").FontSize(11).Bold();
-                                        catSection.Item().PaddingTop(4).Table(catTable =>
-                                        {
-                                            var categories = quantScoresForPdf.First().CategoryScores.Keys.ToList();
-
-                                            catTable.ColumnsDefinition(c =>
-                                            {
-                                                c.RelativeColumn(2f);
-                                            foreach (var _ in categories)
-                                            {
-                                                c.RelativeColumn(1f);
-                                                if (results.HasJudgmentScoring)
-                                                    c.RelativeColumn(1f);
-                                            }
-                                        });
-
-                                        catTable.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).Bold().FontSize(7);
-                                            foreach (var cat in categories)
-                                            {
-                                                h.Cell().Background(headerBg).Padding(2).Text($"{cat}\nMetrics").FontColor(headerText).Bold().FontSize(6);
-                                                if (results.HasJudgmentScoring)
-                                                    h.Cell().Background(headerBg).Padding(2).Text($"{cat}\nJudge").FontColor(headerText).Bold().FontSize(6);
-                                            }
-                                        });
-
-                                        int catRowIndex = 0;
-                                        foreach (var quant in quantScoresForPdf)
-                                        {
-                                            var rowBg = catRowIndex % 2 == 0 ? Colors.White : altRowBg;
-                                            catTable.Cell().Background(rowBg).Padding(2).Text(quant.Tag).FontSize(7);
-
-                                            foreach (var cat in categories)
-                                            {
-                                                var metricScore = quant.CategoryScores.GetValueOrDefault(cat);
-                                                catTable.Cell().Background(rowBg).Padding(2).Text($"{metricScore:F1}%").FontColor(GetScoreColor(metricScore)).FontSize(7);
-
-                                                if (results.HasJudgmentScoring)
-                                                {
-                                                    var judgeCatScore = quant.CategoryJudgmentScores.GetValueOrDefault(cat);
-                                                    catTable.Cell().Background(rowBg).Padding(2).Text($"{judgeCatScore:F1}%").FontColor(GetScoreColor(judgeCatScore)).FontSize(7);
-                                                }
-                                            }
-                                            catRowIndex++;
-                                        }
-                                        });
-                                    });
-                                }
-                            });
-                        });
-
-                        page.Footer().AlignCenter().Text(text =>
-                        {
-                            text.Span($"Generated by osync qcview on {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Page ");
-                            text.CurrentPageNumber();
-                            text.Span(" of ");
-                            text.TotalPages();
-                        });
-                    });
-
-                    // Rankings Page
-                    container.Page(rankingsPage =>
-                    {
-                        rankingsPage.Size(PageSizes.A4.Landscape());
-                        rankingsPage.Margin(0.8f, Unit.Centimetre);
-                        rankingsPage.DefaultTextStyle(x => x.FontSize(8));
-
-                        rankingsPage.Header().Column(h =>
-                        {
-                            h.Item().Text("Rankings").FontSize(14).Bold().FontColor(Colors.Blue.Darken2);
-                            h.Item().PaddingTop(3).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                        });
-
-                        rankingsPage.Content().PaddingVertical(8).Column(rankCol =>
-                        {
-                            // Row 1: Final Score and Eval Speed side by side
-                            rankCol.Item().ShowEntire().Row(row1 =>
-                            {
-                                // By Final/Metrics Score
-                                row1.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text($"By {(results.HasJudgmentScoring ? "Final Score" : "Metrics Score")}").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Score").FontColor(headerText).FontSize(7);
-                                        });
-                                        for (int i = 0; i < quantScoresForPdf.Count; i++)
-                                        {
-                                            var q = quantScoresForPdf[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.FinalScore:F1}%").FontColor(GetScoreColor(q.FinalScore)).FontSize(7);
-                                        }
-                                    });
-                                });
-
-                                // By Eval Speed
-                                row1.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Eval Speed").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                            c.ConstantColumn(45);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("tok/s").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("vs Base").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByEval = quantScoresForPdf.OrderByDescending(q => q.EvalTokensPerSecond).ToList();
-                                        for (int i = 0; i < rankByEval.Count; i++)
-                                        {
-                                            var q = rankByEval[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.EvalTokensPerSecond:F1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.EvalPerformancePercent:F0}%").FontColor(GetSpeedColor(q.EvalPerformancePercent)).FontSize(7);
-                                        }
-                                    });
-                                });
-                            });
-
-                            // Row 2: Perplexity and Prompt Speed side by side
-                            rankCol.Item().ShowEntire().PaddingTop(10).Row(row2 =>
-                            {
-                                // By Perplexity Score
-                                row2.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Perplexity Score").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Score").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByPerplexity = quantScoresForPdf.OrderByDescending(q =>
-                                            q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0).ToList();
-                                        for (int i = 0; i < rankByPerplexity.Count; i++)
-                                        {
-                                            var q = rankByPerplexity[i];
-                                            var perplexityScore = q.QuestionScores?.Count > 0 ? q.QuestionScores.Average(qs => qs.PerplexityScore) : 0;
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{perplexityScore:F1}%").FontColor(GetScoreColor(perplexityScore)).FontSize(7);
-                                        }
-                                    });
-                                });
-
-                                // By Prompt Speed
-                                row2.RelativeItem().Column(col =>
-                                {
-                                    col.Item().Text("By Prompt Speed").FontSize(10).Bold();
-                                    col.Item().PaddingTop(2).Table(t =>
-                                    {
-                                        t.ColumnsDefinition(c =>
-                                        {
-                                            c.ConstantColumn(20);
-                                            c.RelativeColumn(2f);
-                                            c.RelativeColumn(1.5f);
-                                            c.ConstantColumn(50);
-                                            c.ConstantColumn(45);
-                                        });
-                                        t.Header(h =>
-                                        {
-                                            h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("tok/s").FontColor(headerText).FontSize(7);
-                                            h.Cell().Background(headerBg).Padding(2).Text("vs Base").FontColor(headerText).FontSize(7);
-                                        });
-                                        var rankByPrompt = quantScoresForPdf.OrderByDescending(q => q.PromptTokensPerSecond).ToList();
-                                        for (int i = 0; i < rankByPrompt.Count; i++)
-                                        {
-                                            var q = rankByPrompt[i];
-                                            var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                            var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                            t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.PromptTokensPerSecond:F1}").FontSize(7);
-                                            t.Cell().Background(bg).Padding(2).Text($"{q.PromptPerformancePercent:F0}%").FontColor(GetSpeedColor(q.PromptPerformancePercent)).FontSize(7);
-                                        }
-                                    });
-                                });
-                            });
-
-                            // Row 3: Best Answers (only if judgment scoring)
-                            if (results.HasJudgmentScoring)
-                            {
-                                rankCol.Item().ShowEntire().PaddingTop(10).Row(row3 =>
-                                {
-                                    row3.RelativeItem().Column(col =>
-                                    {
-                                        col.Item().Text("By Best Answers").FontSize(10).Bold();
-                                        col.Item().PaddingTop(2).PaddingRight(10).Table(t =>
-                                        {
-                                            t.ColumnsDefinition(c =>
-                                            {
-                                                c.ConstantColumn(20);
-                                                c.RelativeColumn(2f);
-                                                c.RelativeColumn(1.5f);
-                                                c.ConstantColumn(50);
-                                            });
-                                            t.Header(h =>
-                                            {
-                                                h.Cell().Background(headerBg).Padding(2).Text("#").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Tag").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Quant").FontColor(headerText).FontSize(7);
-                                                h.Cell().Background(headerBg).Padding(2).Text("Win %").FontColor(headerText).FontSize(7);
-                                            });
-                                            var rankByBest = quantScoresForPdf.OrderByDescending(q =>
-                                            {
-                                                var total = q.BestCount + q.WorstCount + q.TieCount;
-                                                return total > 0 ? (q.BestCount * 100.0 / total) : 0;
-                                            }).ToList();
-                                            for (int i = 0; i < rankByBest.Count; i++)
-                                            {
-                                                var q = rankByBest[i];
-                                                var total = q.BestCount + q.WorstCount + q.TieCount;
-                                                var winPct = total > 0 ? (q.BestCount * 100.0 / total) : 0;
-                                                var bg = i % 2 == 0 ? Colors.White : altRowBg;
-                                                var quantDisplay = q.EnhancedQuantization ?? q.QuantizationType;
-                                                t.Cell().Background(bg).Padding(2).Text($"{i + 1}").FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text(q.Tag).FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text(quantDisplay).FontSize(7);
-                                                t.Cell().Background(bg).Padding(2).Text($"{winPct:F0}%").FontColor(GetScoreColor(winPct)).FontSize(7);
-                                            }
-                                        });
-                                    });
-                                    row3.RelativeItem(); // Empty right side for balance
-                                });
-                            }
-                        });
-
-                        rankingsPage.Footer().AlignCenter().Text(text =>
-                        {
-                            text.Span($"Generated by osync qcview on {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Page ");
-                            text.CurrentPageNumber();
-                            text.Span(" of ");
-                            text.TotalPages();
-                        });
-                    });
-
-                    // Q&A Pages
-                    var resultsForQA = resultsFile.Results.Where(r => !r.IsBase)
-                        .OrderByDescending(r => quantScoresForPdf.FirstOrDefault(q => q.Tag == r.Tag)?.FinalScore ?? 0);
-
-                    foreach (var quantResult in resultsForQA)
-                    {
-                        var quantScore = quantScoresForPdf.FirstOrDefault(q => q.Tag == quantResult.Tag);
-
-                        container.Page(qaPage =>
-                        {
-                            qaPage.Size(PageSizes.A4);
-                            qaPage.Margin(1, Unit.Centimetre);
-                            qaPage.DefaultTextStyle(x => x.FontSize(7));
-
-                            qaPage.Header().Column(h =>
-                            {
-                                h.Item().Text($"Q&A: {quantResult.Tag}").FontSize(12).Bold().FontColor(Colors.Blue.Darken2);
-                                if (quantScore != null)
-                                {
-                                    h.Item().Text($"Score: {quantScore.FinalScore:F1}% | {quantScore.EnhancedQuantization ?? quantScore.QuantizationType}").FontSize(9);
-                                }
-                                h.Item().PaddingTop(3).LineHorizontal(1).LineColor(Colors.Grey.Medium);
-                            });
-
-                            qaPage.Content().PaddingVertical(3).Column(qaCol =>
-                            {
-                                foreach (var question in quantResult.QuestionResults)
-                                {
-                                    var baseQuestion = baseResult?.QuestionResults.FirstOrDefault(q => q.QuestionId == question.QuestionId);
-
-                                    qaCol.Item().PaddingTop(6).LineHorizontal(0.5f).LineColor(Colors.Grey.Lighten2);
-                                    qaCol.Item().PaddingTop(3).Text($"Q{question.QuestionId}: {SafeText(question.Question)}").Bold().FontSize(8);
-
-                                    if (question.Judgment != null)
-                                    {
-                                        var bestLabel = question.Judgment.BestAnswer == "B" ? "✓ Quant Better" :
-                                                       question.Judgment.BestAnswer == "A" ? "✗ Base Better" : "= Tied";
-                                        qaCol.Item().PaddingTop(2).Text($"[{bestLabel}] Score: {question.Judgment.Score}%").FontSize(7).FontColor(
-                                            question.Judgment.BestAnswer == "B" ? Colors.Green.Darken1 :
-                                            question.Judgment.BestAnswer == "A" ? Colors.Red.Darken1 : Colors.Orange.Darken1);
-
-                                        if (!string.IsNullOrWhiteSpace(question.Judgment.Reason))
-                                        {
-                                            qaCol.Item().Text($"Reason: {SafeText(question.Judgment.Reason)}").FontSize(6).Italic().FontColor(Colors.Grey.Darken2);
-                                        }
-                                    }
-
-                                    qaCol.Item().PaddingTop(4).Text("Base (A):").Bold().FontSize(7);
-                                    qaCol.Item().Background(Colors.Grey.Lighten4).Padding(3).Text(SafeText(baseQuestion?.Answer)).FontSize(6);
-
-                                    qaCol.Item().PaddingTop(3).Text("Quant (B):").Bold().FontSize(7);
-                                    qaCol.Item().Background(Colors.Blue.Lighten5).Padding(3).Text(SafeText(question.Answer)).FontSize(6);
-                                }
-                            });
-
-                            qaPage.Footer().AlignCenter().Text(text =>
-                            {
-                                text.Span($"osync qcview | Page ");
-                                text.CurrentPageNumber();
-                                text.Span("/");
-                                text.TotalPages();
-                            });
-                        });
-                    }
-                }).GeneratePdf(outputFile);
+                    progressTask.Description = $"[cyan]{description}[/]";
+                    // Map 0-100 progress to 5-95 range (we already did 5 at start, 95-100 is for finalization)
+                    progressTask.Value = 5 + (progress * 90 / 100);
+                });
             });
+
+            progressTask.Description = "[cyan]Finalizing...[/]";
+            progressTask.Value = 95;
 
             var fileInfo = new FileInfo(outputFile);
             progressTask.Description = $"[green]PDF saved: {ByteSize.FromBytes(fileInfo.Length)}[/]";
+            progressTask.Value = 100;
         }
 
         private static string EscapeHtml(string text)
@@ -2752,6 +2013,208 @@ namespace osync
             var color = bestPercent >= 60 ? "#28a745" : bestPercent >= 40 ? "#ffc107" : "#dc3545";
 
             return $"<span style=\"color:{color};font-weight:bold\">{bestPercent:F0}%</span> <small>(B:{quant.BestCount} A:{quant.WorstCount} =:{quant.TieCount})</small>";
+        }
+
+        /// <summary>
+        /// Format cloud provider display for HTML output.
+        /// Returns null if provider is ollama or not set (backward compatibility).
+        /// </summary>
+        private static string? FormatCloudProviderHtml(string? provider, string? apiVersion)
+        {
+            if (string.IsNullOrEmpty(provider) || provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var versionPart = string.IsNullOrEmpty(apiVersion) ? "" : $" {EscapeHtml(apiVersion)}";
+            return $"<span class=\"cloud-provider-badge\">[Cloud: {EscapeHtml(provider)}{versionPart}]</span>";
+        }
+
+        /// <summary>
+        /// Format cloud provider display for console/Spectre output.
+        /// Returns null if provider is ollama or not set (backward compatibility).
+        /// </summary>
+        private static string? FormatCloudProviderConsole(string? provider, string? apiVersion)
+        {
+            if (string.IsNullOrEmpty(provider) || provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var versionPart = string.IsNullOrEmpty(apiVersion) ? "" : $" {apiVersion}";
+            return $"[dim][[Cloud: {Markup.Escape(provider)}{Markup.Escape(versionPart)}]][/]";
+        }
+
+        /// <summary>
+        /// Format cloud provider display for markdown output.
+        /// Returns null if provider is ollama or not set (backward compatibility).
+        /// </summary>
+        private static string? FormatCloudProviderMarkdown(string? provider, string? apiVersion)
+        {
+            if (string.IsNullOrEmpty(provider) || provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var versionPart = string.IsNullOrEmpty(apiVersion) ? "" : $" {apiVersion}";
+            return $"*[Cloud: {provider}{versionPart}]*";
+        }
+
+        /// <summary>
+        /// Sanitize text for PDF rendering.
+        /// Replaces characters that standard PDF fonts can't handle with safe equivalents.
+        /// Also escapes % characters which can cause rendering issues in iText7.
+        /// </summary>
+        private static string SanitizeForPdf(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return "N/A";
+
+            var sb = new StringBuilder(text.Length);
+            foreach (var c in text)
+            {
+                // Keep standard ASCII printable characters (32-126), newlines, and tabs
+                if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t')
+                {
+                    sb.Append(c);
+                }
+                else if (c >= 128)
+                {
+                    // Replace non-ASCII with closest ASCII equivalent or placeholder
+                    var replacement = c switch
+                    {
+                        '\u2018' or '\u2019' => '\'', // Smart quotes
+                        '\u201C' or '\u201D' => '"',  // Smart double quotes
+                        '\u2013' or '\u2014' => '-',  // En/em dash
+                        '\u2026' => '.',              // Ellipsis
+                        '\u00A0' => ' ',              // Non-breaking space
+                        '\u00B0' => 'o',              // Degree symbol
+                        '\u00D7' => 'x',              // Multiplication sign
+                        '\u2022' => '*',              // Bullet
+                        '\u2192' => '>',              // Right arrow
+                        '\u2190' => '<',              // Left arrow
+                        '\u2264' => '<',              // Less than or equal
+                        '\u2265' => '>',              // Greater than or equal
+                        '\u2260' => '!',              // Not equal
+                        '\u221E' => '~',              // Infinity
+                        _ => '?'                      // Unknown character
+                    };
+                    sb.Append(replacement);
+                }
+                // Skip control characters (0-31 except newline/tab)
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Create a paragraph for code/answer content with proper text handling.
+        /// Uses explicit Text elements and disables problematic text features.
+        /// </summary>
+        private static iTextParagraph CreateCodeParagraph(string text, PdfFont font, float fontSize, float leading, iTextColor bgColor)
+        {
+            var para = new iTextParagraph()
+                .SetFont(font)
+                .SetFontSize(fontSize)
+                .SetFixedLeading(leading)
+                .SetBackgroundColor(bgColor)
+                .SetPadding(4)
+                .SetMarginBottom(2);
+
+            // Add text line by line to avoid text processing issues
+            var lines = text.Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (i > 0)
+                {
+                    para.Add("\n");
+                }
+                // Add each line as a separate Text element to prevent reordering
+                para.Add(new iText.Layout.Element.Text(lines[i]));
+            }
+
+            return para;
+        }
+
+        /// <summary>
+        /// Format cloud provider display for PDF output.
+        /// Returns null if provider is ollama or not set (backward compatibility).
+        /// </summary>
+        private static string? FormatCloudProviderPdf(string? provider, string? apiVersion)
+        {
+            if (string.IsNullOrEmpty(provider) || provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var versionPart = string.IsNullOrEmpty(apiVersion) ? "" : $" {apiVersion}";
+            return $"[Cloud: {provider}{versionPart}]";
+        }
+
+        /// <summary>
+        /// Check if output file can be written, handling overwrite confirmation and file lock retry.
+        /// Returns true if file can be written, false if user cancelled.
+        /// </summary>
+        private static bool CheckOutputFileAccess(string filePath)
+        {
+            // Check if file exists and prompt for overwrite
+            if (File.Exists(filePath))
+            {
+                if (!AnsiConsole.Confirm($"[yellow]Output file already exists:[/] {filePath}\n[yellow]Overwrite?[/]", defaultValue: false))
+                {
+                    AnsiConsole.MarkupLine("[dim]Operation cancelled.[/]");
+                    return false;
+                }
+            }
+
+            // Try to ensure the file can be written (check for locks)
+            return TryAccessFile(filePath);
+        }
+
+        /// <summary>
+        /// Try to access a file for writing, with retry option if locked.
+        /// </summary>
+        private static bool TryAccessFile(string filePath)
+        {
+            while (true)
+            {
+                try
+                {
+                    // Try to open the file for writing to check if it's locked
+                    if (File.Exists(filePath))
+                    {
+                        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Write, FileShare.None);
+                        // File is accessible, close it
+                    }
+                    return true;
+                }
+                catch (IOException ex) when (IsFileLocked(ex))
+                {
+                    AnsiConsole.MarkupLine($"[red]Error: File is locked by another process:[/] {filePath}");
+                    if (!AnsiConsole.Confirm("[yellow]Retry?[/]", defaultValue: true))
+                    {
+                        AnsiConsole.MarkupLine("[dim]Operation cancelled.[/]");
+                        return false;
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    AnsiConsole.MarkupLine($"[red]Error: Access denied to file:[/] {filePath}");
+                    if (!AnsiConsole.Confirm("[yellow]Retry?[/]", defaultValue: true))
+                    {
+                        AnsiConsole.MarkupLine("[dim]Operation cancelled.[/]");
+                        return false;
+                    }
+                }
+                catch
+                {
+                    // File doesn't exist or other error - can proceed
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Check if an IOException is due to file being locked
+        /// </summary>
+        private static bool IsFileLocked(IOException ex)
+        {
+            // Common HRESULT values for file lock errors
+            const int ERROR_SHARING_VIOLATION = unchecked((int)0x80070020);
+            const int ERROR_LOCK_VIOLATION = unchecked((int)0x80070021);
+
+            var hResult = ex.HResult;
+            return hResult == ERROR_SHARING_VIOLATION || hResult == ERROR_LOCK_VIOLATION;
         }
     }
 }

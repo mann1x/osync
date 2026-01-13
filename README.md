@@ -615,6 +615,50 @@ When `--judgebest` is specified:
 - Results store `JudgeModelBestAnswer`, `ReasonBestAnswer`, and `JudgedBestAnswerAt` timestamps
 - QcView outputs show both judge models when different
 
+**Cloud Provider Support:**
+
+Use cloud AI providers (Anthropic Claude, OpenAI, etc.) as judge models with the `@provider/model` syntax:
+
+```bash
+# Using environment variable for API key
+osync qc -M llama3.2 -Q q4_k_m --judge @claude/claude-sonnet-4-20250514
+osync qc -M llama3.2 -Q q4_k_m --judge @openai/gpt-4o
+
+# Using explicit API key
+osync qc -M llama3.2 -Q q4_k_m --judge @claude:sk-ant-xxx/claude-sonnet-4
+
+# Azure OpenAI (key@endpoint format)
+osync qc -M llama3.2 -Q q4_k_m --judge @azure:mykey@myendpoint.openai.azure.com/gpt4-deployment
+
+# Mixed: cloud judge with ollama best answer judge
+osync qc -M llama3.2 -Q q4_k_m --judge @claude/claude-sonnet-4 --judgebest llama3.2:latest
+
+# Both judges from cloud providers
+osync qc -M llama3.2 -Q q4_k_m --judge @openai/gpt-4o --judgebest @claude/claude-opus-4
+```
+
+Supported cloud providers and their environment variables:
+
+| Provider | Syntax | Environment Variable |
+|----------|--------|---------------------|
+| Anthropic Claude | `@claude/model` | `ANTHROPIC_API_KEY` |
+| OpenAI | `@openai/model` | `OPENAI_API_KEY` |
+| Google Gemini | `@gemini/model` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| Azure OpenAI | `@azure/deployment` | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT` |
+| Mistral AI | `@mistral/model` | `MISTRAL_API_KEY` |
+| Cohere | `@cohere/model` | `CO_API_KEY` or `COHERE_API_KEY` |
+| Together AI | `@together/model` | `TOGETHER_API_KEY` |
+| HuggingFace | `@huggingface/model` | `HF_TOKEN` or `HUGGINGFACE_TOKEN` |
+| Replicate | `@replicate/model` | `REPLICATE_API_TOKEN` |
+
+Use `osync qc --help-cloud` for detailed provider documentation and examples.
+
+When using cloud providers:
+- API keys can be provided via environment variables (default) or explicitly in the command line
+- Connection and model validation is performed before testing starts
+- Cloud provider info (name and API version) is recorded in results for traceability
+- QcView displays cloud provider badges in HTML/PDF output (only for cloud providers, not for Ollama)
+
 **Judge Execution Modes:**
 
 - **Serial mode (default):** After testing each quantization, all questions are judged sequentially before moving to the next quantization. Simple and predictable execution.
@@ -989,6 +1033,24 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.8
+- **Cloud Provider Support for Judge Models** - Use cloud AI providers for `--judge` and `--judgebest`
+  - Support for 9 providers: Anthropic Claude, OpenAI, Google Gemini, Azure OpenAI, Mistral AI, Cohere, Together AI, HuggingFace, and Replicate
+  - Syntax: `@provider[:token]/model` (e.g., `@claude/claude-sonnet-4-20250514`, `@openai/gpt-4o`)
+  - API keys loaded from environment variables by default, can be specified explicitly
+  - Connection and model validation before testing starts
+  - Cloud provider info (name, API version) recorded in results for traceability
+  - QcView displays cloud provider badges in HTML/PDF output (only for cloud, not Ollama)
+  - New `--help-cloud` option for detailed provider documentation
+- **PDF Text Rendering Fix** - Fixed text corruption in Q&A answers for PDF output
+  - Resolved character scrambling issue with certain text patterns (e.g., Python format strings)
+  - Uses line-by-line Text elements to prevent text reordering
+  - Added Courier monospace font for code content for better readability
+  - Added text sanitization to handle problematic Unicode characters
+- **QcView File Access Check** - Moved file overwrite confirmation before progress bar
+  - Prevents concurrent display errors when output file already exists
+  - Applies to all output formats (JSON, Markdown, HTML, PDF)
 
 v1.2.7
 - **Separate Best Answer Judge Model (--judgebest)** - New command-line argument for best answer determination

@@ -31,6 +31,10 @@ namespace osync
         private string? _judgeBestModelName;
         private bool _judgeBestEnabled;
 
+        // Cloud judge provider fields (when using @provider syntax)
+        private ICloudJudgeProvider? _cloudJudgeProvider;
+        private ICloudJudgeProvider? _cloudJudgeBestProvider;
+
         // Cancellation support for graceful shutdown
         private CancellationTokenSource _cts = new CancellationTokenSource();
         private bool _cancellationRequested;
@@ -194,10 +198,44 @@ Output your judgment:
 
         /// <summary>
         /// Parse the --judge argument to extract base URL and model name
-        /// Supports: "modelname", "http://host:port/modelname"
+        /// Supports: "modelname", "http://host:port/modelname", "@provider[:token]/model" (cloud)
         /// </summary>
         private void ParseJudgeArgument(string judge)
         {
+            // Check for cloud provider syntax (@provider[:token]/model)
+            if (CloudJudgeProviderFactory.IsCloudProvider(judge))
+            {
+                var config = CloudJudgeProviderFactory.ParseArgument(judge);
+                if (config == null)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid cloud judge format. Expected @provider[:token]/model[/]");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(config.ApiKey))
+                {
+                    var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
+                    AnsiConsole.MarkupLine($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
+                    return;
+                }
+
+                _cloudJudgeProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
+                if (_cloudJudgeProvider == null)
+                {
+                    AnsiConsole.MarkupLine($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
+                    return;
+                }
+
+                _judgeModelName = config.ModelName;
+                _judgeEnabled = true;
+
+                var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
+                var version = _cloudJudgeProvider.GetApiVersion();
+                var versionStr = version != null ? $" v{version}" : "";
+                AnsiConsole.MarkupLine($"[dim]Judge model: {_judgeModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                return;
+            }
+
             if (judge.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 judge.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
@@ -239,10 +277,44 @@ Output your judgment:
 
         /// <summary>
         /// Parse the --judgebest argument to extract base URL and model name
-        /// Supports: "modelname", "http://host:port/modelname"
+        /// Supports: "modelname", "http://host:port/modelname", "@provider[:token]/model" (cloud)
         /// </summary>
         private void ParseJudgeBestArgument(string judgeBest)
         {
+            // Check for cloud provider syntax (@provider[:token]/model)
+            if (CloudJudgeProviderFactory.IsCloudProvider(judgeBest))
+            {
+                var config = CloudJudgeProviderFactory.ParseArgument(judgeBest);
+                if (config == null)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid cloud judgebest format. Expected @provider[:token]/model[/]");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(config.ApiKey))
+                {
+                    var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
+                    AnsiConsole.MarkupLine($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
+                    return;
+                }
+
+                _cloudJudgeBestProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
+                if (_cloudJudgeBestProvider == null)
+                {
+                    AnsiConsole.MarkupLine($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
+                    return;
+                }
+
+                _judgeBestModelName = config.ModelName;
+                _judgeBestEnabled = true;
+
+                var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
+                var version = _cloudJudgeBestProvider.GetApiVersion();
+                var versionStr = version != null ? $" v{version}" : "";
+                AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                return;
+            }
+
             if (judgeBest.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 judgeBest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
@@ -374,6 +446,28 @@ Output your judgment:
         /// </summary>
         public async Task<int> ExecuteAsync()
         {
+            // Handle --help-cloud option
+            if (_args.HelpCloud)
+            {
+                PrintCloudProviderHelp();
+                return 0;
+            }
+
+            // Validate required arguments
+            if (string.IsNullOrWhiteSpace(_args.ModelName))
+            {
+                AnsiConsole.MarkupLine("[red]Error: ModelName (-M) is required[/]");
+                AnsiConsole.MarkupLine("[dim]Use --help-cloud for cloud provider documentation[/]");
+                return 1;
+            }
+
+            if (string.IsNullOrWhiteSpace(_args.Quants))
+            {
+                AnsiConsole.MarkupLine("[red]Error: Quants (-Q) is required[/]");
+                AnsiConsole.MarkupLine("[dim]Use --help-cloud for cloud provider documentation[/]");
+                return 1;
+            }
+
             // Set up Ctrl+C/Ctrl+Break handler for graceful shutdown
             Console.CancelKeyPress += OnCancelKeyPress;
 
@@ -451,38 +545,70 @@ Output your judgment:
                 // Verify judge model exists at startup (if enabled)
                 if (_judgeEnabled)
                 {
-                    AnsiConsole.MarkupLine($"[dim]Verifying judge model exists...[/]");
-                    if (!await VerifyJudgeModelExistsAsync())
-                    {
-                        AnsiConsole.MarkupLine($"[red]Error: Judge model '{_judgeModelName}' not found on server {_judgeBaseUrl}[/]");
-                        AnsiConsole.MarkupLine($"[yellow]Make sure the judge model is pulled. Try: ollama pull {_judgeModelName}[/]");
-                        return 1;
-                    }
-                    AnsiConsole.MarkupLine($"[dim]Judge model verified: {_judgeModelName}[/]");
+                    AnsiConsole.MarkupLine($"[dim]Verifying judge model/connection...[/]");
 
-                    // Capture judge server Ollama version
-                    if (_judgeHttpClient != null && _judgeBaseUrl != null)
+                    if (_cloudJudgeProvider != null)
                     {
-                        _resultsFile.OllamaJudgeVersion = await GetOllamaVersionAsync(_judgeHttpClient, _judgeBaseUrl);
+                        // Cloud provider validation
+                        var (success, errorMessage) = await _cloudJudgeProvider.ValidateConnectionAsync();
+                        if (!success)
+                        {
+                            AnsiConsole.MarkupLine($"[red]Error: {errorMessage}[/]");
+                            return 1;
+                        }
+                        AnsiConsole.MarkupLine($"[dim]Cloud judge verified: {_judgeModelName} @ {_cloudJudgeProvider.ProviderName}[/]");
+                    }
+                    else
+                    {
+                        // Ollama validation
+                        if (!await VerifyJudgeModelExistsAsync())
+                        {
+                            AnsiConsole.MarkupLine($"[red]Error: Judge model '{_judgeModelName}' not found on server {_judgeBaseUrl}[/]");
+                            AnsiConsole.MarkupLine($"[yellow]Make sure the judge model is pulled. Try: ollama pull {_judgeModelName}[/]");
+                            return 1;
+                        }
+                        AnsiConsole.MarkupLine($"[dim]Judge model verified: {_judgeModelName}[/]");
+
+                        // Capture judge server Ollama version
+                        if (_judgeHttpClient != null && _judgeBaseUrl != null)
+                        {
+                            _resultsFile.OllamaJudgeVersion = await GetOllamaVersionAsync(_judgeHttpClient, _judgeBaseUrl);
+                        }
                     }
                 }
 
                 // Verify judge best answer model exists at startup (if enabled)
                 if (_judgeBestEnabled)
                 {
-                    AnsiConsole.MarkupLine($"[dim]Verifying judge best answer model exists...[/]");
-                    if (!await VerifyJudgeBestModelExistsAsync())
-                    {
-                        AnsiConsole.MarkupLine($"[red]Error: Judge BestAnswer model '{_judgeBestModelName}' not found on server {_judgeBestBaseUrl}[/]");
-                        AnsiConsole.MarkupLine($"[yellow]Make sure the judge best answer model is pulled. Try: ollama pull {_judgeBestModelName}[/]");
-                        return 1;
-                    }
-                    AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model verified: {_judgeBestModelName}[/]");
+                    AnsiConsole.MarkupLine($"[dim]Verifying judge best answer model/connection...[/]");
 
-                    // Capture judge best answer server Ollama version
-                    if (_judgeBestHttpClient != null && _judgeBestBaseUrl != null)
+                    if (_cloudJudgeBestProvider != null)
                     {
-                        _resultsFile.OllamaJudgeBestAnswerVersion = await GetOllamaVersionAsync(_judgeBestHttpClient, _judgeBestBaseUrl);
+                        // Cloud provider validation
+                        var (success, errorMessage) = await _cloudJudgeBestProvider.ValidateConnectionAsync();
+                        if (!success)
+                        {
+                            AnsiConsole.MarkupLine($"[red]Error: {errorMessage}[/]");
+                            return 1;
+                        }
+                        AnsiConsole.MarkupLine($"[dim]Cloud judge best verified: {_judgeBestModelName} @ {_cloudJudgeBestProvider.ProviderName}[/]");
+                    }
+                    else
+                    {
+                        // Ollama validation
+                        if (!await VerifyJudgeBestModelExistsAsync())
+                        {
+                            AnsiConsole.MarkupLine($"[red]Error: Judge BestAnswer model '{_judgeBestModelName}' not found on server {_judgeBestBaseUrl}[/]");
+                            AnsiConsole.MarkupLine($"[yellow]Make sure the judge best answer model is pulled. Try: ollama pull {_judgeBestModelName}[/]");
+                            return 1;
+                        }
+                        AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model verified: {_judgeBestModelName}[/]");
+
+                        // Capture judge best answer server Ollama version
+                        if (_judgeBestHttpClient != null && _judgeBestBaseUrl != null)
+                        {
+                            _resultsFile.OllamaJudgeBestAnswerVersion = await GetOllamaVersionAsync(_judgeBestHttpClient, _judgeBestBaseUrl);
+                        }
                     }
                 }
 
@@ -3155,6 +3281,12 @@ Output your judgment:
         /// </summary>
         private async Task<JudgmentResult?> JudgeQuestionSingleAttemptAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
         {
+            // Use cloud provider if available
+            if (_cloudJudgeProvider != null)
+            {
+                return await JudgeQuestionWithCloudProviderAsync(baseQuestion, quantQuestion);
+            }
+
             if (_judgeHttpClient == null || _judgeModelName == null || _judgeBaseUrl == null)
                 return null;
 
@@ -3399,11 +3531,69 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
         }
 
         /// <summary>
+        /// Judge a question using a cloud provider
+        /// </summary>
+        private async Task<JudgmentResult?> JudgeQuestionWithCloudProviderAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_cloudJudgeProvider == null || _judgeModelName == null)
+                return null;
+
+            var userMessage = $@"{JUDGE_USER_INSTRUCTIONS}
+
+--- QUESTION (for context only) ---
+{baseQuestion.Question}
+--- END QUESTION ---
+
+--- RESPONSE A ---
+{baseQuestion.Answer}
+--- END RESPONSE A ---
+
+--- RESPONSE B ---
+{quantQuestion.Answer}
+--- END RESPONSE B ---
+
+How similar are RESPONSE A and RESPONSE B? Provide your response as JSON with score (1-100), bestanswer (A/B/AB), and reason.";
+
+            try
+            {
+                var response = await _cloudJudgeProvider.JudgeAsync(JUDGE_SYSTEM_PROMPT, userMessage, 800, _cts.Token);
+
+                return new JudgmentResult
+                {
+                    JudgeModel = _judgeModelName,
+                    Score = response.Score,
+                    Reason = response.Reason,
+                    BestAnswer = response.BestAnswer,
+                    JudgedAt = DateTime.UtcNow,
+                    JudgeProvider = _cloudJudgeProvider.ProviderName,
+                    JudgeApiVersion = _cloudJudgeProvider.GetApiVersion(),
+                    RawResponse = string.IsNullOrWhiteSpace(response.Reason) ? response.RawResponse : null
+                };
+            }
+            catch (Exception ex)
+            {
+                if (_args.Verbose)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Cloud judge error: {Markup.Escape(ex.Message)}[/]");
+                }
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Judge best answer for a single question (with extended retry for resilience)
         /// Updates the existing Judgment with BestAnswer, JudgeModelBestAnswer, ReasonBestAnswer
         /// </summary>
         private async Task<bool> JudgeBestQuestionAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
         {
+            // Use cloud provider if available
+            if (_cloudJudgeBestProvider != null)
+            {
+                return await ExecuteJudgeBestWithRetryAsync(
+                    () => JudgeBestQuestionWithCloudProviderCoreAsync(baseQuestion, quantQuestion),
+                    $"cloud judge best Q{baseQuestion.QuestionId}");
+            }
+
             if (_judgeBestHttpClient == null || _judgeBestModelName == null || _judgeBestBaseUrl == null)
                 return false;
 
@@ -3494,6 +3684,57 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Core implementation for judging best answer using cloud provider
+        /// </summary>
+        private async Task<bool> JudgeBestQuestionWithCloudProviderCoreAsync(QuestionResult baseQuestion, QuestionResult quantQuestion)
+        {
+            if (_cloudJudgeBestProvider == null || _judgeBestModelName == null)
+                return false;
+
+            // Ensure the quant question has a Judgment object
+            quantQuestion.Judgment ??= new JudgmentResult();
+
+            var userMessage = $@"{JUDGE_BEST_USER_INSTRUCTIONS}
+
+--- QUESTION ---
+{baseQuestion.Question}
+--- END QUESTION ---
+
+--- RESPONSE A ---
+{baseQuestion.Answer}
+--- END RESPONSE A ---
+
+--- RESPONSE B ---
+{quantQuestion.Answer}
+--- END RESPONSE B ---
+
+Which response is better? Provide your response as JSON with bestanswer (A/B/AB) and reason.";
+
+            try
+            {
+                var response = await _cloudJudgeBestProvider.JudgeAsync(JUDGE_BEST_SYSTEM_PROMPT, userMessage, 800, _cts.Token);
+
+                // Update the judgment with best answer info
+                quantQuestion.Judgment.BestAnswer = response.BestAnswer;
+                quantQuestion.Judgment.JudgeModelBestAnswer = _judgeBestModelName;
+                quantQuestion.Judgment.ReasonBestAnswer = response.Reason;
+                quantQuestion.Judgment.JudgedBestAnswerAt = DateTime.UtcNow;
+                quantQuestion.Judgment.JudgeBestProvider = _cloudJudgeBestProvider.ProviderName;
+                quantQuestion.Judgment.JudgeBestApiVersion = _cloudJudgeBestProvider.GetApiVersion();
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (_args.Verbose)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]Cloud judge best error: {Markup.Escape(ex.Message)}[/]");
+                }
+                return false;
+            }
         }
 
         /// <summary>
@@ -4542,6 +4783,75 @@ Which response is better? Provide bestanswer and reason.";
                 AnsiConsole.MarkupLine($"[red]Error removing model: {ex.Message}[/]");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Print detailed help for cloud provider integration
+        /// </summary>
+        private static void PrintCloudProviderHelp()
+        {
+            AnsiConsole.Write(new Rule("[bold cyan]Cloud Provider Support for --judge and --judgebest[/]").RuleStyle("dim"));
+            AnsiConsole.WriteLine();
+
+            AnsiConsole.MarkupLine("[bold]Format:[/] @provider[[:token]]/model");
+            AnsiConsole.WriteLine();
+
+            AnsiConsole.MarkupLine("[bold yellow]Providers:[/]");
+            var table = new Table();
+            table.Border = TableBorder.Rounded;
+            table.AddColumn("Provider");
+            table.AddColumn("Description");
+            table.AddColumn("Environment Variable");
+            table.AddColumn("Example Models");
+
+            table.AddRow("@claude", "Anthropic Claude", "ANTHROPIC_API_KEY",
+                "claude-sonnet-4-20250514, claude-opus-4-20250514");
+            table.AddRow("@openai", "OpenAI", "OPENAI_API_KEY",
+                "gpt-4o, gpt-4o-mini, o1, o1-mini");
+            table.AddRow("@gemini", "Google Gemini", "GEMINI_API_KEY or GOOGLE_API_KEY",
+                "gemini-2.0-flash, gemini-1.5-pro");
+            table.AddRow("@huggingface", "HuggingFace Inference", "HF_TOKEN or HUGGINGFACE_TOKEN",
+                "meta-llama/Llama-3.3-70B-Instruct");
+            table.AddRow("@azure", "Azure OpenAI", "AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT",
+                "your-deployment-name");
+            table.AddRow("@cohere", "Cohere", "CO_API_KEY or COHERE_API_KEY",
+                "command-a-03-2025, command-r-plus");
+            table.AddRow("@mistral", "Mistral AI", "MISTRAL_API_KEY",
+                "mistral-large-latest, mistral-medium");
+            table.AddRow("@together", "Together AI", "TOGETHER_API_KEY",
+                "meta-llama/Llama-3.3-70B-Instruct");
+            table.AddRow("@replicate", "Replicate", "REPLICATE_API_TOKEN",
+                "meta/llama-2-70b-chat");
+
+            AnsiConsole.Write(table);
+            AnsiConsole.WriteLine();
+
+            AnsiConsole.MarkupLine("[bold yellow]Examples:[/]");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [green]# Using environment variable for API key:[/]");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @claude/claude-sonnet-4-20250514");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @openai/gpt-4o");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @gemini/gemini-2.0-flash");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [green]# Using explicit API key:[/]");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @claude:sk-ant-xxx/claude-sonnet-4");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [green]# Azure OpenAI (key@endpoint format):[/]");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4* --judge @azure:mykey@myendpoint.openai.azure.com/gpt4-deployment");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [green]# Mixed: cloud judge with ollama best answer judge:[/]");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @claude/claude-sonnet-4 --judgebest llama3.2:latest");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("  [green]# Both judges from cloud providers:[/]");
+            AnsiConsole.WriteLine("  osync qc -M llama3.2 -Q q4*,q8* --judge @openai/gpt-4o --judgebest @claude/claude-opus-4");
+            AnsiConsole.WriteLine();
+
+            AnsiConsole.MarkupLine("[bold yellow]Notes:[/]");
+            AnsiConsole.MarkupLine("  - API keys are loaded from environment variables by default");
+            AnsiConsole.MarkupLine("  - Explicit keys in command line override environment variables");
+            AnsiConsole.MarkupLine("  - Connection and model validation is performed before testing starts");
+            AnsiConsole.MarkupLine("  - Cloud provider info is recorded in results for traceability");
+            AnsiConsole.MarkupLine("  - qcview displays cloud provider badges in HTML/PDF output");
         }
     }
 }

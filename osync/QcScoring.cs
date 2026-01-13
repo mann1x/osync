@@ -70,13 +70,28 @@ namespace osync
             var allHaveJudgment = scoringResults.QuantScores.All(q => q.HasJudgmentScoring);
             scoringResults.HasJudgmentScoring = allHaveJudgment;
 
-            // Get judge model names from first quantization that has judgment
+            // Get judge model names and provider info from first quantization that has judgment
             if (allHaveJudgment && resultsFile.Results.Any(r => !r.IsBase))
             {
                 var firstQuant = resultsFile.Results.FirstOrDefault(r => !r.IsBase);
                 var firstQuestion = firstQuant?.QuestionResults.FirstOrDefault(q => q.Judgment != null);
                 scoringResults.JudgeModel = firstQuestion?.Judgment?.JudgeModel;
                 scoringResults.JudgeModelBestAnswer = firstQuestion?.Judgment?.JudgeModelBestAnswer;
+
+                // Extract cloud provider info (only set when not ollama)
+                var judgeProvider = firstQuestion?.Judgment?.JudgeProvider;
+                if (!string.IsNullOrEmpty(judgeProvider) && !judgeProvider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                {
+                    scoringResults.JudgeProvider = judgeProvider;
+                    scoringResults.JudgeApiVersion = firstQuestion?.Judgment?.JudgeApiVersion;
+                }
+
+                var judgeBestProvider = firstQuestion?.Judgment?.JudgeBestProvider;
+                if (!string.IsNullOrEmpty(judgeBestProvider) && !judgeBestProvider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+                {
+                    scoringResults.JudgeBestProvider = judgeBestProvider;
+                    scoringResults.JudgeBestApiVersion = firstQuestion?.Judgment?.JudgeBestApiVersion;
+                }
             }
 
             return scoringResults;

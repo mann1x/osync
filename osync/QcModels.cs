@@ -190,6 +190,28 @@ namespace osync
         /// </summary>
         [JsonIgnore]
         public string? RawResponse { get; set; }
+
+        /// <summary>
+        /// Judge provider type: "ollama" or cloud provider name (e.g., "anthropic", "openai", "gemini")
+        /// Nullable for backward compatibility - null/missing assumes "ollama"
+        /// </summary>
+        public string? JudgeProvider { get; set; }
+
+        /// <summary>
+        /// Cloud API version if available (e.g., "2023-06-01" for Anthropic)
+        /// </summary>
+        public string? JudgeApiVersion { get; set; }
+
+        /// <summary>
+        /// Provider for best answer judge (when --judgebest is used)
+        /// Nullable for backward compatibility - null/missing assumes "ollama"
+        /// </summary>
+        public string? JudgeBestProvider { get; set; }
+
+        /// <summary>
+        /// API version for best answer judge
+        /// </summary>
+        public string? JudgeBestApiVersion { get; set; }
     }
 
     /// <summary>
@@ -345,6 +367,12 @@ namespace osync
         public bool HasJudgmentScoring { get; set; }
         public string? JudgeModel { get; set; }
         public string? JudgeModelBestAnswer { get; set; }
+
+        // Cloud provider info (only set when using cloud providers, null for ollama)
+        public string? JudgeProvider { get; set; }
+        public string? JudgeApiVersion { get; set; }
+        public string? JudgeBestProvider { get; set; }
+        public string? JudgeBestApiVersion { get; set; }
 
         /// <summary>
         /// URL to the source repository for the model
