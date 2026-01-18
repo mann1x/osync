@@ -58,8 +58,9 @@ namespace osync
                     return 1;
                 }
 
-                var json = await File.ReadAllTextAsync(_args.FileName);
-                var resultsFile = JsonSerializer.Deserialize<QcResultsFile>(json);
+                // Use streaming deserialization to handle large files without OOM
+                await using var fileStream = File.OpenRead(_args.FileName);
+                var resultsFile = await JsonSerializer.DeserializeAsync<QcResultsFile>(fileStream);
 
                 if (resultsFile == null)
                 {
@@ -241,6 +242,13 @@ namespace osync
                     sb.AppendLine($"Repository: {results.RepositoryUrl}");
                 }
 
+                // Show thinking settings if configured
+                var thinkInfo = GetThinkingInfoText(results.Options);
+                if (!string.IsNullOrEmpty(thinkInfo))
+                {
+                    sb.AppendLine($"Thinking: {thinkInfo}");
+                }
+
                 sb.AppendLine();
                 sb.AppendLine($"Base Quantization: {results.BaseTag}");
                 sb.AppendLine($"Type: {results.BaseQuantizationType} | Size: {ByteSize.FromBytes(results.BaseDiskSizeBytes)} | Eval: {results.BaseEvalTokensPerSecond:F1} tok/s | Prompt: {results.BasePromptTokensPerSecond:F1} tok/s");
@@ -395,6 +403,13 @@ namespace osync
             if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
             {
                 headerText += $"\nRepository: [blue]{Markup.Escape(results.RepositoryUrl)}[/]";
+            }
+
+            // Show thinking settings if configured
+            var thinkInfoConsole = GetThinkingInfoText(results.Options);
+            if (!string.IsNullOrEmpty(thinkInfoConsole))
+            {
+                headerText += $"\nThinking: [dim]{Markup.Escape(thinkInfoConsole)}[/]";
             }
 
             // Version information
@@ -807,6 +822,13 @@ namespace osync
             if (!string.IsNullOrWhiteSpace(results.RepositoryUrl))
             {
                 sb.AppendLine($"**Repository:** [{results.RepositoryUrl}]({results.RepositoryUrl})  ");
+            }
+
+            // Show thinking settings if configured
+            var thinkInfoMd = GetThinkingInfoText(results.Options);
+            if (!string.IsNullOrEmpty(thinkInfoMd))
+            {
+                sb.AppendLine($"**Thinking:** {thinkInfoMd}  ");
             }
 
             // Version information
@@ -1301,6 +1323,13 @@ namespace osync
                 sb.AppendLine($"<div class=\"info-item\" style=\"grid-column: 1 / -1; margin-top: 0.5rem;\"><span class=\"info-label\">Repository</span><span class=\"info-value\"><a href=\"{EscapeHtml(results.RepositoryUrl)}\" target=\"_blank\">{EscapeHtml(results.RepositoryUrl)}</a></span></div>");
             }
 
+            // Show thinking settings if configured
+            var thinkInfoHtml = GetThinkingInfoText(results.Options);
+            if (!string.IsNullOrEmpty(thinkInfoHtml))
+            {
+                sb.AppendLine($"<div class=\"info-item\" style=\"grid-column: 1 / -1; margin-top: 0.5rem;\"><span class=\"info-label\">Thinking</span><span class=\"info-value\">{EscapeHtml(thinkInfoHtml)}</span></div>");
+            }
+
             // Version information
             var htmlVersionParts = new List<string>();
             if (!string.IsNullOrEmpty(results.OsyncVersion))
@@ -1695,6 +1724,12 @@ namespace osync
                         ? $"{results.JudgeModelBestAnswer} {bestBadge}" : results.JudgeModelBestAnswer;
                     headerParts.Add($"Best Judge: {bestJudgeDisplay}");
                 }
+            }
+            // Add thinking info if configured
+            var thinkInfoPdf = GetThinkingInfoText(results.Options);
+            if (!string.IsNullOrEmpty(thinkInfoPdf))
+            {
+                headerParts.Add($"Thinking: {thinkInfoPdf}");
             }
             document.Add(new iTextParagraph(string.Join(" | ", headerParts))
                 .SetFontSize(8).SetFontColor(grayText));
@@ -2145,10 +2180,10 @@ namespace osync
         /// Check if output file can be written, handling overwrite confirmation and file lock retry.
         /// Returns true if file can be written, false if user cancelled.
         /// </summary>
-        private static bool CheckOutputFileAccess(string filePath)
+        private bool CheckOutputFileAccess(string filePath)
         {
-            // Check if file exists and prompt for overwrite
-            if (File.Exists(filePath))
+            // Check if file exists and prompt for overwrite (unless --overwrite flag is set)
+            if (File.Exists(filePath) && !_args.Overwrite)
             {
                 if (!AnsiConsole.Confirm($"[yellow]Output file already exists:[/] {filePath}\n[yellow]Overwrite?[/]", defaultValue: false))
                 {
@@ -2215,6 +2250,18 @@ namespace osync
 
             var hResult = ex.HResult;
             return hResult == ERROR_SHARING_VIOLATION || hResult == ERROR_LOCK_VIOLATION;
+        }
+
+        /// <summary>
+        /// Get display text for thinking settings
+        /// </summary>
+        private string GetThinkingInfoText(QcTestOptions options)
+        {
+            if (!string.IsNullOrWhiteSpace(options.ThinkLevel))
+                return $"level={options.ThinkLevel}";
+            if (options.EnableThinking)
+                return "enabled";
+            return "disabled";
         }
     }
 }

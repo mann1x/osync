@@ -24,9 +24,9 @@ namespace osync
 
         /// <summary>
         /// Maximum number of tokens to generate per response
-        /// Default is 4096 for most test suites
+        /// Optional - if null, Ollama uses its default
         /// </summary>
-        int NumPredict { get; }
+        int? NumPredict { get; }
 
         /// <summary>
         /// Context length (num_ctx) for the model during testing

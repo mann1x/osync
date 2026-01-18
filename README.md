@@ -50,6 +50,8 @@
 - 💬 **Interactive Chat** - Chat with models directly from the CLI
 - 🧠 **Memory Management** - Load/unload models from VRAM with process status monitoring
 - 📊 **Quantization Comparison** - Compare quality and performance across model quantizations with detailed scoring
+- 🔬 **Context Benchmark** - Test model context tracking with dynamic story-based benchmarks, tools, custom test suites
+- 📈 **Real-Time Monitor** - Live dashboard with GPU/CPU metrics, VRAM usage graphs, model status, and Ollama process tracking
 
 ### Built With
 
@@ -90,6 +92,11 @@ osync manage
 # Copy local model to remote server
 osync cp llama3 http://192.168.100.100:11434
 
+# Copy to remote server (short forms - port 11434 and http:// are defaults)
+osync cp llama3 192.168.100.100        # IP address detected as server
+osync cp llama3 myserver:11434         # hostname with port
+osync cp llama3 myserver/              # trailing slash indicates server
+
 # List all local models
 osync ls
 
@@ -111,9 +118,15 @@ Copy models locally, to remote servers, or between remote servers.
 osync cp llama3 my-backup-llama3
 osync cp llama3:70b llama3:backup-v1
 
-# Local to remote (upload to server)
-osync cp llama3 http://192.168.0.100:11434
-osync cp qwen2:7b http://192.168.0.100:11434
+# Local to remote (upload to server) - multiple ways to specify server
+osync cp llama3 http://192.168.0.100:11434    # Full URL
+osync cp llama3 192.168.0.100                  # IP address (auto: http:// + :11434)
+osync cp llama3 192.168.0.100:11434            # IP with port (auto: http://)
+osync cp llama3 myserver:11434                 # Hostname with port
+osync cp llama3 myserver/                      # Trailing slash = server
+
+# Copy HuggingFace model to remote (uses source model name)
+osync cp hf.co/unsloth/gemma-3-1b-it-GGUF:Q4_K_M 192.168.0.100
 
 # Remote to remote (transfer between servers)
 osync cp http://192.168.0.100:11434/qwen2:7b http://192.168.0.200:11434/qwen2:latest
@@ -134,6 +147,8 @@ osync cp llama3 http://192.168.0.100:11434 -bt 50MB
 - Real-time progress with transfer speed
 - Memory-buffered streaming for remote-to-remote transfers
 - Simultaneous download and upload with backpressure control
+- Smart server detection: IP addresses, `hostname:port`, or `hostname/` auto-detected as remote servers
+- Uses source model name when destination server has no model specified
 
 **Remote-to-Remote Limitations:**
 - ⚠️ The model must exist in the Ollama registry (registry.ollama.ai)
@@ -155,8 +170,10 @@ osync ls "*:7b"
 osync ls "mannix/*"
 
 # List remote models
-osync ls http://192.168.0.100:11434
-osync ls "qwen*" http://192.168.0.100:11434
+osync ls http://192.168.0.100:11434       # Full URL
+osync ls 192.168.0.100                     # IP address (auto: http:// + :11434)
+osync ls myserver/                         # Hostname with trailing slash
+osync ls "qwen*" -d 192.168.0.100          # Filter with pattern on remote
 
 # Sort by size (descending)
 osync ls --size
@@ -280,10 +297,30 @@ osync show llama3
 osync show qwen2:7b
 
 # Show information about a remote model
-osync show llama3 http://192.168.0.100:11434
+osync show llama3 -d http://192.168.0.100:11434
+
+# Show specific information
+osync show llama3 --license          # Show license only
+osync show llama3 --modelfile        # Show modelfile only
+osync show llama3 --parameters       # Show parameters only
+osync show llama3 --system           # Show system prompt only
+osync show llama3 --template         # Show template only
+osync show llama3 -v                 # Show all information
 ```
 
+**Options:**
+
+- `<model>` - Model name to show information (required)
+- `-d <url>` - Remote server URL (default: local)
+- `--license` - Show license information
+- `--modelfile` - Show modelfile
+- `--parameters` - Show parameters
+- `--system` - Show system prompt
+- `--template` - Show template
+- `-v, --verbose` - Show all information
+
 **Features:**
+
 - Displays model metadata and configuration
 - Shows model file details, parameters, and system information
 - Works on both local and remote servers
@@ -318,26 +355,54 @@ osync run llama3
 osync chat qwen2:7b
 
 # Chat with a model on remote server
-osync run llama3 http://192.168.0.100:11434
+osync run llama3 -d http://192.168.0.100:11434
+
+# With extended thinking mode (for reasoning models)
+osync run qwen3 --think medium
+
+# With verbose output (shows timing stats)
+osync run llama3 --verbose
+
+# Vision models with custom image dimensions
+osync run llava --dimensions 512
 ```
 
+**Options:**
+
+- `<model>` - Model name to run/chat with (required)
+- `-d <url>` - Remote server URL (default: local)
+- `--format <value>` - Response format (e.g., json)
+- `--keepalive <duration>` - Keep alive duration (e.g., 5m, 1h, default: server default)
+- `--nowordwrap` - Disable word wrap
+- `--verbose` - Show verbose output (timing stats)
+- `--dimensions <value>` - Image dimensions for vision models (e.g., 512)
+- `--hidethinking` - Hide thinking process output
+- `--insecure` - Allow insecure connections
+- `--think <level>` - Enable extended thinking (reasoning) mode with level (low, medium, high)
+- `--truncate` - Truncate long context (default: server setting)
+
 **Features:**
+
 - Interactive conversation mode
 - Preloads model into memory before chat
 - Shows model loading status
+- Extended thinking support for reasoning models (qwen3, deepseek-r1, etc.)
 - Type `/bye` or press Ctrl+D to exit
 - Works on both local and remote servers
 
 #### Process Status (`ps`)
 
-Show models currently loaded in memory.
+Show models currently loaded in memory, plus system monitoring when running locally.
 
 ```bash
-# Show loaded models on local server
+# Show loaded models on local server (includes GPU and process stats)
 osync ps
 
-# Show loaded models on remote server
-osync ps http://192.168.0.100:11434
+# Show loaded models on remote server (no GPU/process stats)
+osync ps http://192.168.0.100:11434       # Full URL
+osync ps 192.168.0.100                     # IP address (auto: http:// + :11434)
+osync ps myserver/                         # Hostname with trailing slash
+osync ps -d myserver:11434                 # Using -d flag with port
 ```
 
 **Features:**
@@ -345,8 +410,10 @@ osync ps http://192.168.0.100:11434
 - Shows VRAM usage with percentage when partially loaded
 - Displays model size, context length, and expiration time
 - Formatted table output
+- **Local only:** Ollama process CPU and memory usage
+- **Local only:** GPU monitoring (NVIDIA via nvidia-smi, AMD via rocm-smi)
 
-**Output:**
+**Output (local server):**
 ```
 Loaded Models:
 ---------------------------------------------------------------------------------------------------------------------------------------
@@ -354,7 +421,89 @@ NAME                           ID              SIZE                      VRAM US
 ---------------------------------------------------------------------------------------------------------------------------------------
 tinyllama:1.1b-chat-v1-fp16    71c2f9b69b52    2.11 GB (1B)              1.33 GB (63%)   4096       4 minutes from now
 ---------------------------------------------------------------------------------------------------------------------------------------
+
+Ollama Process:
+  PID: 12345  CPU: 2.3%  Memory: 1.2 GB (Working Set)
+
+GPU Status (NVIDIA):
+  GPU 0: NVIDIA GeForce RTX 4090
+    Utilization: 45%  Memory: 8192 MB / 24576 MB (33%)  Temp: 65°C  Power: 250 W / 450 W
 ```
+
+**GPU Monitoring:**
+- Automatically detects nvidia-smi (NVIDIA) or rocm-smi (AMD)
+- Shows GPU utilization, memory usage, temperature, and power draw
+- Supports multiple GPUs
+
+#### Real-Time Monitor (`psmonitor`, `monitor`, `psm`)
+
+Interactive real-time monitoring dashboard inspired by nvitop, with braille-dot graphs and color-coded metrics.
+
+```bash
+# Start monitor with default settings (5s refresh, 5m history)
+osync psmonitor
+osync monitor
+osync psm
+
+# Custom refresh interval (2 seconds)
+osync psmonitor 2s
+osync psmonitor -L 2
+
+# Custom history duration (10 minutes) - multiple formats supported
+osync psmonitor -Hi 10          # Plain integer = minutes (10 minutes)
+osync psmonitor -Hi 10m         # Explicit minutes
+osync psmonitor --history 30m   # 30 minutes
+osync psmonitor -Hi 1h          # 1 hour
+osync psmonitor -Hi 1h30m       # 1 hour 30 minutes
+
+# Combined options
+osync psmonitor -L 2 -Hi 15     # 2s refresh, 15 minutes history
+
+# Monitor remote server (shows loaded models only, no GPU/system stats)
+osync psmonitor -d http://192.168.0.100:11434
+```
+
+**Options:**
+
+- `-d <url>` - Remote server URL (default: local). Remote mode shows loaded models only, no GPU/system stats
+- `-L <interval>` - Refresh interval (default: 5s). Supports: 5, 5s, 30s, 1m, 5m, 1h30m
+- `-Hi, --history <duration>` - Initial graph history duration (default: 5m). Plain integers are treated as minutes (e.g., -Hi 10 = 10 minutes). Supports: 1m, 30m, 1h, 1h30m
+
+**Features:**
+
+- Real-time GPU utilization graphs with braille characters
+- CPU usage history graph
+- Color-coded metrics (green < 50%, yellow 50-80%, red > 80%)
+- GPU metrics: utilization, VRAM, temperature, power, clocks
+- System metrics: CPU, RAM, Swap with progress bars
+- Loaded Ollama models with expiration times
+- NVIDIA driver and CUDA version display
+
+**Interactive Controls:**
+- **Q / Esc** - Quit monitor
+- **P** - Pause/Resume updates
+- **H** - Show help
+- **←/→** - Adjust graph history (+/- 1 minute, range: 1-60m)
+- **↑/↓** - Adjust refresh interval (+/- 1 second)
+- **Ctrl+C** - Exit
+
+**Windows Terminal Font Requirements:**
+
+The monitor uses Unicode braille characters (U+2800-U+28FF) for graphs. On Windows, you need a font that supports these characters:
+
+- **Recommended fonts:**
+  - Cascadia Code / Cascadia Mono (included with Windows Terminal)
+  - DejaVu Sans Mono
+  - Consolas (partial support)
+  - NSimSun
+
+- **To change font in Windows Terminal:**
+  1. Open Windows Terminal settings (Ctrl+,)
+  2. Select your profile (e.g., "Command Prompt" or "PowerShell")
+  3. Go to "Appearance" → "Font face"
+  4. Select "Cascadia Code" or "Cascadia Mono"
+
+- **Note:** CMD with default raster fonts will show "?" for braille characters. Use Windows Terminal for best results.
 
 #### Load (`load`)
 
@@ -366,15 +515,21 @@ osync load llama3
 osync load qwen2:7b
 
 # Load a model on remote server
-osync load llama3 http://192.168.0.100:11434
+osync load llama3 -d http://192.168.0.100:11434
 
-# Load with custom keep-alive duration
-osync load llama3 --keepalive 30m
+# URL format with embedded model name
+osync load http://192.168.0.100:11434/llama3
 ```
 
+**Options:**
+
+- `<model>` - Model name to load into memory (required)
+- `-d <url>` - Remote server URL (default: local)
+
 **Features:**
+
 - Preloads model into VRAM for faster inference
-- Configurable keep-alive duration
+- Shows elapsed time and API-reported load duration
 - Works on both local and remote servers
 
 #### Unload (`unload`)
@@ -382,15 +537,27 @@ osync load llama3 --keepalive 30m
 Unload a model from memory.
 
 ```bash
-# Unload a model on local server
+# Unload a specific model on local server
 osync unload llama3
 osync unload qwen2:7b
 
+# Unload all models (no model name specified)
+osync unload
+
 # Unload a model on remote server
-osync unload llama3 http://192.168.0.100:11434
+osync unload llama3 -d http://192.168.0.100:11434
+
+# URL format with embedded model name
+osync unload http://192.168.0.100:11434/llama3
 ```
 
+**Options:**
+
+- `<model>` - Model name to unload from memory (optional - if not specified, unloads all models)
+- `-d <url>` - Remote server URL (default: local)
+
 **Features:**
+
 - Frees VRAM by unloading model
 - Immediate unloading (keep-alive set to 0)
 - Works on both local and remote servers
@@ -406,8 +573,10 @@ osync qc -M llama3.2 -Q q4_k_m,q5_k_m,q8_0
 # Specify custom base quantization
 osync qc -M llama3.2 -Q q4_k_m,q5_k_m -B fp16
 
-# Test on remote server
+# Test on remote server (multiple ways to specify)
 osync qc -M llama3.2 -Q q4_k_m,q5_k_m -D http://192.168.1.100:11434
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -D 192.168.1.100           # IP (auto: http:// + :11434)
+osync qc -M llama3.2 -Q q4_k_m,q5_k_m -D myserver/               # trailing slash
 
 # Custom output file
 osync qc -M llama3.2 -Q q4_k_m,q5_k_m -O my-results.json
@@ -559,6 +728,12 @@ Wildcard behavior:
 - `--verbose` - Show judgment details (question ID, score, reason) for each judged question
 - `--ondemand` - Pull models on-demand if not available, then remove after testing (see On-Demand Mode below)
 - `--repo <url>` - Repository URL for the model source (saved in results file for qcview)
+- `--overwrite` - Overwrite existing output file without prompting
+- `--enablethinking` - Enable thinking mode for thinking models (disabled by default)
+- `--thinklevel <level>` - Set thinking level (low, medium, high) - overrides --enablethinking
+- `--no-unloadall` - Skip unloading all models before testing
+- `--logfile <path>` - Log process output to file (appends if exists, timestamps each line, strips color codes)
+- `--fix` - Attempt to fix a corrupted/malformed results file and recover data (outputs to .fixed.json)
 
 **Judge Scoring:**
 
@@ -811,6 +986,152 @@ Displays color-coded results with:
 - `-O <file>` - Output filename (default: auto-generated based on format)
 - `--repo <url>` - Repository URL (displayed in output, overrides value from results file)
 - `--metricsonly` - Ignore judgment data and show only metrics-based scores (useful for comparing pure model output quality without judge influence)
+- `--overwrite` - Overwrite existing output file without prompting
+
+#### Context Benchmark (`bench`)
+
+Run context tracking benchmarks to evaluate how well models maintain information across long conversations.
+
+```bash
+# Basic benchmark with a model
+osync bench -M llama3.2
+
+# Test on remote server (multiple ways to specify)
+osync bench -M llama3.2 -D http://192.168.1.100:11434
+osync bench -M llama3.2 -D 192.168.1.100            # IP (auto: http:// + :11434)
+osync bench -M llama3.2 -D myserver/                # trailing slash
+
+# With judge evaluation
+osync bench -M llama3.2 --judge gemma3:12b
+
+# Custom output file
+osync bench -M llama3.2 -O my-benchmark.json
+
+# Enable thinking for thinking models (qwen3, deepseek-r1) - disabled by default
+osync bench -M qwen3 --enablethinking
+
+# Control thinking level (overrides --enablethinking)
+osync bench -M qwen3 --thinklevel medium
+
+# Skip unloading all models before testing
+osync bench -M llama3.2 --no-unloadall
+
+# Generate a custom test suite
+osync bench --generate-suite -T custom-suite.json -O custom-suite.json
+```
+
+**How It Works:**
+
+The bench command generates dynamic stories with embedded facts and tests the model's ability to:
+1. Answer questions about facts in the current story category (New questions)
+2. Recall facts from previous categories in the conversation (Old questions)
+3. Execute tool calls when tool mode is enabled
+
+**Question Types:**
+
+- **New** - Questions about facts introduced in the current category (tests comprehension)
+- **Old** - Questions requiring retrieval of facts from earlier in the conversation (tests context tracking)
+- **Tool** - Questions requiring tool/function calls (when tools are enabled)
+
+**Scoring:**
+
+Each question is evaluated as:
+- **Correct** - Answer contains the expected information
+- **Incorrect** - Answer is wrong or missing key information
+- **Partial** - Answer is partially correct (when applicable)
+
+**Options:**
+
+- `-M <name>` - Model name without tag (required unless --help-cloud, --showtools, or --generate-suite)
+- `-Q <tags>` - Model/Quantization tags to compare (comma-separated, supports wildcards e.g., Q4*,IQ*)
+- `-D <url>` - Remote server URL (default: local)
+- `-O <file>` - Results output file (default: modelname.testtype.json)
+- `-T <file>` - Test suite file or type. For bench: filename first, falls back to v1<type>.json if type given. For --generate-suite: test type (ctxbench/ctxtoolsbench)
+- `-L <category>` - Limit testing to a specific category (e.g., 2k, 4k, 8k, 16k, 32k, 64k, 128k, 256k)
+- `-Te <value>` - Model temperature (default: from model template)
+- `-S <value>` - Model seed (default: 365)
+- `-To <value>` - Model top_p (default: from model template)
+- `-Top <value>` - Model top_k (default: from model template)
+- `-R <value>` - Model repeat_penalty (default: from model template)
+- `-Fr <value>` - Model frequency_penalty (default: from model template)
+- `--force` - Force re-run testing for quantizations/models already present in results file
+- `--rejudge` - Re-run judgment process for existing test results (without re-testing)
+- `--judge <model>` - Judge model for answer evaluation. Ollama: model_name or http://host:port/model. Cloud: @provider[:key]/model
+- `--mode <mode>` - Judge execution mode: `serial` (default) or `parallel`
+- `--timeout <seconds>` - API timeout in seconds (default: 1800)
+- `--verbose` - Show testing conversation, tools usage, judgment details
+- `--judge-ctxsize <value>` - Context length for judge model (0 = auto based on test type)
+- `--ondemand` - Pull models on-demand if not available, then remove after testing
+- `--repo <url>` - Repository URL for the model source (saved per model/quant in results file)
+- `--showtools` - Display available tools with descriptions and queryable data
+- `--generate-suite` - Generate test suites. Use with -T (ctxbench/ctxtoolsbench) for specific type, -O for custom filename
+- `--help-cloud` - Show detailed help for cloud provider integration
+- `--enablethinking` - Enable thinking mode for thinking models (disabled by default)
+- `--thinklevel <level>` - Set thinking level (low, medium, high) - overrides --enablethinking
+- `--no-unloadall` - Skip unloading all models before testing
+- `--overwrite` - Overwrite existing output file without prompting
+- `--ctxpct <value>` - Content scaling percentage for test suite generation (default: 100, range: 50-150)
+- `--logfile <path>` - Log process output to file (appends if exists, timestamps each line, strips color codes)
+- `--calibrate` - Enable token calibration mode: detailed tracking of estimated vs actual tokens at each step
+- `--calibrate-output <file>` - Output file for calibration data (default: calibration_<model>.json in test suite directory)
+- `--fix` - Fix corrupted/malformed results JSON file (specify file with -O or -M)
+
+**Bench Test Suite Format:**
+
+Custom bench test suites can specify a `numPredict` field to control maximum tokens per response:
+```json
+{
+  "testType": "ctxbench",
+  "testDescription": "Custom context benchmark",
+  "numPredict": 16384,
+  "maxContextLength": 131072,
+  "categories": [...]
+}
+```
+
+- `numPredict` - Maximum tokens generated per test response (default: 16384)
+- `maxContextLength` - Maximum context length supported by the test suite
+- Judge responses use a fixed 8192 token limit
+
+#### View Context Benchmark Results (`benchview`)
+
+Display context benchmark results in formatted tables or export to various formats.
+
+```bash
+# View results in table format (console)
+osync benchview llama3.2.ctxbench.json
+
+# Export to different formats
+osync benchview results.json -Fo json -O report.json
+osync benchview results.json -Fo md -O report.md
+osync benchview results.json -Fo html -O report.html
+osync benchview results.json -Fo pdf -O report.pdf
+```
+
+**Output Information:**
+
+- Overall accuracy percentage
+- Category-by-category breakdown
+- Question type analysis (New vs Old accuracy)
+- Tool usage statistics (when applicable)
+- Detailed Q&A with model responses
+
+**Output Formats:**
+
+- **table** (default) - Color-coded console output
+- **json** - Complete results with all scores and responses
+- **md** - Markdown format with tables
+- **html** - Interactive HTML with theme toggle
+- **pdf** - Professional PDF report
+
+**Options:**
+
+- `<file>` - Results file to view (required, positional argument)
+- `-Fo <format>` - Output format: table, json, md, html, pdf (default: table)
+- `-O <file>` - Output filename (default: auto-generated based on format)
+- `-C <category>` - Filter to specific category
+- `--details` - Show detailed Q&A results in output
+- `--overwrite` - Overwrite existing output file without prompting
 
 #### Manage (`manage`)
 
@@ -820,8 +1141,10 @@ Interactive TUI for managing models with keyboard shortcuts.
 # Launch manage interface for local server
 osync manage
 
-# Launch manage interface for remote server
+# Launch manage interface for remote server (multiple ways to specify)
 osync manage http://192.168.0.100:11434
+osync manage 192.168.0.100                # IP (auto: http:// + :11434)
+osync manage myserver/                    # trailing slash
 ```
 
 **Features:**
@@ -951,7 +1274,7 @@ osync
 # Type command and press enter
 > cp llama3 my-backup
 > ls "qwen*"
-> exit
+> quit    # or type 'exit', or press Ctrl+C
 ```
 
 ### Pattern Matching
@@ -998,10 +1321,15 @@ osync update llama3
 
 #### Deploy to Multiple Servers
 ```bash
-# Upload from local to multiple servers
-osync cp llama3 http://192.168.0.10:11434
-osync cp llama3 http://192.168.0.11:11434
-osync cp llama3 http://192.168.0.12:11434
+# Upload from local to multiple servers (short form with IP)
+osync cp llama3 192.168.0.10
+osync cp llama3 192.168.0.11
+osync cp llama3 192.168.0.12
+
+# Or using hostnames with trailing slash
+osync cp llama3 server1/
+osync cp llama3 server2/
+osync cp llama3 server3/
 
 # Copy between remote servers
 osync cp http://192.168.0.10:11434/llama3 http://192.168.0.11:11434/llama3
@@ -1033,6 +1361,155 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.2.9
+- **Real-Time Monitor Improvements** - Enhanced monitoring dashboard
+  - Added `-Hi` shortcut for `--history` argument (e.g., `osync monitor -Hi 10`)
+  - Plain integers in `--history` are now treated as minutes (e.g., `-Hi 10` = 10 minutes)
+  - Moved date/time from header to status bar (right-justified), reclaiming one line of vertical space
+  - Status bar now always pinned to bottom of terminal window
+  - Added osync version with build number in Ollama panel (e.g., `osync v1.2.9 (b20260116-1814)`)
+  - Reduced screen flicker during refresh by overwriting content in place
+  - Fixed display artifacts when models load/unload (consistent table structure)
+  - Fixed graph scaling to properly fill the graph width based on history duration
+  - Time axis shows seconds when history < 5 minutes (avoids repeated minute labels)
+  - Fixed model expiration time calculation (was showing wrong time due to timezone handling)
+  - **Ollama process metrics now aggregate ALL related processes** (ollama serve, runners, llama-server)
+  - Shows process count in Ollama panel when multiple processes exist (e.g., "28 procs, 3.9 GB")
+  - **Dynamic graph headers**: Shows "Ollama" (blue/orange) when per-process data available, "System" (yellow/steel) when using system-wide fallback
+  - **VRAM fallback**: Uses Ollama API SizeVram when nvidia-smi can't report per-process VRAM (Windows/WDDM)
+  - **GPU utilization fallback**: Uses total GPU utilization when per-process utilization unavailable
+  - **NvAPIWrapper integration** (Windows only): Additional NVIDIA GPU data source as fallback
+  - **D3DKMT per-process GPU monitoring** (Windows only): Native Windows kernel API for accurate per-process GPU utilization and VRAM tracking, works with any GPU vendor (NVIDIA, AMD, Intel)
+  - Improved process name matching for Ollama detection (supports ollama_llama_server, llama-server, runner)
+- **New Bench Command** - Context tracking benchmark with dynamic story-based tests
+  - Generates stories with embedded facts across multiple categories
+  - Tests model's ability to track context through conversation
+  - Question types: New (current category facts), Old (retrieval from previous categories)
+  - Tool calling support for function execution tests
+  - Judge evaluation for answer quality assessment
+  - `--enablethinking` and `--thinklevel` arguments for thinking models (qwen3, deepseek-r1)
+  - `--no-unloadall` argument to skip unloading all models before testing
+  - `--overwrite` argument to skip file overwrite prompts
+  - `--generate-suite` to create custom test suite JSON files with `-T` and `-O` options
+  - Configurable context length, temperature, seed, and other parameters
+  - Progress bar during testing with timing statistics (Last/Avg/Max response times)
+  - Improved pull progress display with download speed and ETA
+  - Thinking token tracking: separate tracking for model thinking/reasoning tokens with verbose output
+  - Character consistency: story generator maintains consistent name-to-animal mapping across all chapters
+  - Optimized message flow: instructions and context combined with first question (avoids model confusion)
+  - Context length management: auto-detects model max context, configurable overhead (2K normal, 4K thinking)
+  - Two-phase HuggingFace rate limit retry: 50 quick retries (2s delay), then 50 slow retries (30s/API delay)
+  - Auto-backup: creates .backup.zip of existing results file before continuing (protects against data loss)
+  - `--mode=parallel` for parallel judgment - judges answers in background while testing continues
+  - Parallel mode dual progress bars: test progress bar shows test model metrics (Avg/Max time, p:/e: tok/s), judge progress bar shows judge model metrics separately
+  - Pre-flight check caching: thinking detection, context settings, and tools validation cached per model (SHA256 verified)
+- **New BenchView Command** - View and export context benchmark results
+  - Multiple output formats: table (console), json, md (markdown), html, pdf
+  - Category breakdown with accuracy percentages
+  - Question type analysis (New vs Old fact retrieval)
+  - Tool usage statistics when applicable
+  - `--overwrite` argument to skip file overwrite prompts
+- **Increased num_predict Limits** - Larger token limits for improved response quality
+  - Bench pre-flight check: 512 → 2048 (fixes issues with some models)
+  - Bench test responses: 2048 → 16384 (configurable via test suite `numPredict`)
+  - Bench judge: added 8192 limit (was missing)
+  - QC judge: 800 → 8192 (reduces truncated judge responses)
+- **Bench Test Suite Configuration** - New `numPredict` field in bench test suite JSON
+  - Controls maximum tokens generated per test response
+  - Default: 16384 tokens
+  - Can be customized per test suite for different use cases
+- **Enhanced Process Status (`ps`)** - Extended system monitoring
+  - Shows Ollama process CPU and memory usage when running locally
+  - GPU monitoring for NVIDIA cards (uses nvidia-smi): utilization, memory, temperature, power
+  - GPU monitoring for AMD cards (uses rocm-smi): utilization, memory, temperature, power
+  - Ollama-specific VRAM usage per GPU (shows percentage of total GPU memory)
+  - Color-coded output: green (0-50%), yellow (50-75%), orange (75-90%), red (90-100%)
+  - Temperature color coding: green (<60°C), yellow (60-70°C), orange (70-80°C), red (>80°C)
+  - Automatically detects available GPU monitoring tools
+- **Load/Unload Command Improvements**
+  - Load command now shows proper "Model not found" error instead of misleading connection error
+  - Both commands verify status using /api/ps after operation completes
+  - Better error messages for different HTTP status codes (404, 500, etc.)
+- **CLI Improvements**
+  - Shortened `osync -h` output to show only global options and available commands
+  - Use `osync <command> -h` for detailed help on specific commands
+  - Fixed ANSI color bleed on Linux/macOS - terminal no longer stays green after osync exits
+  - Explicit ANSI reset sequence (`\x1b[0m`) on exit prevents color leakage to shell prompt
+- **Bug Fixes**
+  - Fixed nvidia-smi parsing for power and memory values on systems with non-English locales
+  - Fixed GPU stats display to properly match ollama processes to their respective GPUs by UUID
+  - Fixed copy command not detecting IP addresses as remote servers (e.g., `osync cp model 192.168.0.100`)
+  - Fixed copy to remote destination requiring model name - now uses source model name when destination has no model
+  - Fixed HuggingFace model copy using source model name when destination has no explicit name
+  - Fixed `qc` and `bench` commands silently exiting when remote test server is unreachable - now shows clear "Could not connect to server" error message
+  - Fixed spurious ANSI escape characters (`←[0m`) appearing after command output on Windows
+- **QC Command Updates**
+  - `--enablethinking` and `--thinklevel` arguments for thinking models (qwen3, deepseek-r1)
+  - `--no-unloadall` argument to skip unloading all models before testing
+  - `--overwrite` argument to overwrite existing output file without prompting
+  - Fixed HttpClient timeout modification error ("This instance has already started one or more requests")
+  - Per-request timeout handling allows dynamic timeout extension during retries
+  - Improved pull progress display with download speed and ETA for `--ondemand` mode
+  - Fixed OutOfMemoryException during JSON serialization of large results (uses streaming)
+  - Fixed model preloading hanging issue - switched from `/api/chat` to lightweight `/api/generate` call
+  - Smart model loading: detects if model is already loaded, skips unload and just resets keep_alive timer
+  - Two-phase HuggingFace rate limit retry: 50 quick retries (2s delay), then 50 slow retries (30s/API delay)
+  - `--fix` argument to recover corrupted/malformed JSON results files (outputs to .fixed.json)
+    - Multi-strategy recovery: structural analysis finds last valid QuestionResult, then rebuilds proper JSON closures
+    - Handles corrupted closing sequences (e.g., missing array brackets, extra braces)
+    - Reports recovery statistics: truncated arrays/objects, fixed closures, removed bytes
+  - Auto-backup: creates .backup.zip of existing results file before continuing (protects against data loss)
+  - Atomic file saves: write to temp file then rename, prevents corruption on cancellation
+  - Force exit (double Ctrl+C) now saves results before exiting
+  - Fixed Spectre.Console markup errors when loading corrupted JSON files (proper escape of exception messages)
+  - Fixed logprobs detection after model preload by using separate HTTP connections
+- **QcView Command Updates**
+  - `--overwrite` argument to overwrite existing output file without prompting
+  - Fixed OutOfMemoryException when loading large JSON results files (uses streaming deserialization)
+- **BenchView Command Updates**
+  - Fixed OutOfMemoryException when loading large JSON results files (uses streaming deserialization)
+  - **Multiple results files comparison** - Pass comma-separated files to compare different models
+  - Test suite digest validation ensures all files used identical test suite
+  - Default output filename computed from input filenames (e.g., `file1-file2.html`)
+  - **Enhanced HTML output** - qcview-style dark theme with toggle, collapsible sections
+  - Description field spans full width in header
+  - **Q&A details always shown** in HTML and PDF (no longer requires `--details`)
+  - Full answers, model thinking, judgment reasons, and tools used
+  - Subcategory table with two-row header (category spanning subcategories)
+  - Average speed per category table with response times
+  - **PDF improvements** - Header in table format with all metadata including versions
+  - All tables have proper borders, all three summary tables included
+- **Bench Command Updates**
+  - **Test suite digest validation** - SHA256 digest computed and saved for each test suite
+  - Validates digest when appending to existing results file (prevents mixing test versions)
+  - **Context length comparison fix** - 2% margin tolerance for model/category matching
+  - Handles both 1000-based (256k=256000) and 1024-based (256k=262144) context definitions
+  - Models reporting 256000 now correctly match 256k category instead of falling to 128k
+- **Process Logging** - New `--logfile` argument for `qc` and `bench` commands
+  - Logs all console output to a text file with timestamps
+  - Appends to existing log file (multiple sessions in one file)
+  - Strips ANSI escape codes and Spectre.Console markup for clean text output
+  - Timestamps each line with millisecond precision (e.g., `[2026-01-17 06:38:20.176]`)
+  - Session start/end markers for clear log boundaries
+- **URL Handling Improvements** - Better defaults for remote server URLs
+  - Default port 11434 when not specified (e.g., `http://192.168.1.100` becomes `http://192.168.1.100:11434`)
+  - Default `http://` protocol when not specified (e.g., `192.168.1.100:11434` becomes `http://192.168.1.100:11434`)
+  - IP addresses and hostnames automatically detected as remote servers across all commands
+  - Trailing slash indicates server URL (e.g., `myserver/` → `http://myserver:11434`) since model names cannot end with `/`
+  - Applied consistently to: cp, ls, rm, update, ps, load, unload, run, qc, bench
+  - **Remote server detection rules:**
+    - Has protocol (`http://` or `https://`) → remote server
+    - Is an IP address (`192.168.0.100`) → remote server
+    - Has port number (`host:11434`) → remote server
+    - Ends with `/` (`host/`) → remote server
+    - Starts with `localhost` → remote server
+    - Plain hostname without port or `/` (`host`) → treated as model name
+- **Terminal Compatibility Fix** - Fixed application hang with TERM=xterm-256color
+  - Automatic TERM override to xterm-16color on Linux/macOS in SSH/tmux sessions
+  - Restores original TERM on exit
+  - Prevents console library capability detection hangs over remote connections
+- **Interactive Mode Improvements** - Updated REPL welcome message to mention Ctrl+C for exit
 
 v1.2.8
 - **Cloud Provider Support for Judge Models** - Use cloud AI providers for `--judge` and `--judgebest`
@@ -1240,7 +1717,7 @@ v1.2.4
   - Case-insensitive JSON property matching for Reason/reason/REASON fields
   - Multiple regex patterns with increasing leniency for fallback parsing
   - Truncated JSON repair to handle incomplete responses from models
-  - Increased num_predict from 200 to 800 to reduce truncated responses
+  - Increased num_predict from 200 to 800 to reduce truncated responses (later increased to 8192 in v1.2.9)
   - Full raw JSON output displayed when reason parsing fails (for debugging)
 - **Improved Judge Scoring Accuracy** - Fixed score interpretation issues
   - Changed JSON schema score type from "integer" to "number" for better model compatibility

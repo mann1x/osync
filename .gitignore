@@ -344,5 +344,7 @@ healthchecksdb
 /osync/.claude
 .claude
 
-# Claude Code temp files
+# Claude Code files
 tmpclaude*
+*claude/settings.json
+*claude/settings.local.json

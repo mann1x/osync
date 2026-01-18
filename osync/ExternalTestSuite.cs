@@ -16,7 +16,7 @@ namespace osync
 
         public int TotalQuestions => _data.Categories.Sum(c => c.Questions.Count);
 
-        public int NumPredict => _data.NumPredict;
+        public int? NumPredict => _data.NumPredict;
 
         public int ContextLength => _data.ContextLength;
 

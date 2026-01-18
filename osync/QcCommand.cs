@@ -64,6 +64,9 @@ namespace osync
         // Track last displayed context length to show overrides
         private int _lastDisplayedContextLength = 0;
 
+        // Log file writer for process logging
+        private LogFileWriter? _logger;
+
         // System prompt for the judge model - includes full instructions for redundancy
         private const string JUDGE_SYSTEM_PROMPT = @"You are a SIMILARITY JUDGE. You compare two AI-generated responses (A and B) and measure how SIMILAR they are to each other, and determine which is qualitatively better.
 
@@ -168,9 +171,11 @@ Output your judgment:
             // JudgeCtxSize 0 = auto (calculated per-question: test_ctx * 2 + 2048)
             // No longer set a default here - handled dynamically in judgment
 
+            // Use infinite timeout on HttpClient - we control timeout via per-request CancellationTokenSource
+            // This allows _args.Timeout to be modified dynamically during retry without HttpClient error
             _httpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(_args.Timeout)
+                Timeout = Timeout.InfiniteTimeSpan
             };
 
             // Apply default values if not set (PowerArgs doesn't use property initializers)
@@ -198,7 +203,13 @@ Output your judgment:
 
         /// <summary>
         /// Parse the --judge argument to extract base URL and model name
-        /// Supports: "modelname", "http://host:port/modelname", "@provider[:token]/model" (cloud)
+        /// Supports flexible URL formats like copy command:
+        /// - modelname → local model on localhost
+        /// - http://server:port/model → full URL
+        /// - 192.168.100.100/model → IP address detected as server
+        /// - myserver:11434/model → hostname with port
+        /// - myserver//model → trailing slash indicates server
+        /// - @provider[:token]/model → cloud provider
         /// </summary>
         private void ParseJudgeArgument(string judge)
         {
@@ -208,21 +219,21 @@ Output your judgment:
                 var config = CloudJudgeProviderFactory.ParseArgument(judge);
                 if (config == null)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid cloud judge format. Expected @provider[:token]/model[/]");
+                    Log($"[yellow]Warning: Invalid cloud judge format. Expected @provider[:token]/model[/]");
                     return;
                 }
 
                 if (string.IsNullOrEmpty(config.ApiKey))
                 {
                     var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
-                    AnsiConsole.MarkupLine($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
+                    Log($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
                     return;
                 }
 
                 _cloudJudgeProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
                 if (_cloudJudgeProvider == null)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
+                    Log($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
                     return;
                 }
 
@@ -232,26 +243,42 @@ Output your judgment:
                 var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
                 var version = _cloudJudgeProvider.GetApiVersion();
                 var versionStr = version != null ? $" v{version}" : "";
-                AnsiConsole.MarkupLine($"[dim]Judge model: {_judgeModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                Log($"[dim]Judge model: {_judgeModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
                 return;
             }
+
+            // Check if it's a remote server with model
+            string? serverPart = null;
+            string modelPart = judge;
 
             if (judge.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 judge.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                // Remote judge: http://host:port/modelname
-                var match = Regex.Match(judge, @"^(https?://[^/]+)/(.+)$", RegexOptions.IgnoreCase);
-                if (match.Success)
+                // Parse as full URL: http://host:port/model
+                var uri = new Uri(judge);
+                serverPart = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
+                modelPart = uri.AbsolutePath.TrimStart('/');
+            }
+            else
+            {
+                // Check for IP or hostname:port before model name
+                var slashIndex = judge.IndexOf('/');
+                if (slashIndex > 0)
                 {
-                    _judgeBaseUrl = match.Groups[1].Value;
-                    _judgeModelName = match.Groups[2].Value;
+                    var possibleServer = judge.Substring(0, slashIndex);
+                    if (OsyncProgram.LooksLikeRemoteServer(possibleServer) ||
+                        OsyncProgram.LooksLikeRemoteServer(possibleServer + "/"))
+                    {
+                        serverPart = OsyncProgram.NormalizeServerUrl(possibleServer);
+                        modelPart = judge.Substring(slashIndex + 1).TrimStart('/');
+                    }
                 }
-                else
-                {
-                    // URL without model name - invalid
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid judge URL format. Expected http://host:port/modelname[/]");
-                    return;
-                }
+            }
+
+            if (serverPart != null)
+            {
+                _judgeBaseUrl = serverPart;
+                _judgeModelName = modelPart;
             }
             else
             {
@@ -268,16 +295,22 @@ Output your judgment:
 
             _judgeHttpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(_args.Timeout)
+                Timeout = Timeout.InfiniteTimeSpan
             };
 
             _judgeEnabled = true;
-            AnsiConsole.MarkupLine($"[dim]Judge model: {_judgeModelName} @ {_judgeBaseUrl}[/]");
+            Log($"[dim]Judge model: {_judgeModelName} @ {_judgeBaseUrl}[/]");
         }
 
         /// <summary>
         /// Parse the --judgebest argument to extract base URL and model name
-        /// Supports: "modelname", "http://host:port/modelname", "@provider[:token]/model" (cloud)
+        /// Supports flexible URL formats like copy command:
+        /// - modelname → local model on localhost
+        /// - http://server:port/model → full URL
+        /// - 192.168.100.100/model → IP address detected as server
+        /// - myserver:11434/model → hostname with port
+        /// - myserver//model → trailing slash indicates server
+        /// - @provider[:token]/model → cloud provider
         /// </summary>
         private void ParseJudgeBestArgument(string judgeBest)
         {
@@ -287,21 +320,21 @@ Output your judgment:
                 var config = CloudJudgeProviderFactory.ParseArgument(judgeBest);
                 if (config == null)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid cloud judgebest format. Expected @provider[:token]/model[/]");
+                    Log($"[yellow]Warning: Invalid cloud judgebest format. Expected @provider[:token]/model[/]");
                     return;
                 }
 
                 if (string.IsNullOrEmpty(config.ApiKey))
                 {
                     var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
-                    AnsiConsole.MarkupLine($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
+                    Log($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
                     return;
                 }
 
                 _cloudJudgeBestProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
                 if (_cloudJudgeBestProvider == null)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
+                    Log($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
                     return;
                 }
 
@@ -311,26 +344,42 @@ Output your judgment:
                 var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
                 var version = _cloudJudgeBestProvider.GetApiVersion();
                 var versionStr = version != null ? $" v{version}" : "";
-                AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
                 return;
             }
+
+            // Check if it's a remote server with model
+            string? serverPart = null;
+            string modelPart = judgeBest;
 
             if (judgeBest.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                 judgeBest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                // Remote judge: http://host:port/modelname
-                var match = Regex.Match(judgeBest, @"^(https?://[^/]+)/(.+)$", RegexOptions.IgnoreCase);
-                if (match.Success)
+                // Parse as full URL: http://host:port/model
+                var uri = new Uri(judgeBest);
+                serverPart = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
+                modelPart = uri.AbsolutePath.TrimStart('/');
+            }
+            else
+            {
+                // Check for IP or hostname:port before model name
+                var slashIndex = judgeBest.IndexOf('/');
+                if (slashIndex > 0)
                 {
-                    _judgeBestBaseUrl = match.Groups[1].Value;
-                    _judgeBestModelName = match.Groups[2].Value;
+                    var possibleServer = judgeBest.Substring(0, slashIndex);
+                    if (OsyncProgram.LooksLikeRemoteServer(possibleServer) ||
+                        OsyncProgram.LooksLikeRemoteServer(possibleServer + "/"))
+                    {
+                        serverPart = OsyncProgram.NormalizeServerUrl(possibleServer);
+                        modelPart = judgeBest.Substring(slashIndex + 1).TrimStart('/');
+                    }
                 }
-                else
-                {
-                    // URL without model name - invalid
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Invalid judgebest URL format. Expected http://host:port/modelname[/]");
-                    return;
-                }
+            }
+
+            if (serverPart != null)
+            {
+                _judgeBestBaseUrl = serverPart;
+                _judgeBestModelName = modelPart;
             }
             else
             {
@@ -347,11 +396,11 @@ Output your judgment:
 
             _judgeBestHttpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(_args.Timeout)
+                Timeout = Timeout.InfiniteTimeSpan
             };
 
             _judgeBestEnabled = true;
-            AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ {_judgeBestBaseUrl}[/]");
+            Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ {_judgeBestBaseUrl}[/]");
         }
 
         /// <summary>
@@ -442,9 +491,43 @@ Output your judgment:
         }
 
         /// <summary>
+        /// Helper method to write to both console (with markup) and log file (plain text).
+        /// </summary>
+        private void Log(string markup)
+        {
+            AnsiConsole.MarkupLine(markup);
+            _logger?.WriteLine(markup);
+        }
+
+        /// <summary>
         /// Main execution method for qc command
         /// </summary>
         public async Task<int> ExecuteAsync()
+        {
+            // Initialize log file writer if --logfile is specified
+            if (!string.IsNullOrWhiteSpace(_args.LogFile))
+            {
+                _logger = new LogFileWriter(_args.LogFile);
+                if (_logger.IsEnabled)
+                {
+                    Log($"[dim]Logging to: {_logger.FilePath}[/]");
+                }
+            }
+
+            try
+            {
+                return await ExecuteInternalAsync();
+            }
+            finally
+            {
+                _logger?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Internal execution method (wrapped for logger disposal)
+        /// </summary>
+        private async Task<int> ExecuteInternalAsync()
         {
             // Handle --help-cloud option
             if (_args.HelpCloud)
@@ -453,18 +536,24 @@ Output your judgment:
                 return 0;
             }
 
+            // Handle --fix option
+            if (_args.Fix)
+            {
+                return await FixResultsFileAsync();
+            }
+
             // Validate required arguments
             if (string.IsNullOrWhiteSpace(_args.ModelName))
             {
-                AnsiConsole.MarkupLine("[red]Error: ModelName (-M) is required[/]");
-                AnsiConsole.MarkupLine("[dim]Use --help-cloud for cloud provider documentation[/]");
+                Log("[red]Error: ModelName (-M) is required[/]");
+                Log("[dim]Use --help-cloud for cloud provider documentation[/]");
                 return 1;
             }
 
             if (string.IsNullOrWhiteSpace(_args.Quants))
             {
-                AnsiConsole.MarkupLine("[red]Error: Quants (-Q) is required[/]");
-                AnsiConsole.MarkupLine("[dim]Use --help-cloud for cloud provider documentation[/]");
+                Log("[red]Error: Quants (-Q) is required[/]");
+                Log("[dim]Use --help-cloud for cloud provider documentation[/]");
                 return 1;
             }
 
@@ -477,23 +566,43 @@ Output your judgment:
                 if (!LoadTestSuite())
                     return 1;
 
+                // Verify test server connection early
+                var (testServerConnected, testServerVersion, testServerError) = await VerifyServerConnectionAsync(_httpClient, _baseUrl);
+                if (!testServerConnected)
+                {
+                    Log($"[red]Error: Cannot connect to test server at {_baseUrl}[/]");
+                    Log($"[red]{testServerError}[/]");
+                    return 1;
+                }
+
+                // Print test server info
+                var isRemoteTestServer = !_baseUrl.Contains("localhost") && !_baseUrl.Contains("127.0.0.1");
+                if (isRemoteTestServer)
+                {
+                    Log($"[cyan]Test server: {_baseUrl} (Ollama {testServerVersion ?? "unknown"})[/]");
+                }
+                else
+                {
+                    Log($"[dim]Test server: {_baseUrl} (Ollama {testServerVersion ?? "unknown"})[/]");
+                }
+
                 // Initialize or load results file
                 if (!await InitializeResultsFileAsync())
                     return 1;
 
                 // Print output file path
-                AnsiConsole.MarkupLine($"[dim]Output file: {GetOutputFilePath()}[/]");
+                Log($"[dim]Output file: {GetOutputFilePath()}[/]");
 
                 // Print repository URL if set
                 if (!string.IsNullOrWhiteSpace(_resultsFile.RepositoryUrl))
                 {
-                    AnsiConsole.MarkupLine($"[dim]Repository: {_resultsFile.RepositoryUrl}[/]");
+                    Log($"[dim]Repository: {_resultsFile.RepositoryUrl}[/]");
                 }
 
                 // Print OnDemand mode status
                 if (_args.OnDemand)
                 {
-                    AnsiConsole.MarkupLine($"[cyan]On-demand mode: Models will be pulled if missing and removed after testing[/]");
+                    Log($"[cyan]On-demand mode: Models will be pulled if missing and removed after testing[/]");
                 }
 
                 // Parse quantization tags to test
@@ -503,7 +612,7 @@ Output your judgment:
 
                 if (rawQuantTags.Count == 0)
                 {
-                    AnsiConsole.MarkupLine("[red]Error: No quantization tags specified[/]");
+                    Log("[red]Error: No quantization tags specified[/]");
                     return 1;
                 }
 
@@ -512,7 +621,7 @@ Output your judgment:
 
                 if (quantTags.Count == 0)
                 {
-                    AnsiConsole.MarkupLine("[red]Error: No quantization tags found after wildcard expansion[/]");
+                    Log("[red]Error: No quantization tags found after wildcard expansion[/]");
                     return 1;
                 }
 
@@ -530,13 +639,13 @@ Output your judgment:
 
                     if (filteredTags.Count == 0)
                     {
-                        AnsiConsole.MarkupLine("[yellow]No matching results found for re-judgment[/]");
+                        Log("[yellow]No matching results found for re-judgment[/]");
                         return 0;
                     }
 
                     if (filteredTags.Count < quantTags.Count)
                     {
-                        AnsiConsole.MarkupLine($"[dim]Rejudge mode: filtered to {filteredTags.Count} existing result(s)[/]");
+                        Log($"[dim]Rejudge mode: filtered to {filteredTags.Count} existing result(s)[/]");
                     }
 
                     quantTags = filteredTags;
@@ -545,7 +654,7 @@ Output your judgment:
                 // Verify judge model exists at startup (if enabled)
                 if (_judgeEnabled)
                 {
-                    AnsiConsole.MarkupLine($"[dim]Verifying judge model/connection...[/]");
+                    Log($"[dim]Verifying judge model/connection...[/]");
 
                     if (_cloudJudgeProvider != null)
                     {
@@ -553,34 +662,51 @@ Output your judgment:
                         var (success, errorMessage) = await _cloudJudgeProvider.ValidateConnectionAsync();
                         if (!success)
                         {
-                            AnsiConsole.MarkupLine($"[red]Error: {errorMessage}[/]");
+                            Log($"[red]Error: {errorMessage}[/]");
                             return 1;
                         }
-                        AnsiConsole.MarkupLine($"[dim]Cloud judge verified: {_judgeModelName} @ {_cloudJudgeProvider.ProviderName}[/]");
+                        Log($"[dim]Cloud judge verified: {_judgeModelName} @ {_cloudJudgeProvider.ProviderName}[/]");
                     }
-                    else
+                    else if (_judgeHttpClient != null && _judgeBaseUrl != null)
                     {
-                        // Ollama validation
+                        // First verify server connection
+                        var (judgeConnected, judgeOllamaVersion, judgeError) = await VerifyServerConnectionAsync(_judgeHttpClient, _judgeBaseUrl);
+                        if (!judgeConnected)
+                        {
+                            Log($"[red]Error: Cannot connect to judge server at {_judgeBaseUrl}[/]");
+                            Log($"[red]{judgeError}[/]");
+                            return 1;
+                        }
+
+                        // Then check if model exists
                         if (!await VerifyJudgeModelExistsAsync())
                         {
-                            AnsiConsole.MarkupLine($"[red]Error: Judge model '{_judgeModelName}' not found on server {_judgeBaseUrl}[/]");
-                            AnsiConsole.MarkupLine($"[yellow]Make sure the judge model is pulled. Try: ollama pull {_judgeModelName}[/]");
+                            Log($"[red]Error: Judge model '{_judgeModelName}' not found on server {_judgeBaseUrl}[/]");
+                            Log($"[yellow]Make sure the judge model is pulled. Try: ollama pull {_judgeModelName}[/]");
                             return 1;
                         }
-                        AnsiConsole.MarkupLine($"[dim]Judge model verified: {_judgeModelName}[/]");
+
+                        // Display server info
+                        var isRemoteJudge = !_judgeBaseUrl.Contains("localhost") && !_judgeBaseUrl.Contains("127.0.0.1");
+                        if (isRemoteJudge)
+                        {
+                            Log($"[cyan]Judge server: {_judgeBaseUrl} (Ollama {judgeOllamaVersion ?? "unknown"})[/]");
+                            Log($"[dim]Judge model verified: {_judgeModelName}[/]");
+                        }
+                        else
+                        {
+                            Log($"[dim]Judge model verified: {_judgeModelName} (Ollama {judgeOllamaVersion ?? "unknown"})[/]");
+                        }
 
                         // Capture judge server Ollama version
-                        if (_judgeHttpClient != null && _judgeBaseUrl != null)
-                        {
-                            _resultsFile.OllamaJudgeVersion = await GetOllamaVersionAsync(_judgeHttpClient, _judgeBaseUrl);
-                        }
+                        _resultsFile.OllamaJudgeVersion = judgeOllamaVersion;
                     }
                 }
 
                 // Verify judge best answer model exists at startup (if enabled)
                 if (_judgeBestEnabled)
                 {
-                    AnsiConsole.MarkupLine($"[dim]Verifying judge best answer model/connection...[/]");
+                    Log($"[dim]Verifying judge best answer model/connection...[/]");
 
                     if (_cloudJudgeBestProvider != null)
                     {
@@ -588,27 +714,44 @@ Output your judgment:
                         var (success, errorMessage) = await _cloudJudgeBestProvider.ValidateConnectionAsync();
                         if (!success)
                         {
-                            AnsiConsole.MarkupLine($"[red]Error: {errorMessage}[/]");
+                            Log($"[red]Error: {errorMessage}[/]");
                             return 1;
                         }
-                        AnsiConsole.MarkupLine($"[dim]Cloud judge best verified: {_judgeBestModelName} @ {_cloudJudgeBestProvider.ProviderName}[/]");
+                        Log($"[dim]Cloud judge best verified: {_judgeBestModelName} @ {_cloudJudgeBestProvider.ProviderName}[/]");
                     }
-                    else
+                    else if (_judgeBestHttpClient != null && _judgeBestBaseUrl != null)
                     {
-                        // Ollama validation
+                        // First verify server connection
+                        var (judgeBestConnected, judgeBestOllamaVersion, judgeBestError) = await VerifyServerConnectionAsync(_judgeBestHttpClient, _judgeBestBaseUrl);
+                        if (!judgeBestConnected)
+                        {
+                            Log($"[red]Error: Cannot connect to judge best answer server at {_judgeBestBaseUrl}[/]");
+                            Log($"[red]{judgeBestError}[/]");
+                            return 1;
+                        }
+
+                        // Then check if model exists
                         if (!await VerifyJudgeBestModelExistsAsync())
                         {
-                            AnsiConsole.MarkupLine($"[red]Error: Judge BestAnswer model '{_judgeBestModelName}' not found on server {_judgeBestBaseUrl}[/]");
-                            AnsiConsole.MarkupLine($"[yellow]Make sure the judge best answer model is pulled. Try: ollama pull {_judgeBestModelName}[/]");
+                            Log($"[red]Error: Judge BestAnswer model '{_judgeBestModelName}' not found on server {_judgeBestBaseUrl}[/]");
+                            Log($"[yellow]Make sure the judge best answer model is pulled. Try: ollama pull {_judgeBestModelName}[/]");
                             return 1;
                         }
-                        AnsiConsole.MarkupLine($"[dim]Judge BestAnswer model verified: {_judgeBestModelName}[/]");
+
+                        // Display server info
+                        var isRemoteJudgeBest = !_judgeBestBaseUrl.Contains("localhost") && !_judgeBestBaseUrl.Contains("127.0.0.1");
+                        if (isRemoteJudgeBest)
+                        {
+                            Log($"[cyan]Judge best server: {_judgeBestBaseUrl} (Ollama {judgeBestOllamaVersion ?? "unknown"})[/]");
+                            Log($"[dim]Judge BestAnswer model verified: {_judgeBestModelName}[/]");
+                        }
+                        else
+                        {
+                            Log($"[dim]Judge BestAnswer model verified: {_judgeBestModelName} (Ollama {judgeBestOllamaVersion ?? "unknown"})[/]");
+                        }
 
                         // Capture judge best answer server Ollama version
-                        if (_judgeBestHttpClient != null && _judgeBestBaseUrl != null)
-                        {
-                            _resultsFile.OllamaJudgeBestAnswerVersion = await GetOllamaVersionAsync(_judgeBestHttpClient, _judgeBestBaseUrl);
-                        }
+                        _resultsFile.OllamaJudgeBestAnswerVersion = judgeBestOllamaVersion;
                     }
                 }
 
@@ -660,7 +803,7 @@ Output your judgment:
                 }
 
                 // Pre-verify all models exist at startup
-                AnsiConsole.MarkupLine($"[dim]Verifying {quantTags.Count} model(s)...[/]");
+                Log($"[dim]Verifying {quantTags.Count} model(s)...[/]");
                 var missingModels = new List<string>();
                 var unavailableModels = new List<string>();
                 var modelsVerifiedMissing = new HashSet<string>(); // Track models that were missing at startup
@@ -705,7 +848,7 @@ Output your judgment:
                         // If on-demand mode, verify model exists in registry
                         if (_args.OnDemand)
                         {
-                            AnsiConsole.MarkupLine($"[dim]  Checking registry for {modelFullName}...[/]");
+                            Log($"[dim]  Checking registry for {modelFullName}...[/]");
                             if (!await CheckModelExistsInRegistryAsync(modelFullName))
                             {
                                 unavailableModels.Add(modelFullName);
@@ -717,34 +860,34 @@ Output your judgment:
                 // If any models are unavailable in registry, exit
                 if (unavailableModels.Count > 0)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: The following {unavailableModels.Count} model(s) are not available in the registry:[/]");
+                    Log($"[red]Error: The following {unavailableModels.Count} model(s) are not available in the registry:[/]");
                     foreach (var model in unavailableModels)
                     {
-                        AnsiConsole.MarkupLine($"  [red]• {model}[/]");
+                        Log($"  [red]• {model}[/]");
                     }
-                    AnsiConsole.MarkupLine($"[yellow]These models cannot be pulled. Check the model names are correct.[/]");
+                    Log($"[yellow]These models cannot be pulled. Check the model names are correct.[/]");
                     return 1;
                 }
 
                 // If models are missing and on-demand is not enabled, exit
                 if (missingModels.Count > 0 && !_args.OnDemand)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: The following {missingModels.Count} model(s) are not available:[/]");
+                    Log($"[red]Error: The following {missingModels.Count} model(s) are not available:[/]");
                     foreach (var model in missingModels)
                     {
-                        AnsiConsole.MarkupLine($"  [red]• {model}[/]");
+                        Log($"  [red]• {model}[/]");
                     }
-                    AnsiConsole.MarkupLine($"[yellow]Make sure the models are pulled, or use --ondemand to pull them automatically.[/]");
+                    Log($"[yellow]Make sure the models are pulled, or use --ondemand to pull them automatically.[/]");
                     return 1;
                 }
 
                 if (missingModels.Count == 0)
                 {
-                    AnsiConsole.MarkupLine($"[dim]All models verified[/]");
+                    Log($"[dim]All models verified[/]");
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"[dim]All models verified ({missingModels.Count} will be pulled on-demand)[/]");
+                    Log($"[dim]All models verified ({missingModels.Count} will be pulled on-demand)[/]");
                 }
 
                 // Track quantizations that need judgment (existing but missing/different judge)
@@ -752,6 +895,9 @@ Output your judgment:
 
                 // Track all background judgment tasks (parallel mode only)
                 var allBackgroundJudgmentTasks = new ConcurrentDictionary<string, (List<Task> tasks, int totalQuestions)>();
+
+                // Note: Smart model unloading is now handled per-quantization via PrepareModelAsync
+                // Only unloads other models if needed, keeps the test model if already loaded
 
                 // Test each quantization
                 foreach (var tag in quantTags)
@@ -803,18 +949,18 @@ Output your judgment:
                                 {
                                     quantsNeedingJudgment.Add(existingResult);
                                 }
-                                AnsiConsole.MarkupLine($"[dim]Queued {modelFullName} for re-judgment ({existingResult.QuestionResults.Count} responses)[/]");
+                                Log($"[dim]Queued {modelFullName} for re-judgment ({existingResult.QuestionResults.Count} responses)[/]");
                             }
                             else
                             {
-                                AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (no responses to judge)[/]");
+                                Log($"[yellow]Skipping {modelFullName} (no responses to judge)[/]");
                             }
                             continue;
                         }
 
                         if (isComplete && !_args.Force)
                         {
-                            AnsiConsole.MarkupLine($"[yellow]Skipping {modelFullName} (already tested, use --force to re-run)[/]");
+                            Log($"[yellow]Skipping {modelFullName} (already tested, use --force to re-run)[/]");
 
                             // Check if this existing result needs judgment (similarity or best answer)
                             if (!existingResult.IsBase && (NeedsJudgment(existingResult) || NeedsJudgeBest(existingResult)))
@@ -827,21 +973,21 @@ Output your judgment:
                         {
                             // Partial result - resume testing
                             var answeredCount = existingResult.QuestionResults.Count;
-                            AnsiConsole.MarkupLine($"[cyan]Resuming {modelFullName} ({answeredCount}/{_testSuite.TotalQuestions} questions completed)[/]");
+                            Log($"[cyan]Resuming {modelFullName} ({answeredCount}/{_testSuite.TotalQuestions} questions completed)[/]");
                         }
                         else if (_args.Force)
                         {
                             // Remove existing result to re-run
                             _resultsFile.Results.Remove(existingResult);
                             existingResult = null;
-                            AnsiConsole.MarkupLine($"[yellow]Re-running {modelFullName} (forced)[/]");
+                            Log($"[yellow]Re-running {modelFullName} (forced)[/]");
                         }
                     }
 
                     // Only print "Testing quantization" if not resuming
                     if (existingResult == null)
                     {
-                        AnsiConsole.MarkupLine($"[cyan]Testing quantization: {modelFullName}[/]");
+                        Log($"[cyan]Testing quantization: {modelFullName}[/]");
                     }
 
                     // Track whether model was pulled on-demand (for cleanup after testing)
@@ -871,10 +1017,10 @@ Output your judgment:
                         if (_args.OnDemand)
                         {
                             // Pull the model on-demand
-                            AnsiConsole.MarkupLine($"[yellow]Model not available, pulling on-demand...[/]");
+                            Log($"[yellow]Model not available, pulling on-demand...[/]");
                             if (!await PullModelAsync(modelFullName))
                             {
-                                AnsiConsole.MarkupLine($"[red]Error: Failed to pull model {modelFullName}[/]");
+                                Log($"[red]Error: Failed to pull model {modelFullName}[/]");
                                 continue;
                             }
 
@@ -882,7 +1028,7 @@ Output your judgment:
                             var actualModelName = await ResolveActualModelNameAsync(modelFullName);
                             if (actualModelName != null && actualModelName != modelFullName)
                             {
-                                AnsiConsole.MarkupLine($"[dim]  Model stored as: {actualModelName}[/]");
+                                Log($"[dim]  Model stored as: {actualModelName}[/]");
                                 modelFullName = actualModelName;
                             }
 
@@ -899,9 +1045,9 @@ Output your judgment:
                         }
                         else
                         {
-                            AnsiConsole.MarkupLine($"[red]Error: Model {modelFullName} not found[/]");
-                            AnsiConsole.MarkupLine($"[yellow]Make sure the model exists. Try: osync list {_args.ModelName}*[/]");
-                            AnsiConsole.MarkupLine($"[yellow]Or use --ondemand to pull models automatically[/]");
+                            Log($"[red]Error: Model {modelFullName} not found[/]");
+                            Log($"[yellow]Make sure the model exists. Try: osync list {_args.ModelName}*[/]");
+                            Log($"[yellow]Or use --ondemand to pull models automatically[/]");
                             continue;
                         }
                     }
@@ -910,8 +1056,8 @@ Output your judgment:
                     var modelInfo = await GetModelInfoAsync(modelFullName, tagForTracking);
                     if (modelInfo == null)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Could not retrieve model info for {modelFullName}[/]");
-                        AnsiConsole.MarkupLine($"[yellow]Make sure the model exists. Try: osync list {_args.ModelName}*[/]");
+                        Log($"[red]Error: Could not retrieve model info for {modelFullName}[/]");
+                        Log($"[yellow]Make sure the model exists. Try: osync list {_args.ModelName}*[/]");
                         // If we pulled on-demand and failed to get info, clean up
                         if (pulledOnDemand)
                         {
@@ -929,24 +1075,43 @@ Output your judgment:
                             // Only warn on family mismatch (parameter size formatting varies)
                             if (modelInfo.Family != baseResult.Family)
                             {
-                                AnsiConsole.MarkupLine($"[yellow]Warning: Model family mismatch[/]");
-                                AnsiConsole.MarkupLine($"  Base: {baseResult.Family} {baseResult.ParameterSize}");
-                                AnsiConsole.MarkupLine($"  Current: {modelInfo.Family} {modelInfo.ParameterSize}");
+                                Log($"[yellow]Warning: Model family mismatch[/]");
+                                Log($"  Base: {baseResult.Family} {baseResult.ParameterSize}");
+                                Log($"  Current: {modelInfo.Family} {modelInfo.ParameterSize}");
                             }
                         }
                     }
 
-                    // Preload model
-                    AnsiConsole.MarkupLine($"[dim]Preloading model...[/]");
-                    var (preloadSuccess, preloadError) = await PreloadModelAsync(modelFullName);
-                    if (!preloadSuccess)
+                    // Smart model loading: check if same model is already loaded
+                    bool modelAlreadyLoaded = false;
+                    if (!_args.NoUnloadAll)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Failed to preload {modelFullName}[/]");
-                        if (!string.IsNullOrEmpty(preloadError))
+                        modelAlreadyLoaded = await PrepareModelAsync(modelFullName);
+                    }
+
+                    // Load or reset model based on whether it's already loaded
+                    bool loadSuccess;
+                    string? loadError;
+                    if (modelAlreadyLoaded)
+                    {
+                        // Lightweight reset - just update keep_alive using /api/generate
+                        Log($"[dim]Resetting model keep_alive...[/]");
+                        (loadSuccess, loadError) = await ResetModelKeepAliveAsync(modelFullName);
+                    }
+                    else
+                    {
+                        // Full load - use /api/chat to properly initialize for logprobs
+                        Log($"[dim]Loading model...[/]");
+                        (loadSuccess, loadError) = await LoadModelAsync(modelFullName);
+                    }
+                    if (!loadSuccess)
+                    {
+                        Log($"[red]Error: Failed to load {modelFullName}[/]");
+                        if (!string.IsNullOrEmpty(loadError))
                         {
-                            AnsiConsole.MarkupLine($"[red]  {preloadError}[/]");
+                            Log($"[red]  {loadError}[/]");
                         }
-                        // Clean up on-demand model if preload fails
+                        // Clean up on-demand model if load fails
                         if (pulledOnDemand || _modelsPulledThisSession.Contains(modelFullName))
                         {
                             await DeleteModelAsync(modelFullName);
@@ -981,13 +1146,13 @@ Output your judgment:
 
                         // Save after each quantization (testing complete, judgment may still be running)
                         SaveResultsFile();
-                        AnsiConsole.MarkupLine($"[green]✓ Completed testing {modelFullName}[/]");
+                        Log($"[green]✓ Completed testing {modelFullName}[/]");
 
                         // Track background judgment tasks for parallel mode
                         if (judgmentTasks.Count > 0)
                         {
                             allBackgroundJudgmentTasks[tagForTracking] = (judgmentTasks, judgmentTasks.Count);
-                            AnsiConsole.MarkupLine($"[dim]  Judgment for {tagForTracking} running in background ({judgmentTasks.Count} questions)...[/]");
+                            Log($"[dim]  Judgment for {tagForTracking} running in background ({judgmentTasks.Count} questions)...[/]");
                         }
 
                         // Run serial judgment if enabled and not base model
@@ -1039,7 +1204,7 @@ Output your judgment:
                     {
                         if (IsSerialMode())
                         {
-                            AnsiConsole.MarkupLine($"\n[cyan]Running judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
+                            Log($"\n[cyan]Running judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
                             foreach (var quantResult in quantsNeedingJudgment)
                             {
                                 // Run similarity judgment first
@@ -1057,7 +1222,7 @@ Output your judgment:
                         else if (IsParallelMode())
                         {
                             // Run parallel judgment for existing quantizations with progress tracking
-                            AnsiConsole.MarkupLine($"\n[magenta]Running parallel judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
+                            Log($"\n[magenta]Running parallel judgment for {quantsNeedingJudgment.Count} existing quantization(s)...[/]");
                             foreach (var quantResult in quantsNeedingJudgment)
                             {
                                 // Run similarity judgment first
@@ -1115,19 +1280,19 @@ Output your judgment:
                 }
 
                 // Final summary
-                AnsiConsole.MarkupLine($"\n[green]Testing complete![/]");
+                Log($"\n[green]Testing complete![/]");
 
                 // Check if any quantizations were successfully tested
                 if (_resultsFile.Results.Count > 0)
                 {
-                    AnsiConsole.MarkupLine($"Results saved to: [cyan]{GetOutputFilePath()}[/]");
-                    AnsiConsole.MarkupLine($"Successfully tested {_resultsFile.Results.Count} quantization(s)");
-                    AnsiConsole.MarkupLine($"View results with: [yellow]osync qcview {GetOutputFilePath()}[/]");
+                    Log($"Results saved to: [cyan]{GetOutputFilePath()}[/]");
+                    Log($"Successfully tested {_resultsFile.Results.Count} quantization(s)");
+                    Log($"View results with: [yellow]osync qcview {GetOutputFilePath()}[/]");
                     return 0;
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"[yellow]No quantizations were successfully tested - no results file created[/]");
+                    Log($"[yellow]No quantizations were successfully tested - no results file created[/]");
                     return 1;
                 }
             }
@@ -1138,7 +1303,7 @@ Output your judgment:
                 if (_cancellationRequested)
                 {
                     // User-initiated cancellation via Ctrl+C
-                    AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                    Log($"\n[yellow]Operation cancelled by user[/]");
                     SavePartialResults();
                     await CleanupOnDemandModelsAsync();
                     return 2;
@@ -1146,8 +1311,8 @@ Output your judgment:
                 else
                 {
                     // Timeout or other cancellation not initiated by user - treat as error
-                    AnsiConsole.MarkupLine($"\n[red]Operation failed: {ex.Message}[/]");
-                    AnsiConsole.MarkupLine($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
+                    Log($"\n[red]Operation failed: {ex.Message}[/]");
+                    Log($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
                     SavePartialResults();
                     // Don't clean up on-demand models on timeout - preserve for resume
                     return 1;
@@ -1158,7 +1323,7 @@ Output your judgment:
                 // Cancellation wrapped in another exception (e.g., from Spectre.Console Progress)
                 if (_cancellationRequested)
                 {
-                    AnsiConsole.MarkupLine($"\n[yellow]Operation cancelled by user[/]");
+                    Log($"\n[yellow]Operation cancelled by user[/]");
                     SavePartialResults();
                     await CleanupOnDemandModelsAsync();
                     return 2;
@@ -1166,15 +1331,15 @@ Output your judgment:
                 else
                 {
                     // Timeout or other cancellation not initiated by user
-                    AnsiConsole.MarkupLine($"\n[red]Operation failed: {ex.Message}[/]");
-                    AnsiConsole.MarkupLine($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
+                    Log($"\n[red]Operation failed: {ex.Message}[/]");
+                    Log($"[yellow]This may be a timeout. Consider increasing --timeout value.[/]");
                     SavePartialResults();
                     return 1;
                 }
             }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine($"[red]Error: {ex.Message}[/]");
+                Log($"[red]Error: {ex.Message}[/]");
                 SavePartialResults();
                 // Don't clean up on-demand models on error - preserve for resume
                 return 1;
@@ -1195,8 +1360,17 @@ Output your judgment:
         {
             if (_cancellationRequested)
             {
-                // Second Ctrl+C - force exit
-                AnsiConsole.MarkupLine($"\n[red]Force exiting...[/]");
+                // Second Ctrl+C - force exit but save first
+                Log($"\n[red]Force exiting... saving results[/]");
+                try
+                {
+                    SaveResultsFile();
+                    Log($"[green]Results saved.[/]");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[red]Warning: Could not save results: {Markup.Escape(ex.Message)}[/]");
+                }
                 return;
             }
 
@@ -1212,7 +1386,7 @@ Output your judgment:
             _waitingForCancelConfirmation = true;
 
             // Show confirmation prompt
-            AnsiConsole.MarkupLine($"\n[yellow]Cancel testing? (y/n)[/]");
+            Log($"\n[yellow]Cancel testing? (y/n)[/]");
 
             // Read response synchronously (may fail in headless mode)
             try
@@ -1224,13 +1398,13 @@ Output your judgment:
                     // Confirmed - proceed with cancellation
                     _cancellationRequested = true;
                     _cts.Cancel();
-                    AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed. Saving partial results... (press Ctrl+C again to force exit)[/]");
+                    Log($"[yellow]Cancellation confirmed. Saving partial results... (press Ctrl+C again to force exit)[/]");
                 }
                 else
                 {
                     // Not confirmed - continue execution
                     _waitingForCancelConfirmation = false;
-                    AnsiConsole.MarkupLine($"[green]Continuing...[/]");
+                    Log($"[green]Continuing...[/]");
                 }
             }
             catch
@@ -1238,7 +1412,7 @@ Output your judgment:
                 // Headless mode - treat as cancel
                 _cancellationRequested = true;
                 _cts.Cancel();
-                AnsiConsole.MarkupLine($"[yellow]Cancellation confirmed (headless mode).[/]");
+                Log($"[yellow]Cancellation confirmed (headless mode).[/]");
             }
         }
 
@@ -1284,16 +1458,16 @@ Output your judgment:
                 SaveResultsFile();
                 var testedCount = _resultsFile.Results.Count;
                 var partialCount = _resultsFile.Results.Count(r => r.QuestionResults.Count < _testSuite.TotalQuestions);
-                AnsiConsole.MarkupLine($"[dim]Partial results saved to: {GetOutputFilePath()}[/]");
+                Log($"[dim]Partial results saved to: {GetOutputFilePath()}[/]");
                 if (partialCount > 0)
                 {
-                    AnsiConsole.MarkupLine($"[dim]{testedCount} quantization(s) saved ({partialCount} incomplete)[/]");
+                    Log($"[dim]{testedCount} quantization(s) saved ({partialCount} incomplete)[/]");
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"[dim]{testedCount} quantization(s) saved[/]");
+                    Log($"[dim]{testedCount} quantization(s) saved[/]");
                 }
-                AnsiConsole.MarkupLine($"[dim]Resume with the same command to continue from where you left off.[/]");
+                Log($"[dim]Resume with the same command to continue from where you left off.[/]");
             }
         }
 
@@ -1328,7 +1502,7 @@ Output your judgment:
 
             if (modelsToCleanup.Count > 0)
             {
-                AnsiConsole.MarkupLine($"[dim]Cleaning up {modelsToCleanup.Count} on-demand model(s)...[/]");
+                Log($"[dim]Cleaning up {modelsToCleanup.Count} on-demand model(s)...[/]");
 
                 foreach (var modelName in modelsToCleanup)
                 {
@@ -1336,11 +1510,11 @@ Output your judgment:
                     {
                         await DeleteModelAsync(modelName);
                         _modelsPulledThisSession.Remove(modelName);
-                        AnsiConsole.MarkupLine($"[dim]  Removed: {modelName}[/]");
+                        Log($"[dim]  Removed: {modelName}[/]");
                     }
                     catch (Exception ex)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {modelName}: {ex.Message}[/]");
+                        Log($"[yellow]  Warning: Failed to remove {modelName}: {ex.Message}[/]");
                     }
                 }
             }
@@ -1361,11 +1535,11 @@ Output your judgment:
                         {
                             await DeleteModelAsync(result.ModelName);
                             result.PulledOnDemand = false;
-                            AnsiConsole.MarkupLine($"[dim]  Removed: {result.ModelName}[/]");
+                            Log($"[dim]  Removed: {result.ModelName}[/]");
                         }
                         catch (Exception ex)
                         {
-                            AnsiConsole.MarkupLine($"[yellow]  Warning: Failed to remove {result.ModelName}: {ex.Message}[/]");
+                            Log($"[yellow]  Warning: Failed to remove {result.ModelName}: {ex.Message}[/]");
                         }
                     }
                 }
@@ -1380,7 +1554,7 @@ Output your judgment:
             // If there are incomplete models being preserved, inform the user
             if (incompleteModels.Count > 0)
             {
-                AnsiConsole.MarkupLine($"[dim]Preserving {incompleteModels.Count} on-demand model(s) with incomplete results for resume[/]");
+                Log($"[dim]Preserving {incompleteModels.Count} on-demand model(s) with incomplete results for resume[/]");
             }
         }
 
@@ -1443,7 +1617,7 @@ Output your judgment:
             if (matchingResult != null)
             {
                 matchingResult.IsBase = true;
-                AnsiConsole.MarkupLine($"[dim]Repaired base flag for: {matchingResult.Tag}[/]");
+                Log($"[dim]Repaired base flag for: {matchingResult.Tag}[/]");
             }
         }
 
@@ -1487,7 +1661,7 @@ Output your judgment:
             {
                 if (!File.Exists(_args.TestSuite))
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Test suite file not found: {_args.TestSuite}[/]");
+                    Log($"[red]Error: Test suite file not found: {_args.TestSuite}[/]");
                     return false;
                 }
 
@@ -1497,19 +1671,19 @@ Output your judgment:
 
                 if (externalData == null)
                 {
-                    AnsiConsole.MarkupLine("[red]Error: Failed to parse test suite JSON file[/]");
+                    Log("[red]Error: Failed to parse test suite JSON file[/]");
                     return false;
                 }
 
                 if (string.IsNullOrEmpty(externalData.Name))
                 {
-                    AnsiConsole.MarkupLine("[red]Error: Test suite JSON must have a 'name' property[/]");
+                    Log("[red]Error: Test suite JSON must have a 'name' property[/]");
                     return false;
                 }
 
                 if (externalData.Categories == null || externalData.Categories.Count == 0)
                 {
-                    AnsiConsole.MarkupLine("[red]Error: Test suite JSON must have at least one category[/]");
+                    Log("[red]Error: Test suite JSON must have at least one category[/]");
                     return false;
                 }
 
@@ -1519,7 +1693,7 @@ Output your judgment:
             }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine($"[red]Error loading test suite: {ex.Message}[/]");
+                Log($"[red]Error loading test suite: {ex.Message}[/]");
                 return false;
             }
         }
@@ -1531,10 +1705,10 @@ Output your judgment:
         {
             var prefix = isExternal ? "Using external test suite" : "Using test suite";
             var numPredictInfo = _testSuite.NumPredict != 4096 ? $", max tokens: {_testSuite.NumPredict}" : "";
-            AnsiConsole.MarkupLine($"[dim]{prefix}: {_testSuite.Name} ({_testSuite.TotalQuestions} questions{numPredictInfo})[/]");
+            Log($"[dim]{prefix}: {_testSuite.Name} ({_testSuite.TotalQuestions} questions{numPredictInfo})[/]");
 
             // Display context length settings
-            AnsiConsole.MarkupLine($"[dim]Test context length: {_testSuite.ContextLength}[/]");
+            Log($"[dim]Test context length: {_testSuite.ContextLength}[/]");
             _lastDisplayedContextLength = _testSuite.ContextLength;
 
             if (_judgeEnabled)
@@ -1542,7 +1716,7 @@ Output your judgment:
                 var judgeCtxDisplay = _args.JudgeCtxSize > 0
                     ? _args.JudgeCtxSize.ToString()
                     : $"auto (test_ctx*2 + 2048 = {_testSuite.ContextLength * 2 + 2048} base)";
-                AnsiConsole.MarkupLine($"[dim]Judge context length: {judgeCtxDisplay}[/]");
+                Log($"[dim]Judge context length: {judgeCtxDisplay}[/]");
             }
         }
 
@@ -1557,8 +1731,9 @@ Output your judgment:
             {
                 try
                 {
-                    var json = await File.ReadAllTextAsync(filePath);
-                    _resultsFile = JsonSerializer.Deserialize<QcResultsFile>(json)
+                    // Use streaming deserialization to handle large files without OOM
+                    await using var fileStream = File.OpenRead(filePath);
+                    _resultsFile = await JsonSerializer.DeserializeAsync<QcResultsFile>(fileStream)
                         ?? throw new InvalidDataException("Failed to deserialize results file");
 
                     // Ensure Results list is initialized (may be null from JSON)
@@ -1567,17 +1742,20 @@ Output your judgment:
                     // Validate compatibility
                     if (_resultsFile.ModelName != _args.ModelName)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Results file is for different model ({_resultsFile.ModelName})[/]");
+                        Log($"[red]Error: Results file is for different model ({_resultsFile.ModelName})[/]");
                         return false;
                     }
 
                     if (_resultsFile.TestSuiteName != _testSuite.Name)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Results file uses different test suite ({_resultsFile.TestSuiteName})[/]");
+                        Log($"[red]Error: Results file uses different test suite ({_resultsFile.TestSuiteName})[/]");
                         return false;
                     }
 
-                    AnsiConsole.MarkupLine($"[dim]Loaded existing results file ({_resultsFile.Results.Count} quantizations tested)[/]");
+                    Log($"[dim]Loaded existing results file ({_resultsFile.Results.Count} quantizations tested)[/]");
+
+                    // Create backup of existing results before continuing
+                    BackupHelper.CreateBackup(filePath, Log);
 
                     // Update repository URL if provided (overrides existing)
                     if (!string.IsNullOrWhiteSpace(_args.Repository))
@@ -1595,7 +1773,7 @@ Output your judgment:
                 }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error loading results file: {ex.Message}[/]");
+                    Log($"[red]Error loading results file: {Markup.Escape(ex.Message)}[/]");
                     return false;
                 }
             }
@@ -1620,11 +1798,13 @@ Output your judgment:
                     TopP = _args.TopP,
                     TopK = _args.TopK,
                     RepeatPenalty = _args.RepeatPenalty,
-                    FrequencyPenalty = _args.FrequencyPenalty
+                    FrequencyPenalty = _args.FrequencyPenalty,
+                    EnableThinking = _args.EnableThinking,
+                    ThinkLevel = string.IsNullOrWhiteSpace(_args.ThinkLevel) ? null : _args.ThinkLevel
                 }
             };
 
-            AnsiConsole.MarkupLine($"[dim]Creating new results file[/]");
+            Log($"[dim]Creating new results file[/]");
             return true;
         }
 
@@ -1642,17 +1822,654 @@ Output your judgment:
         }
 
         /// <summary>
-        /// Save results file to disk
+        /// Attempt to fix a corrupted/malformed results file
+        /// </summary>
+        private async Task<int> FixResultsFileAsync()
+        {
+            // Determine input file path
+            string inputPath;
+            if (!string.IsNullOrEmpty(_args.OutputFile))
+            {
+                inputPath = _args.OutputFile;
+            }
+            else if (!string.IsNullOrWhiteSpace(_args.ModelName))
+            {
+                var sanitizedName = _args.ModelName.Replace('/', '-').Replace('\\', '-');
+                inputPath = $"{sanitizedName}.qc.json";
+            }
+            else
+            {
+                Log("[red]Error: Specify the file to fix with -O <filename> or -M <modelname>[/]");
+                return 1;
+            }
+
+            if (!File.Exists(inputPath))
+            {
+                Log($"[red]Error: File not found: {inputPath}[/]");
+                return 1;
+            }
+
+            // Determine output file path (never overwrite original)
+            var outputPath = Path.ChangeExtension(inputPath, ".fixed.json");
+            if (inputPath.EndsWith(".fixed.json", StringComparison.OrdinalIgnoreCase))
+            {
+                // Already a fixed file, add timestamp
+                outputPath = inputPath.Replace(".fixed.json", $".fixed_{DateTime.Now:yyyyMMdd_HHmmss}.json");
+            }
+
+            Log($"[cyan]Attempting to fix: {inputPath}[/]");
+            Log($"[dim]Output will be saved to: {outputPath}[/]");
+
+            // Read the raw content
+            string rawContent;
+            try
+            {
+                rawContent = await File.ReadAllTextAsync(inputPath);
+                Log($"[dim]Read {rawContent.Length:N0} characters from file[/]");
+            }
+            catch (Exception ex)
+            {
+                Log($"[red]Error reading file: {Markup.Escape(ex.Message)}[/]");
+                return 1;
+            }
+
+            // Try normal parsing first
+            QcResultsFile? resultsFile = null;
+            try
+            {
+                resultsFile = JsonSerializer.Deserialize<QcResultsFile>(rawContent);
+                if (resultsFile != null)
+                {
+                    Log("[green]File parsed successfully - no JSON errors![/]");
+                    Log($"[dim]Found {resultsFile.Results?.Count ?? 0} quantization results[/]");
+
+                    // Check for and strip legacy Bytes arrays from logprobs
+                    var bytesRemoved = CountBytesArraysInContent(rawContent);
+                    if (bytesRemoved > 0)
+                    {
+                        Log($"[cyan]Removed {bytesRemoved:N0} legacy Bytes arrays from logprobs[/]");
+
+                        // Save the cleaned file
+                        var options = new JsonSerializerOptions { WriteIndented = true };
+                        var cleanedJson = JsonSerializer.Serialize(resultsFile, options);
+                        await File.WriteAllTextAsync(outputPath, cleanedJson);
+                        Log($"[green]Cleaned file saved to: {outputPath}[/]");
+
+                        // Show file size reduction
+                        var originalSize = new FileInfo(inputPath).Length;
+                        var newSize = new FileInfo(outputPath).Length;
+                        var savedBytes = originalSize - newSize;
+                        var savedPct = (savedBytes * 100.0) / originalSize;
+                        Log($"[dim]  Original: {originalSize:N0} bytes, Cleaned: {newSize:N0} bytes[/]");
+                        Log($"[dim]  Saved: {savedBytes:N0} bytes ({savedPct:F1}% reduction)[/]");
+                    }
+                    else
+                    {
+                        Log("[dim]No legacy Bytes arrays found - file is already optimized[/]");
+                    }
+                    return 0;
+                }
+            }
+            catch (JsonException ex)
+            {
+                Log($"[yellow]JSON parse error at position {ex.BytePositionInLine ?? 0}: {Markup.Escape(ex.Message)}[/]");
+                Log("[dim]Attempting recovery...[/]");
+            }
+
+            // Try multiple recovery strategies
+            string? fixedContent = null;
+            RecoveryStats stats = new RecoveryStats(0, 0, 0, 0);
+
+            // Strategy 1: Try structural recovery first (handles corrupted closing sequences)
+            Log("[dim]Strategy 1: Structural recovery...[/]");
+            (fixedContent, stats) = TryRecoverJsonStructural(rawContent);
+            if (fixedContent != null)
+            {
+                try
+                {
+                    resultsFile = JsonSerializer.Deserialize<QcResultsFile>(fixedContent);
+                    if (resultsFile != null)
+                    {
+                        Log("[dim]Structural recovery succeeded[/]");
+                        goto RecoverySucceeded;
+                    }
+                }
+                catch (JsonException)
+                {
+                    Log("[dim]Structural recovery produced invalid JSON, trying next strategy...[/]");
+                    fixedContent = null;
+                }
+            }
+            else
+            {
+                Log("[dim]Structural recovery could not find recovery point, trying next strategy...[/]");
+            }
+
+            // Strategy 2: Try general JSON recovery
+            Log("[dim]Strategy 2: General JSON recovery...[/]");
+            (fixedContent, stats) = TryRecoverJson(rawContent);
+            if (fixedContent != null)
+            {
+                try
+                {
+                    resultsFile = JsonSerializer.Deserialize<QcResultsFile>(fixedContent);
+                    if (resultsFile != null)
+                    {
+                        Log("[dim]General recovery succeeded[/]");
+                        goto RecoverySucceeded;
+                    }
+                }
+                catch (JsonException ex2)
+                {
+                    Log($"[dim]General recovery produced invalid JSON: {Markup.Escape(ex2.Message)}[/]");
+                }
+            }
+
+            // All strategies failed
+            if (fixedContent == null)
+            {
+                Log("[red]Error: Could not recover any valid JSON structure[/]");
+                return 1;
+            }
+
+            // If we have partial content but it won't parse, save it
+            Log($"[red]Error: All recovery strategies failed[/]");
+
+            // Save the partially fixed content anyway for manual inspection
+            var partialPath = Path.ChangeExtension(inputPath, ".partial.json");
+            await File.WriteAllTextAsync(partialPath, fixedContent);
+            Log($"[yellow]Saved partial recovery to: {partialPath}[/]");
+            return 1;
+
+        RecoverySucceeded:
+            // Clean up the results
+            resultsFile.Results ??= new List<QuantResult>();
+
+            // Remove incomplete results (those with no question results)
+            var originalCount = resultsFile.Results.Count;
+            resultsFile.Results = resultsFile.Results
+                .Where(r => r != null && !string.IsNullOrEmpty(r.Tag))
+                .ToList();
+
+            // Count valid question results
+            var totalQuestions = resultsFile.Results.Sum(r => r.QuestionResults?.Count ?? 0);
+
+            Log($"[green]Recovery successful![/]");
+            Log($"[dim]  Recovered {resultsFile.Results.Count} quantization(s) with {totalQuestions} total question results[/]");
+            if (stats.TruncatedArrays > 0)
+                Log($"[dim]  Fixed {stats.TruncatedArrays} truncated array(s)[/]");
+            if (stats.TruncatedObjects > 0)
+                Log($"[dim]  Fixed {stats.TruncatedObjects} truncated object(s)[/]");
+            if (stats.FixedClosures > 0)
+                Log($"[dim]  Fixed {stats.FixedClosures} corrupted closure sequence(s)[/]");
+            if (stats.RemovedBytes > 0)
+                Log($"[dim]  Removed {stats.RemovedBytes:N0} bytes of corrupted data[/]");
+
+            // Check for and strip legacy Bytes arrays (they're stripped during re-serialization)
+            var bytesStripped = CountBytesArraysInContent(rawContent);
+            if (bytesStripped > 0)
+                Log($"[dim]  Stripped {bytesStripped:N0} legacy Bytes arrays from logprobs[/]");
+
+            // Save the fixed file
+            try
+            {
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                var fixedJson = JsonSerializer.Serialize(resultsFile, options);
+                await File.WriteAllTextAsync(outputPath, fixedJson);
+                Log($"[green]Fixed file saved to: {outputPath}[/]");
+
+                // Show summary
+                Log($"\n[cyan]Summary of recovered data:[/]");
+                foreach (var result in resultsFile.Results)
+                {
+                    var questionCount = result.QuestionResults?.Count ?? 0;
+                    var hasJudgment = result.QuestionResults?.Any(q => q.Judgment != null) == true;
+                    var judgmentInfo = hasJudgment ? ", judged" : "";
+                    Log($"  [dim]• {result.Tag}: {questionCount} questions{judgmentInfo}[/]");
+                }
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log($"[red]Error saving fixed file: {Markup.Escape(ex.Message)}[/]");
+                return 1;
+            }
+        }
+
+        /// <summary>
+        /// Check if raw JSON content contains legacy Bytes arrays in logprobs
+        /// Returns the count of Bytes arrays found
+        /// </summary>
+        private int CountBytesArraysInContent(string rawContent)
+        {
+            // Count occurrences of "Bytes" property (case-insensitive) in the JSON
+            // This is a simple heuristic - counts all "Bytes": [ patterns
+            int count = 0;
+            int index = 0;
+            while ((index = rawContent.IndexOf("\"Bytes\"", index, StringComparison.OrdinalIgnoreCase)) >= 0)
+            {
+                count++;
+                index += 7;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// Stats from JSON recovery attempt
+        /// </summary>
+        private record RecoveryStats(int TruncatedArrays, int TruncatedObjects, int RemovedBytes, int FixedClosures);
+
+        /// <summary>
+        /// Attempt to recover a malformed JSON string
+        /// Uses a multi-strategy approach to handle various corruption types
+        /// </summary>
+        private (string? FixedContent, RecoveryStats Stats) TryRecoverJson(string content)
+        {
+            int truncatedArrays = 0;
+            int truncatedObjects = 0;
+            int fixedClosures = 0;
+            int originalLength = content.Length;
+
+            // Strategy 1: Use structural parsing with a stack to track what's open
+            // This allows us to detect when closures are wrong (e.g., } when ] expected)
+            var structureStack = new Stack<char>(); // '{' for object, '[' for array
+            var inString = false;
+            var escapeNext = false;
+            var lastGoodPosition = 0; // Position after last successfully closed structure
+            var result = new StringBuilder();
+            var i = 0;
+
+            while (i < content.Length)
+            {
+                var c = content[i];
+
+                if (escapeNext)
+                {
+                    escapeNext = false;
+                    result.Append(c);
+                    i++;
+                    continue;
+                }
+
+                if (c == '\\' && inString)
+                {
+                    escapeNext = true;
+                    result.Append(c);
+                    i++;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = !inString;
+                    result.Append(c);
+                    i++;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    result.Append(c);
+                    i++;
+                    continue;
+                }
+
+                // Outside of strings - handle structural characters
+                switch (c)
+                {
+                    case '{':
+                    case '[':
+                        structureStack.Push(c);
+                        result.Append(c);
+                        break;
+
+                    case '}':
+                        if (structureStack.Count == 0)
+                        {
+                            // Extra closing brace with nothing open - skip it
+                            fixedClosures++;
+                            i++;
+                            continue;
+                        }
+                        var expectedForBrace = structureStack.Peek();
+                        if (expectedForBrace == '{')
+                        {
+                            structureStack.Pop();
+                            result.Append(c);
+                            lastGoodPosition = result.Length;
+                        }
+                        else if (expectedForBrace == '[')
+                        {
+                            // We have an array open but got }, check if this is corrupted closing sequence
+                            // Look ahead to see if we have pattern like },\n  },\n} (corrupted array end)
+                            if (IsCorruptedArrayClose(content, i))
+                            {
+                                // This is a corrupted close - we need to close the array properly
+                                // Remove any trailing comma from result
+                                RemoveTrailingComma(result);
+                                // Close the current object (QuantResult) without comma
+                                result.Append('}');
+                                structureStack.Pop(); // This pops '[' which is wrong, we need to handle the object first
+
+                                // Actually, let's use a different approach - find the last complete element
+                                // and rebuild from there
+                                return TryRecoverJsonStructural(content);
+                            }
+                            else
+                            {
+                                // Unexpected } when [ is open - might be deeply nested, try to continue
+                                result.Append(c);
+                                fixedClosures++;
+                            }
+                        }
+                        break;
+
+                    case ']':
+                        if (structureStack.Count == 0)
+                        {
+                            // Extra closing bracket with nothing open - skip it
+                            fixedClosures++;
+                            i++;
+                            continue;
+                        }
+                        var expectedForBracket = structureStack.Peek();
+                        if (expectedForBracket == '[')
+                        {
+                            structureStack.Pop();
+                            result.Append(c);
+                            lastGoodPosition = result.Length;
+                        }
+                        else
+                        {
+                            // Unexpected ] when { is open - skip
+                            fixedClosures++;
+                            i++;
+                            continue;
+                        }
+                        break;
+
+                    default:
+                        result.Append(c);
+                        break;
+                }
+                i++;
+            }
+
+            // If we're still in a string, truncate to last good position
+            if (inString && lastGoodPosition > 0)
+            {
+                result.Length = lastGoodPosition;
+                // Re-evaluate what's still open after truncation
+                structureStack.Clear();
+                inString = false;
+                escapeNext = false;
+                var truncatedResult = result.ToString();
+                foreach (var ch in truncatedResult)
+                {
+                    if (escapeNext) { escapeNext = false; continue; }
+                    if (ch == '\\' && inString) { escapeNext = true; continue; }
+                    if (ch == '"') { inString = !inString; continue; }
+                    if (inString) continue;
+                    switch (ch)
+                    {
+                        case '{': structureStack.Push('{'); break;
+                        case '[': structureStack.Push('['); break;
+                        case '}': if (structureStack.Count > 0 && structureStack.Peek() == '{') structureStack.Pop(); break;
+                        case ']': if (structureStack.Count > 0 && structureStack.Peek() == '[') structureStack.Pop(); break;
+                    }
+                }
+            }
+
+            // Remove trailing comma if present
+            var workingContent = result.ToString().TrimEnd();
+            if (workingContent.EndsWith(","))
+            {
+                workingContent = workingContent.Substring(0, workingContent.Length - 1);
+            }
+
+            // Build proper closing sequence based on what's still open
+            var closingSequence = new StringBuilder();
+            while (structureStack.Count > 0)
+            {
+                var open = structureStack.Pop();
+                if (open == '[')
+                {
+                    closingSequence.Append(']');
+                    truncatedArrays++;
+                }
+                else
+                {
+                    closingSequence.Append('}');
+                    truncatedObjects++;
+                }
+            }
+
+            var fixedContent = workingContent + closingSequence.ToString();
+            var removedBytes = originalLength - workingContent.Length;
+
+            return (fixedContent, new RecoveryStats(truncatedArrays, truncatedObjects, removedBytes, fixedClosures));
+        }
+
+        /// <summary>
+        /// Check if current position is a corrupted array close sequence like },\n  },\n}
+        /// </summary>
+        private bool IsCorruptedArrayClose(string content, int position)
+        {
+            // Look for pattern: } followed by whitespace/newline, then }, then whitespace/newline, then }
+            var remaining = content.Substring(position);
+
+            // Pattern: },\s*},\s*} (corrupted end where ] is replaced with })
+            var match = Regex.Match(remaining, @"^\}\s*,?\s*\}\s*,?\s*\}");
+            return match.Success;
+        }
+
+        /// <summary>
+        /// Remove trailing comma and whitespace from StringBuilder
+        /// </summary>
+        private void RemoveTrailingComma(StringBuilder sb)
+        {
+            while (sb.Length > 0 && char.IsWhiteSpace(sb[sb.Length - 1]))
+                sb.Length--;
+            if (sb.Length > 0 && sb[sb.Length - 1] == ',')
+                sb.Length--;
+        }
+
+        /// <summary>
+        /// Structural recovery: find the last complete array element and rebuild
+        /// This handles cases where the closing sequence is corrupted
+        /// </summary>
+        private (string? FixedContent, RecoveryStats Stats) TryRecoverJsonStructural(string content)
+        {
+            int truncatedArrays = 0;
+            int truncatedObjects = 0;
+            int fixedClosures = 0;
+
+            // Strategy: Find the last complete QuestionResult (which ends with "Judgment": null/value followed by })
+            // Then properly close: ] (QuestionResults), } (QuantResult), ] (Results), } (root)
+
+            // Pattern to find complete QuestionResult endings
+            // Look for "Judgment": null followed by whitespace and }
+            // or "Judgment": {...} followed by whitespace and }
+            var questionResultEndPattern = @"""Judgment"":\s*(?:null|\{[^{}]*\})\s*\}";
+            var questionResultMatches = Regex.Matches(content, questionResultEndPattern, RegexOptions.Singleline);
+
+            int lastValidQuestionResultEnd = -1;
+
+            // Find the last QuestionResult that closes properly
+            foreach (Match m in questionResultMatches)
+            {
+                var endPos = m.Index + m.Length;
+                // Check that this is followed by either:
+                // - ] (closing QuestionResults array, possibly with comma before)
+                // - }, (another QuestionResult follows)
+                // - } ] (closing QuestionResults then QuantResult)
+                var afterMatch = content.Substring(endPos).TrimStart();
+                if (afterMatch.StartsWith("]") || afterMatch.StartsWith(",") || afterMatch.StartsWith("}"))
+                {
+                    lastValidQuestionResultEnd = endPos;
+                }
+            }
+
+            if (lastValidQuestionResultEnd <= 0)
+            {
+                // Fallback: Try to find the last } ] pattern (QuestionResults array close)
+                var arrayClosePattern = @"\}\s*\]";
+                var arrayCloseMatches = Regex.Matches(content, arrayClosePattern, RegexOptions.Singleline);
+                var lastArrayClose = arrayCloseMatches.Cast<Match>().LastOrDefault();
+                if (lastArrayClose != null)
+                {
+                    lastValidQuestionResultEnd = lastArrayClose.Index + lastArrayClose.Length;
+                }
+            }
+
+            if (lastValidQuestionResultEnd <= 0)
+            {
+                // Can't find a valid recovery point
+                return (null, new RecoveryStats(0, 0, 0, 0));
+            }
+
+            // Take content up to the last valid QuestionResult
+            var workingContent = content.Substring(0, lastValidQuestionResultEnd).TrimEnd();
+
+            // Count what's still open to determine proper closing sequence
+            int openBraces = 0, openBrackets = 0;
+            bool inString = false, escapeNext = false;
+            foreach (var c in workingContent)
+            {
+                if (escapeNext) { escapeNext = false; continue; }
+                if (c == '\\' && inString) { escapeNext = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+                switch (c)
+                {
+                    case '{': openBraces++; break;
+                    case '[': openBrackets++; break;
+                    case '}': openBraces--; break;
+                    case ']': openBrackets--; break;
+                }
+            }
+
+            // Build the proper closing sequence
+            // The structure is: QuestionResult } -> QuestionResults ] -> QuantResult } -> Results ] -> Root }
+            // We should have: openBrackets = 2 (QuestionResults and Results arrays still open)
+            //                 openBraces = 2 (QuantResult and Root objects still open)
+            var closingSequence = new StringBuilder();
+
+            // The order matters - we need to close in the right nested order
+            // If QuestionResults array is open (openBrackets > 1), close it first
+            // Then QuantResult object, then Results array, then root object
+
+            // Build closing based on what's open - interleave ] and } in correct order
+            // Expected structure after last QuestionResult: ] } ] }
+            while (openBrackets > 0 || openBraces > 0)
+            {
+                // Close innermost first - alternate based on nesting
+                // After QuestionResult: need ] (QuestionResults), } (QuantResult), ] (Results), } (Root)
+                if (openBrackets > 1)
+                {
+                    closingSequence.Append(']');
+                    openBrackets--;
+                    truncatedArrays++;
+                }
+                else if (openBraces > 1)
+                {
+                    closingSequence.Append('}');
+                    openBraces--;
+                    truncatedObjects++;
+                }
+                else if (openBrackets == 1)
+                {
+                    closingSequence.Append(']');
+                    openBrackets--;
+                    truncatedArrays++;
+                }
+                else if (openBraces == 1)
+                {
+                    closingSequence.Append('}');
+                    openBraces--;
+                    truncatedObjects++;
+                }
+            }
+
+            fixedClosures = 1;
+
+            var fixedContent = workingContent + closingSequence.ToString();
+            var removedBytes = content.Length - workingContent.Length;
+
+            return (fixedContent, new RecoveryStats(truncatedArrays, truncatedObjects, removedBytes, fixedClosures));
+        }
+
+        /// <summary>
+        /// Check if content is balanced up to end, return counts of remaining open structures
+        /// </summary>
+        private bool IsBalancedUpTo(string content, out int openBraces, out int openBrackets)
+        {
+            openBraces = 0;
+            openBrackets = 0;
+            bool inString = false;
+            bool escapeNext = false;
+
+            foreach (var c in content)
+            {
+                if (escapeNext) { escapeNext = false; continue; }
+                if (c == '\\' && inString) { escapeNext = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+                switch (c)
+                {
+                    case '{': openBraces++; break;
+                    case '[': openBrackets++; break;
+                    case '}': openBraces--; break;
+                    case ']': openBrackets--; break;
+                }
+
+                // If we go negative, structure is invalid
+                if (openBraces < 0 || openBrackets < 0)
+                    return false;
+            }
+
+            return !inString; // Valid if not stuck in a string
+        }
+
+        /// <summary>
+        /// Save results file to disk atomically (write to temp file, then rename)
+        /// This prevents file corruption if the process is interrupted during save
         /// </summary>
         private void SaveResultsFile()
         {
+            if (_resultsFile == null) return;
+
             var filePath = GetOutputFilePath();
+            var tempPath = filePath + ".tmp";
             var options = new JsonSerializerOptions
             {
                 WriteIndented = true
             };
-            var json = JsonSerializer.Serialize(_resultsFile, options);
-            File.WriteAllText(filePath, json);
+
+            try
+            {
+                // Write to temp file first
+                using (var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536))
+                {
+                    JsonSerializer.Serialize(fileStream, _resultsFile, options);
+                    fileStream.Flush();
+                }
+
+                // Atomic rename: delete existing and move temp to target
+                // On Windows, File.Move with overwrite is atomic at filesystem level
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+                File.Move(tempPath, filePath);
+            }
+            catch
+            {
+                // Clean up temp file on failure
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                throw;
+            }
         }
 
         /// <summary>
@@ -1797,37 +2614,84 @@ Output your judgment:
         }
 
         /// <summary>
-        /// Preload model into memory using empty chat request
+        /// Lightweight keep_alive reset for already-loaded models using /api/generate
+        /// Uses separate HttpClient to avoid connection state issues with main test client
         /// Returns (success, errorMessage)
         /// </summary>
-        private async Task<(bool success, string? error)> PreloadModelAsync(string modelName)
+        private async Task<(bool success, string? error)> ResetModelKeepAliveAsync(string modelName)
+        {
+            try
+            {
+                // Use separate HttpClient to avoid polluting main connection pool
+                using var preloadClient = new HttpClient { Timeout = TimeSpan.FromSeconds(_args.Timeout) };
+
+                // Use /api/generate with empty prompt - just resets keep_alive timer
+                var response = await preloadClient.PostAsJsonAsync($"{_baseUrl}/api/generate", new
+                {
+                    model = modelName,
+                    prompt = "",
+                    stream = false,
+                    keep_alive = "30m"
+                });
+
+                if (response.IsSuccessStatusCode)
+                {
+                    await response.Content.ReadAsStringAsync();
+                    return (true, null);
+                }
+
+                var errorContent = await response.Content.ReadAsStringAsync();
+                return (false, $"HTTP {(int)response.StatusCode}: {errorContent}");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Load model into Ollama memory using /api/chat to properly initialize for logprobs
+        /// Uses separate HttpClient to avoid connection state issues with main test client
+        /// Returns (success, errorMessage)
+        /// </summary>
+        private async Task<(bool success, string? error)> LoadModelAsync(string modelName)
         {
             const int maxRetries = 3;
             string? lastError = null;
+
+            // Use separate HttpClient to avoid polluting main connection pool used for tests
+            using var preloadClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 
             for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
                 try
                 {
+                    // Use /api/chat with minimal message - this properly initializes the model for subsequent logprobs
                     var request = new
                     {
                         model = modelName,
                         messages = new[] { new { role = "user", content = "Hi" } },
-                        stream = false
+                        stream = false,
+                        options = new { num_predict = 1 }  // Minimal response to keep it fast
                     };
 
-                    // Use a longer timeout for preload (model loading can take time)
+                    // Use a longer timeout for load (model loading can take time)
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_args.Timeout));
-                    var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/chat", request, cts.Token);
+                    var response = await preloadClient.PostAsJsonAsync($"{_baseUrl}/api/chat", request, cts.Token);
 
                     if (response.IsSuccessStatusCode)
                     {
+                        // Consume response to ensure the request completes
+                        await response.Content.ReadAsStringAsync(cts.Token);
                         return (true, null);
                     }
 
                     // Get error details from response
-                    var errorContent = await response.Content.ReadAsStringAsync();
+                    var errorContent = await response.Content.ReadAsStringAsync(cts.Token);
                     lastError = $"HTTP {(int)response.StatusCode}: {errorContent}";
+
+                    if (_args.Verbose)
+                        Log($"[dim]  Load response: {lastError}[/]");
 
                     // Check if it's a retryable error
                     if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable ||
@@ -1835,7 +2699,7 @@ Output your judgment:
                     {
                         if (attempt < maxRetries)
                         {
-                            AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} failed, retrying...[/]");
+                            Log($"[yellow]  Load attempt {attempt} failed, retrying...[/]");
                             await Task.Delay(2000 * attempt); // Exponential backoff
                             continue;
                         }
@@ -1843,12 +2707,12 @@ Output your judgment:
 
                     return (false, lastError);
                 }
-                catch (TaskCanceledException)
+                catch (OperationCanceledException)
                 {
                     lastError = "Timeout waiting for model to load";
                     if (attempt < maxRetries)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} timed out, retrying...[/]");
+                        Log($"[yellow]  Load attempt {attempt} timed out, retrying...[/]");
                         continue;
                     }
                 }
@@ -1857,19 +2721,185 @@ Output your judgment:
                     lastError = $"Connection error: {ex.Message}";
                     if (attempt < maxRetries)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]  Preload attempt {attempt} failed ({ex.Message}), retrying...[/]");
+                        Log($"[yellow]  Load attempt {attempt} failed ({ex.Message}), retrying...[/]");
                         await Task.Delay(2000 * attempt);
                         continue;
                     }
                 }
                 catch (Exception ex)
                 {
-                    lastError = ex.Message;
+                    lastError = $"{ex.GetType().Name}: {ex.Message}";
+                    Log($"[red]  Load error: {lastError}[/]");
+                    if (attempt < maxRetries)
+                    {
+                        Log($"[yellow]  Retrying...[/]");
+                        await Task.Delay(2000 * attempt);
+                        continue;
+                    }
                     return (false, lastError);
                 }
             }
 
             return (false, lastError);
+        }
+
+        /// <summary>
+        /// Unload a model from Ollama memory and wait until it's fully unloaded
+        /// </summary>
+        private async Task UnloadModelAsync(string modelName)
+        {
+            try
+            {
+                // Send unload request and consume response to ensure it's processed
+                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/generate", new
+                {
+                    model = modelName,
+                    prompt = "",
+                    keep_alive = "0"
+                });
+                response.EnsureSuccessStatusCode();
+                await response.Content.ReadAsStringAsync();
+
+                // Normalize model name for comparison (remove :latest if present)
+                var normalizedName = modelName.ToLowerInvariant();
+                if (normalizedName.EndsWith(":latest"))
+                    normalizedName = normalizedName[..^7];
+
+                // Poll /api/ps until model is unloaded (max 30 seconds)
+                var maxWait = TimeSpan.FromSeconds(30);
+                var started = DateTime.UtcNow;
+                int pollCount = 0;
+                while (DateTime.UtcNow - started < maxWait)
+                {
+                    var psResponse = await _httpClient.GetFromJsonAsync<OllamaPsResponse>($"{_baseUrl}/api/ps");
+
+                    // Check if any loaded model matches our target
+                    bool modelStillLoaded = false;
+                    if (psResponse?.models != null)
+                    {
+                        foreach (var m in psResponse.models)
+                        {
+                            var loadedName = m.name.ToLowerInvariant();
+                            if (loadedName.EndsWith(":latest"))
+                                loadedName = loadedName[..^7];
+
+                            if (loadedName == normalizedName || loadedName.StartsWith(normalizedName + ":"))
+                            {
+                                modelStillLoaded = true;
+                                if (_args.Verbose && pollCount == 0)
+                                    Log($"[dim]    Waiting for {m.name} to unload...[/]");
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!modelStillLoaded)
+                    {
+                        // Model is unloaded, add a small delay for VRAM to be freed
+                        await Task.Delay(1000);
+                        return;
+                    }
+
+                    pollCount++;
+                    await Task.Delay(500); // Check every 500ms
+                }
+                Log($"[yellow]Warning: Model {modelName} may not have fully unloaded after 30s[/]");
+            }
+            catch (Exception ex)
+            {
+                Log($"[yellow]Warning: Could not unload model {modelName}: {ex.Message}[/]");
+            }
+        }
+
+        /// <summary>
+        /// Get list of currently loaded model names
+        /// </summary>
+        private async Task<List<string>> GetLoadedModelsAsync()
+        {
+            try
+            {
+                var psResponse = await _httpClient.GetFromJsonAsync<OllamaPsResponse>($"{_baseUrl}/api/ps");
+                if (psResponse?.models == null || psResponse.models.Count == 0)
+                {
+                    return new List<string>();
+                }
+                return psResponse.models.Select(m => m.name).ToList();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        /// <summary>
+        /// Smart model preparation: unload other models if needed, keeping the test model if already loaded
+        /// Returns true if model was already loaded (can skip heavy preload)
+        /// </summary>
+        private async Task<bool> PrepareModelAsync(string modelFullName)
+        {
+            var loadedModels = await GetLoadedModelsAsync();
+
+            if (loadedModels.Count == 1 && loadedModels[0].Equals(modelFullName, StringComparison.OrdinalIgnoreCase))
+            {
+                // Same model is already loaded - just need to reset keep_alive
+                Log($"[dim]Model {modelFullName} already loaded[/]");
+                return true;
+            }
+
+            // Different model(s) loaded - unload them
+            if (loadedModels.Count > 0)
+            {
+                Log($"[dim]Unloading {loadedModels.Count} other model(s)...[/]");
+                foreach (var model in loadedModels)
+                {
+                    await UnloadModelAsync(model);
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Unload all models currently loaded on the Ollama instance
+        /// </summary>
+        private async Task UnloadAllModelsAsync()
+        {
+            try
+            {
+                var psResponse = await _httpClient.GetFromJsonAsync<OllamaPsResponse>($"{_baseUrl}/api/ps");
+                if (psResponse?.models == null || psResponse.models.Count == 0)
+                {
+                    if (_args.Verbose)
+                        Log($"[dim]No models loaded[/]");
+                    return;
+                }
+
+                Log($"[dim]Unloading {psResponse.models.Count} loaded model(s)...[/]");
+
+                foreach (var model in psResponse.models)
+                {
+                    if (_args.Verbose)
+                        Log($"[dim]  Unloading {model.name}...[/]");
+                    await UnloadModelAsync(model.name);
+                }
+
+                Log($"[dim]All models unloaded[/]");
+            }
+            catch (Exception ex)
+            {
+                Log($"[yellow]Warning: Could not unload all models: {ex.Message}[/]");
+            }
+        }
+
+        private class OllamaPsResponse
+        {
+            public List<OllamaPsModel>? models { get; set; }
+        }
+
+        private class OllamaPsModel
+        {
+            public string name { get; set; } = "";
+            public string model { get; set; } = "";
+            public long size { get; set; }
         }
 
         /// <summary>
@@ -2101,7 +3131,7 @@ Output your judgment:
                         var msg = lastException != null
                             ? $"[yellow]Attempt {attempt + 1}/{currentMaxRetries} for {operationName}: {lastException.Message}[/]"
                             : $"[yellow]Attempt {attempt + 1}/{currentMaxRetries} for {operationName}...[/]";
-                        AnsiConsole.MarkupLine(msg);
+                        Log(msg);
                         await Task.Delay(RETRY_DELAY_MS * Math.Min(attempt, 5)); // Capped exponential backoff
                     }
                 }
@@ -2113,9 +3143,9 @@ Output your judgment:
 
                 if (isTimeout)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Timeout after {totalAttempts} attempts for {operationName}[/]");
-                    AnsiConsole.MarkupLine($"[yellow]Current timeout: {_args.Timeout} seconds[/]");
-                    AnsiConsole.MarkupLine($"[yellow]Cancel and save progress, or extend timeout and retry? (y=cancel, n=retry with 2x timeout)[/]");
+                    Log($"[yellow]Timeout after {totalAttempts} attempts for {operationName}[/]");
+                    Log($"[yellow]Current timeout: {_args.Timeout} seconds[/]");
+                    Log($"[yellow]Cancel and save progress, or extend timeout and retry? (y=cancel, n=retry with 2x timeout)[/]");
 
                     bool shouldCancel = false;
                     try
@@ -2126,13 +3156,13 @@ Output your judgment:
                     catch
                     {
                         // Headless mode - auto-extend timeout and retry
-                        AnsiConsole.MarkupLine($"[dim](headless mode - auto-extending timeout)[/]");
+                        Log($"[dim](headless mode - auto-extending timeout)[/]");
                         shouldCancel = false;
                     }
 
                     if (shouldCancel)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]Cancelling...[/]");
+                        Log($"[yellow]Cancelling...[/]");
                         _cancellationRequested = true;
                         _cts.Cancel();
                         throw new OperationCanceledException("User cancelled after timeout");
@@ -2140,9 +3170,9 @@ Output your judgment:
                     else
                     {
                         // Double the timeout and retry
+                        // _args.Timeout is used by per-request CancellationTokenSource, no need to modify HttpClient
                         _args.Timeout *= 2;
-                        _httpClient.Timeout = TimeSpan.FromSeconds(_args.Timeout);
-                        AnsiConsole.MarkupLine($"[green]Timeout extended to {_args.Timeout} seconds. Retrying...[/]");
+                        Log($"[green]Timeout extended to {_args.Timeout} seconds. Retrying...[/]");
                         currentMaxRetries = MAX_RETRY_ATTEMPTS; // Reset retry count
                         continue; // Start new retry loop
                     }
@@ -2152,11 +3182,11 @@ Output your judgment:
                     // Non-timeout error - fail after retries exhausted
                     if (lastException != null)
                     {
-                        AnsiConsole.MarkupLine($"[red]Failed after {totalAttempts} attempts for {operationName}: {lastException.Message}[/]");
+                        Log($"[red]Failed after {totalAttempts} attempts for {operationName}: {lastException.Message}[/]");
                     }
                     else
                     {
-                        AnsiConsole.MarkupLine($"[red]Failed after {totalAttempts} attempts for {operationName}[/]");
+                        Log($"[red]Failed after {totalAttempts} attempts for {operationName}[/]");
                     }
                     return null;
                 }
@@ -2214,8 +3244,8 @@ Output your judgment:
                     var delaySec = delayMs / 1000.0;
 
                     var errorMsg = lastException != null ? $": {lastException.Message}" : "";
-                    AnsiConsole.MarkupLine($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed{errorMsg}[/]");
-                    AnsiConsole.MarkupLine($"[dim]  Retrying in {delaySec:F0}s...[/]");
+                    Log($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed{errorMsg}[/]");
+                    Log($"[dim]  Retrying in {delaySec:F0}s...[/]");
 
                     await Task.Delay(delayMs, _cts.Token);
                 }
@@ -2223,7 +3253,7 @@ Output your judgment:
 
             // All attempts exhausted
             var finalError = lastException != null ? $": {lastException.Message}" : "";
-            AnsiConsole.MarkupLine($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failed attempts{finalError}[/]");
+            Log($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failed attempts{finalError}[/]");
             return null;
         }
 
@@ -2269,7 +3299,7 @@ Output your judgment:
                 else
                     source = "suite default";
 
-                AnsiConsole.MarkupLine($"[yellow]Context length changed to {contextLength} (from {source})[/]");
+                Log($"[yellow]Context length changed to {contextLength} (from {source})[/]");
                 _lastDisplayedContextLength = contextLength;
             }
         }
@@ -2292,6 +3322,11 @@ Output your judgment:
                 Prompt = question.Text,
                 Stream = false,  // Logprobs only work in non-streaming mode
                 Logprobs = true,  // Enable logprobs at root level
+                // Control thinking mode for thinking models (e.g., qwen3, deepseek-r1)
+                // Think parameter must be at request level, not inside options
+                // ThinkLevel overrides EnableThinking for models like GPT-OSS that require level
+                Think = !string.IsNullOrWhiteSpace(_args.ThinkLevel) ? _args.ThinkLevel :
+                        _args.EnableThinking ? true : false,
                 Options = new OllamaGenerateOptions
                 {
                     Temperature = _args.Temperature,
@@ -2311,13 +3346,18 @@ Output your judgment:
             // Check for cancellation before making the request
             _cts.Token.ThrowIfCancellationRequested();
 
-            var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content, _cts.Token);
+            // Use per-request timeout via linked CancellationTokenSource
+            // This allows _args.Timeout to be modified dynamically during retry
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_args.Timeout));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, timeoutCts.Token);
+
+            var response = await _httpClient.PostAsync($"{_baseUrl}/api/generate", content, linkedCts.Token);
             if (!response.IsSuccessStatusCode)
             {
                 return null; // Will trigger retry
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
+            var responseJson = await response.Content.ReadAsStringAsync(linkedCts.Token);
             var result = JsonSerializer.Deserialize<OllamaGenerateResponse>(responseJson);
 
             if (result == null)
@@ -2328,8 +3368,8 @@ Output your judgment:
             // Verify logprobs were received
             if (result.Logprobs == null || result.Logprobs.Count == 0)
             {
-                AnsiConsole.MarkupLine($"[red]Error: No logprobs received for question {question.Id}[/]");
-                AnsiConsole.MarkupLine($"[yellow]Logprobs require Ollama v0.12.11 or later. Please update Ollama.[/]");
+                Log($"[red]Error: No logprobs received for question {question.Id}[/]");
+                Log($"[yellow]Logprobs require Ollama v0.12.11 or later. Please update Ollama.[/]");
                 // This is a permanent failure, not retryable - throw to fail fast
                 throw new InvalidOperationException("Logprobs not available - update Ollama");
             }
@@ -2350,12 +3390,11 @@ Output your judgment:
                 promptTokensPerSecond = result.PromptEvalCount.Value / promptSeconds;
             }
 
-            // Convert logprobs to our format
+            // Convert logprobs to our format (Bytes array omitted to reduce file size)
             var tokens = result.Logprobs.Select(lp => new TokenLogprob
             {
                 Token = lp.Token,
-                Logprob = lp.Logprob,
-                Bytes = lp.Bytes
+                Logprob = lp.Logprob
             }).ToList();
 
             return new QuestionResult
@@ -2393,12 +3432,11 @@ Output your judgment:
                 var total = _verboseTotalCount;
                 var percent = total > 0 ? (completed * 100 / total) : 0;
 
-                AnsiConsole.Markup($"[magenta]Judging {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Score: [{scoreColor}]{judgment.Score}%[/] [dim]({completed}/{total} {percent}%)[/] Best: [{bestColor}]{bestDisplay}[/]");
-                AnsiConsole.WriteLine("");
+                Log($"[magenta]Judging {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Score: [{scoreColor}]{judgment.Score}%[/] [dim]({completed}/{total} {percent}%)[/] Best: [{bestColor}]{bestDisplay}[/]");
 
                 if (string.IsNullOrWhiteSpace(judgment.Reason))
                 {
-                    AnsiConsole.MarkupLine("[dim]    (no reason provided)[/]");
+                    Log("[dim]    (no reason provided)[/]");
                 }
                 else
                 {
@@ -2432,7 +3470,7 @@ Output your judgment:
 
                     foreach (var line in lines)
                     {
-                        AnsiConsole.MarkupLine($"[dim]    {Markup.Escape(line)}[/]");
+                        Log($"[dim]    {Markup.Escape(line)}[/]");
                     }
                 }
             }
@@ -2452,12 +3490,11 @@ Output your judgment:
                 var total = _verboseTotalCount;
                 var percent = total > 0 ? (completed * 100 / total) : 0;
 
-                AnsiConsole.Markup($"[magenta]Best answer {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Best: [{bestColor}]{bestDisplay}[/] [dim]({completed}/{total} {percent}%)[/]");
-                AnsiConsole.WriteLine("");
+                Log($"[magenta]Best answer {Markup.Escape(_verboseCurrentTag)}[/] [dim]Q{questionId}[/] Best: [{bestColor}]{bestDisplay}[/] [dim]({completed}/{total} {percent}%)[/]");
 
                 if (string.IsNullOrWhiteSpace(judgment.ReasonBestAnswer))
                 {
-                    AnsiConsole.MarkupLine("[dim]    (no reason provided)[/]");
+                    Log("[dim]    (no reason provided)[/]");
                 }
                 else
                 {
@@ -2491,7 +3528,7 @@ Output your judgment:
 
                     foreach (var line in lines)
                     {
-                        AnsiConsole.MarkupLine($"[dim]    {Markup.Escape(line)}[/]");
+                        Log($"[dim]    {Markup.Escape(line)}[/]");
                     }
                 }
             }
@@ -2512,7 +3549,7 @@ Output your judgment:
             if (!_judgeEnabled || _judgeHttpClient == null || _judgeModelName == null)
                 return;
 
-            AnsiConsole.MarkupLine($"[cyan]Running judgment for: {quantResult.Tag}[/]");
+            Log($"[cyan]Running judgment for: {quantResult.Tag}[/]");
 
             var judgedCount = 0;
             var skippedCount = 0;
@@ -2543,7 +3580,7 @@ Output your judgment:
 
                     if (baseQuestion == null)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
+                        Log($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
                         continue;
                     }
 
@@ -2567,7 +3604,7 @@ Output your judgment:
                     }
                 }
 
-                AnsiConsole.MarkupLine($"[green]✓ Judging {quantResult.Tag} complete[/]");
+                Log($"[green]✓ Judging {quantResult.Tag} complete[/]");
             }
             else
             {
@@ -2632,7 +3669,7 @@ Output your judgment:
                     });
             }
 
-            AnsiConsole.MarkupLine($"[dim]Judged: {judgedCount}, Skipped: {skippedCount}[/]");
+            Log($"[dim]Judged: {judgedCount}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
         }
 
@@ -2645,7 +3682,7 @@ Output your judgment:
             if (!_judgeBestEnabled || _judgeBestHttpClient == null || _judgeBestModelName == null)
                 return;
 
-            AnsiConsole.MarkupLine($"[cyan]Running best answer judgment for: {quantResult.Tag}[/]");
+            Log($"[cyan]Running best answer judgment for: {quantResult.Tag}[/]");
 
             var judgedCount = 0;
             var skippedCount = 0;
@@ -2698,7 +3735,7 @@ Output your judgment:
                     }
                 }
 
-                AnsiConsole.MarkupLine($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
+                Log($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
             }
             else
             {
@@ -2762,7 +3799,7 @@ Output your judgment:
                     });
             }
 
-            AnsiConsole.MarkupLine($"[dim]Best answer judged: {judgedCount}, Skipped: {skippedCount}[/]");
+            Log($"[dim]Best answer judged: {judgedCount}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
         }
 
@@ -2786,7 +3823,7 @@ Output your judgment:
 
                 if (baseQuestion == null)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
+                    Log($"[yellow]Warning: Skipping judgment for {quantQuestion.QuestionId} - base answer missing from test results[/]");
                     skippedCount++;
                     continue;
                 }
@@ -2806,7 +3843,7 @@ Output your judgment:
 
             if (questionsToJudge.Count == 0)
             {
-                AnsiConsole.MarkupLine($"[dim]All questions already judged for {quantResult.Tag}[/]");
+                Log($"[dim]All questions already judged for {quantResult.Tag}[/]");
                 return;
             }
 
@@ -2829,7 +3866,7 @@ Output your judgment:
                 })).ToList();
 
                 await Task.WhenAll(judgmentTasks);
-                AnsiConsole.MarkupLine($"[green]✓ Judging {quantResult.Tag} complete[/]");
+                Log($"[green]✓ Judging {quantResult.Tag} complete[/]");
             }
             else
             {
@@ -2863,7 +3900,7 @@ Output your judgment:
                     });
             }
 
-            AnsiConsole.MarkupLine($"[dim]Judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
+            Log($"[dim]Judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
         }
 
@@ -2906,7 +3943,7 @@ Output your judgment:
 
             if (questionsToJudge.Count == 0)
             {
-                AnsiConsole.MarkupLine($"[dim]All questions already have best answer judgment for {quantResult.Tag}[/]");
+                Log($"[dim]All questions already have best answer judgment for {quantResult.Tag}[/]");
                 return;
             }
 
@@ -2928,7 +3965,7 @@ Output your judgment:
                 })).ToList();
 
                 await Task.WhenAll(judgmentTasks);
-                AnsiConsole.MarkupLine($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
+                Log($"[green]✓ Best answer judgment {quantResult.Tag} complete[/]");
             }
             else
             {
@@ -2958,7 +3995,7 @@ Output your judgment:
                     });
             }
 
-            AnsiConsole.MarkupLine($"[dim]Best answer judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
+            Log($"[dim]Best answer judged: {questionsToJudge.Count}, Skipped: {skippedCount}[/]");
             SaveResultsFile();
         }
 
@@ -2974,11 +4011,11 @@ Output your judgment:
             var pendingCount = allTasks.Values.Sum(t => t.tasks.Count(task => !task.IsCompleted));
             if (pendingCount == 0)
             {
-                AnsiConsole.MarkupLine($"[green]✓ All background judgments already complete[/]");
+                Log($"[green]✓ All background judgments already complete[/]");
                 return;
             }
 
-            AnsiConsole.MarkupLine($"\n[magenta]Waiting for {pendingCount} background judgment task(s) to complete...[/]");
+            Log($"\n[magenta]Waiting for {pendingCount} background judgment task(s) to complete...[/]");
 
             await AnsiConsole.Progress()
                 .AutoClear(false)
@@ -3026,7 +4063,7 @@ Output your judgment:
                     }
                 });
 
-            AnsiConsole.MarkupLine($"[green]✓ All background judgments complete[/]");
+            Log($"[green]✓ All background judgments complete[/]");
         }
 
         /// <summary>
@@ -3255,11 +4292,11 @@ Output your judgment:
                 }
 
                 // After all retries, return result with warning
-                AnsiConsole.MarkupLine($"[yellow]Warning: Judge returned score without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
+                Log($"[yellow]Warning: Judge returned score without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
                 if (!string.IsNullOrWhiteSpace(result.RawResponse))
                 {
                     // Output full raw JSON for debugging (word-wrap at console width)
-                    AnsiConsole.MarkupLine("[dim]Raw JSON response:[/]");
+                    Log("[dim]Raw JSON response:[/]");
                     int consoleWidth = 120;
                     try { consoleWidth = Console.WindowWidth > 0 ? Console.WindowWidth : 120; } catch { }
                     var escaped = Markup.Escape(result.RawResponse);
@@ -3267,7 +4304,7 @@ Output your judgment:
                     for (int i = 0; i < escaped.Length; i += consoleWidth - 4)
                     {
                         var chunk = escaped.Substring(i, Math.Min(consoleWidth - 4, escaped.Length - i));
-                        AnsiConsole.MarkupLine($"[dim]    {chunk}[/]");
+                        Log($"[dim]    {chunk}[/]");
                     }
                 }
                 return result;
@@ -3359,7 +4396,7 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
                 {
                     temperature = 0.0,
                     seed = 42,
-                    num_predict = 800, // Increased from 200 to avoid truncated JSON responses
+                    num_predict = 8192,
                     num_ctx = judgeContextLength
                 }
             };
@@ -3370,14 +4407,18 @@ How similar are RESPONSE A and RESPONSE B? Provide score, bestanswer, and reason
             // Check for cancellation before making the request
             _cts.Token.ThrowIfCancellationRequested();
 
-            var response = await _judgeHttpClient.PostAsync($"{_judgeBaseUrl}/api/chat", content, _cts.Token);
+            // Use per-request timeout via linked CancellationTokenSource
+            using var judgeTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_args.Timeout));
+            using var judgeLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, judgeTimeoutCts.Token);
+
+            var response = await _judgeHttpClient.PostAsync($"{_judgeBaseUrl}/api/chat", content, judgeLinkedCts.Token);
             if (!response.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync(_cts.Token);
+                var errorBody = await response.Content.ReadAsStringAsync(judgeLinkedCts.Token);
                 throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {errorBody}");
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
+            var responseJson = await response.Content.ReadAsStringAsync(judgeLinkedCts.Token);
             using var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
 
@@ -3574,7 +4615,7 @@ How similar are RESPONSE A and RESPONSE B? Provide your response as JSON with sc
             {
                 if (_args.Verbose)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Cloud judge error: {Markup.Escape(ex.Message)}[/]");
+                    Log($"[yellow]Cloud judge error: {Markup.Escape(ex.Message)}[/]");
                 }
                 return null;
             }
@@ -3622,7 +4663,7 @@ How similar are RESPONSE A and RESPONSE B? Provide your response as JSON with sc
                 {
                     if (attempt >= JUDGE_MAX_RETRY_ATTEMPTS)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failures. Last error: {Markup.Escape(ex.Message)}[/]");
+                        Log($"[yellow]Warning: Skipping {operationName} after {JUDGE_MAX_RETRY_ATTEMPTS} failures. Last error: {Markup.Escape(ex.Message)}[/]");
                         return false;
                     }
 
@@ -3632,8 +4673,8 @@ How similar are RESPONSE A and RESPONSE B? Provide your response as JSON with sc
                     var delaySec = delayMs / 1000.0;
 
                     // Show retry warning with error and delay info
-                    AnsiConsole.MarkupLine($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed: {Markup.Escape(ex.Message)}[/]");
-                    AnsiConsole.MarkupLine($"[dim]  Retrying in {delaySec:F0}s...[/]");
+                    Log($"[yellow]Attempt {attempt}/{JUDGE_MAX_RETRY_ATTEMPTS} for {operationName} failed: {Markup.Escape(ex.Message)}[/]");
+                    Log($"[dim]  Retrying in {delaySec:F0}s...[/]");
 
                     await Task.Delay(delayMs, _cts.Token);
                 }
@@ -3679,7 +4720,7 @@ How similar are RESPONSE A and RESPONSE B? Provide your response as JSON with sc
                 }
 
                 // After all retries, return success but with warning
-                AnsiConsole.MarkupLine($"[yellow]Warning: Judge BestAnswer returned without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
+                Log($"[yellow]Warning: Judge BestAnswer returned without reason after {maxReasonRetries} attempts for Q{baseQuestion.QuestionId}[/]");
                 return true;
             }
 
@@ -3731,7 +4772,7 @@ Which response is better? Provide your response as JSON with bestanswer (A/B/AB)
             {
                 if (_args.Verbose)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Cloud judge best error: {Markup.Escape(ex.Message)}[/]");
+                    Log($"[yellow]Cloud judge best error: {Markup.Escape(ex.Message)}[/]");
                 }
                 return false;
             }
@@ -3808,7 +4849,7 @@ Which response is better? Provide bestanswer and reason.";
                 {
                     temperature = 0.0,
                     seed = 42,
-                    num_predict = 800,
+                    num_predict = 8192,
                     num_ctx = judgeContextLength
                 }
             };
@@ -3819,14 +4860,18 @@ Which response is better? Provide bestanswer and reason.";
             // Check for cancellation before making the request
             _cts.Token.ThrowIfCancellationRequested();
 
-            var response = await _judgeBestHttpClient.PostAsync($"{_judgeBestBaseUrl}/api/chat", content, _cts.Token);
+            // Use per-request timeout via linked CancellationTokenSource
+            using var judgeBestTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(_args.Timeout));
+            using var judgeBestLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, judgeBestTimeoutCts.Token);
+
+            var response = await _judgeBestHttpClient.PostAsync($"{_judgeBestBaseUrl}/api/chat", content, judgeBestLinkedCts.Token);
             if (!response.IsSuccessStatusCode)
             {
-                var errorBody = await response.Content.ReadAsStringAsync(_cts.Token);
+                var errorBody = await response.Content.ReadAsStringAsync(judgeBestLinkedCts.Token);
                 throw new HttpRequestException($"HTTP {(int)response.StatusCode}: {errorBody}");
             }
 
-            var responseJson = await response.Content.ReadAsStringAsync(_cts.Token);
+            var responseJson = await response.Content.ReadAsStringAsync(judgeBestLinkedCts.Token);
             using var doc = JsonDocument.Parse(responseJson);
             var root = doc.RootElement;
 
@@ -4018,6 +5063,46 @@ Which response is better? Provide bestanswer and reason.";
         }
 
         /// <summary>
+        /// Verify server connectivity with a short timeout.
+        /// Returns (success, version, errorMessage)
+        /// </summary>
+        private async Task<(bool Success, string? Version, string? ErrorMessage)> VerifyServerConnectionAsync(HttpClient client, string baseUrl, int timeoutSeconds = 10)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+                var response = await client.GetAsync($"{baseUrl}/api/version", cts.Token);
+                if (response.IsSuccessStatusCode)
+                {
+                    var json = await response.Content.ReadAsStringAsync(cts.Token);
+                    using var doc = JsonDocument.Parse(json);
+                    string? version = null;
+                    if (doc.RootElement.TryGetProperty("version", out var versionElement))
+                    {
+                        version = versionElement.GetString();
+                    }
+                    return (true, version, null);
+                }
+                else
+                {
+                    return (false, null, $"Server returned HTTP {(int)response.StatusCode} ({response.ReasonPhrase})");
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                return (false, null, $"Connection timed out after {timeoutSeconds} seconds - server may be unreachable");
+            }
+            catch (HttpRequestException ex)
+            {
+                return (false, null, $"Connection failed: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                return (false, null, $"Unexpected error: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Extract quantization type from model name or tag
         /// Handles patterns like: Q4_K_M, IQ3_XXS, UD-Q6_K_XL, q4_0, etc.
         /// </summary>
@@ -4095,7 +5180,7 @@ Which response is better? Provide bestanswer and reason.";
 
             if (hasWildcards)
             {
-                AnsiConsole.MarkupLine($"[dim]Expanding wildcard patterns...[/]");
+                Log($"[dim]Expanding wildcard patterns...[/]");
             }
 
             foreach (var rawTag in rawTags)
@@ -4131,11 +5216,11 @@ Which response is better? Provide bestanswer and reason.";
 
                     if (resolvedTags.Count == 0)
                     {
-                        AnsiConsole.MarkupLine($"[yellow]Warning: No tags found matching pattern '{rawTag}'[/]");
+                        Log($"[yellow]Warning: No tags found matching pattern '{rawTag}'[/]");
                         continue;
                     }
 
-                    AnsiConsole.MarkupLine($"[dim]  Pattern '{rawTag}' matched {resolvedTags.Count} tag(s)[/]");
+                    Log($"[dim]  Pattern '{rawTag}' matched {resolvedTags.Count} tag(s)[/]");
 
                     foreach (var resolved in resolvedTags)
                     {
@@ -4165,16 +5250,59 @@ Which response is better? Provide bestanswer and reason.";
                 }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Warning: Failed to expand pattern '{rawTag}': {ex.Message}[/]");
+                    Log($"[yellow]Warning: Failed to expand pattern '{rawTag}': {ex.Message}[/]");
                 }
             }
 
             if (hasWildcards && result.Count > 0)
             {
-                AnsiConsole.MarkupLine($"[dim]Expanded to {result.Count} quantization(s): {string.Join(", ", result.Take(5))}{(result.Count > 5 ? "..." : "")}[/]");
+                Log($"[dim]Expanded to {result.Count} quantization(s): {string.Join(", ", result.Take(5))}{(result.Count > 5 ? "..." : "")}[/]");
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Query HuggingFace API to get the rate limit reset time in seconds.
+        /// Returns null if HF_TOKEN is not set or if the query fails.
+        /// </summary>
+        private async Task<int?> GetHuggingFaceRateLimitResetSecondsAsync()
+        {
+            try
+            {
+                var hfToken = Environment.GetEnvironmentVariable("HF_TOKEN");
+                if (string.IsNullOrEmpty(hfToken))
+                    return null;
+
+                using var client = new HttpClient();
+                client.DefaultRequestHeaders.Authorization =
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", hfToken);
+                client.Timeout = TimeSpan.FromSeconds(10);
+
+                // Make a lightweight request to HuggingFace API to get rate limit headers
+                var response = await client.GetAsync("https://huggingface.co/api/whoami");
+
+                // Parse RateLimit header: "resolvers";r=[remaining];t=[seconds until reset]
+                if (response.Headers.TryGetValues("RateLimit", out var rateLimitValues))
+                {
+                    var rateLimitHeader = rateLimitValues.FirstOrDefault();
+                    if (!string.IsNullOrEmpty(rateLimitHeader))
+                    {
+                        // Look for t=[number] pattern
+                        var match = System.Text.RegularExpressions.Regex.Match(rateLimitHeader, @"t=(\d+)");
+                        if (match.Success && int.TryParse(match.Groups[1].Value, out var seconds))
+                        {
+                            return seconds > 0 ? seconds : null;
+                        }
+                    }
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -4322,7 +5450,7 @@ Which response is better? Provide bestanswer and reason.";
             if (resultsWithoutDigest.Count == 0)
                 return;
 
-            AnsiConsole.MarkupLine($"[dim]Backfilling digest info for {resultsWithoutDigest.Count} result(s)...[/]");
+            Log($"[dim]Backfilling digest info for {resultsWithoutDigest.Count} result(s)...[/]");
 
             bool anyUpdated = false;
             foreach (var result in resultsWithoutDigest)
@@ -4333,11 +5461,11 @@ Which response is better? Provide bestanswer and reason.";
                     result.Digest = digest;
                     result.ShortDigest = digest.Length >= 12 ? digest.Substring(0, 12) : digest;
                     anyUpdated = true;
-                    AnsiConsole.MarkupLine($"[dim]  + {result.Tag}: {result.ShortDigest}[/]");
+                    Log($"[dim]  + {result.Tag}: {result.ShortDigest}[/]");
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"[yellow]  Warning: Could not retrieve digest for {result.ModelName}[/]");
+                    Log($"[yellow]  Warning: Could not retrieve digest for {result.ModelName}[/]");
                 }
             }
 
@@ -4516,28 +5644,51 @@ Which response is better? Provide bestanswer and reason.";
 
         /// <summary>
         /// Pull a model from the registry with progress display and retry logic
+        /// Two-phase retry strategy for HuggingFace rate limiting:
+        /// Phase 1: Quick retries (2s delay) - catches IP changes
+        /// Phase 2: Slow retries (30s or HF API delay) - waits out rate limits
         /// </summary>
         private async Task<bool> PullModelAsync(string modelName)
         {
-            const int maxRetries = 50;
+            const int maxRetriesPerPhase = 50;
+            const int quickRetryDelayMs = 2000;
+            const int slowRetryDelaySeconds = 30;
+            const int normalRetryDelayMs = 2000;
 
-            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            bool isHuggingFaceModel = modelName.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase);
+            bool shownHfTokenWarning = false;
+            int totalPhases = isHuggingFaceModel ? 2 : 1;
+
+            for (int phase = 1; phase <= totalPhases; phase++)
             {
-                if (_cancellationRequested)
+                bool isSlowPhase = phase == 2;
+                string phaseDesc = isSlowPhase ? "slow" : "quick";
+
+                if (phase == 2)
                 {
-                    _cts.Token.ThrowIfCancellationRequested();
+                    Log($"[yellow]Entering slow retry phase (30s+ delays)...[/]");
                 }
 
-                try
+                for (int attempt = 1; attempt <= maxRetriesPerPhase; attempt++)
                 {
-                    if (attempt == 1)
+                    int globalAttempt = (phase - 1) * maxRetriesPerPhase + attempt;
+                    int totalMaxRetries = totalPhases * maxRetriesPerPhase;
+
+                    if (_cancellationRequested)
                     {
-                        AnsiConsole.MarkupLine($"[cyan]Pulling model: {modelName}[/]");
+                        _cts.Token.ThrowIfCancellationRequested();
                     }
-                    else
+
+                    try
                     {
-                        AnsiConsole.MarkupLine($"[yellow]Retry {attempt}/{maxRetries}: Pulling model: {modelName}[/]");
-                    }
+                        if (globalAttempt == 1)
+                        {
+                            Log($"[cyan]Pulling model: {modelName}[/]");
+                        }
+                        else
+                        {
+                            Log($"[yellow]Retry {globalAttempt}/{totalMaxRetries} ({phaseDesc}): Pulling model...[/]");
+                        }
 
                     var pullRequest = new
                     {
@@ -4552,7 +5703,6 @@ Which response is better? Provide bestanswer and reason.";
                     );
 
                     // Use SendAsync with ResponseHeadersRead to enable true streaming
-                    // Without this, HttpClient buffers the entire response before returning
                     var request = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/api/pull")
                     {
                         Content = content
@@ -4562,13 +5712,13 @@ Which response is better? Provide bestanswer and reason.";
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Failed to pull model (HTTP {response.StatusCode})[/]");
-                        if (attempt < maxRetries)
+                        Log($"[red]Error: Failed to pull model (HTTP {response.StatusCode})[/]");
+                        if (attempt < maxRetriesPerPhase)
                         {
-                            await Task.Delay(2000, _cts.Token);
+                            await Task.Delay(normalRetryDelayMs, _cts.Token);
                             continue;
                         }
-                        return false;
+                        break; // End of this phase's retries
                     }
 
                     using var stream = await response.Content.ReadAsStreamAsync(_cts.Token);
@@ -4576,11 +5726,15 @@ Which response is better? Provide bestanswer and reason.";
 
                     string? lastStatus = null;
                     string? currentDigest = null;
+                    int layersCompletedThisAttempt = 0;
                     long totalSize = 0;
                     long completedSize = 0;
+                    long lastCompletedSize = 0;
                     int lastPercent = -1;
                     bool hasError = false;
                     string? errorMessage = null;
+                    DateTime lastSpeedUpdate = DateTime.UtcNow;
+                    double currentSpeed = 0;
 
                     while (!reader.EndOfStream)
                     {
@@ -4589,7 +5743,7 @@ Which response is better? Provide bestanswer and reason.";
                             _cts.Token.ThrowIfCancellationRequested();
                         }
 
-                        var line = await reader.ReadLineAsync();
+                        var line = await reader.ReadLineAsync(_cts.Token);
                         if (string.IsNullOrEmpty(line)) continue;
 
                         try
@@ -4615,7 +5769,16 @@ Which response is better? Provide bestanswer and reason.";
                                 var digest = digestElement.GetString();
                                 if (!string.IsNullOrEmpty(digest) && digest != currentDigest)
                                 {
-                                    currentDigest = digest.Length > 12 ? digest.Substring(0, 12) : digest;
+                                    // Track completed layer when moving to a new digest
+                                    if (!string.IsNullOrEmpty(currentDigest) && completedSize > 0 && totalSize > 0 && completedSize >= totalSize * 0.99)
+                                    {
+                                        layersCompletedThisAttempt++;
+                                    }
+                                    currentDigest = digest; // Store full digest for comparison
+                                    // Reset for new layer
+                                    lastCompletedSize = 0;
+                                    currentSpeed = 0;
+                                    lastSpeedUpdate = DateTime.UtcNow;
                                 }
                             }
 
@@ -4628,15 +5791,13 @@ Which response is better? Provide bestanswer and reason.";
                                     // Clear the current line and print new status
                                     if (lastPercent >= 0)
                                     {
-                                        // Clear the progress line by overwriting with spaces, then newline
-                                        try { Console.Write("\r" + new string(' ', Console.WindowWidth - 1) + "\r"); Console.Out.Flush(); } catch { }
+                                        try { Console.Write("\r" + new string(' ', Math.Min(Console.WindowWidth - 1, 120)) + "\r"); Console.Out.Flush(); } catch { }
                                     }
-                                    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(status)}[/]");
+                                    Log($"[dim]{Markup.Escape(status)}[/]");
                                     lastStatus = status;
                                     lastPercent = -1;
-                                    totalSize = 0;
-                                    completedSize = 0;
-                                    currentDigest = null;
+                                    // Don't reset currentDigest here - let the digest check handle layer transitions
+                                    // Don't reset currentSpeed here - preserve speed display across status changes
                                 }
                             }
 
@@ -4652,15 +5813,73 @@ Which response is better? Provide bestanswer and reason.";
                                 if (totalSize > 0)
                                 {
                                     var percent = (int)((completedSize * 100) / totalSize);
-                                    if (percent != lastPercent)
+
+                                    // Calculate speed
+                                    var now = DateTime.UtcNow;
+                                    var timeSinceLastUpdate = (now - lastSpeedUpdate).TotalSeconds;
+
+                                    // Initialize baseline on first progress (or after reset/resume)
+                                    // This must come first to handle resume correctly - don't calculate speed on first update
+                                    if (lastCompletedSize == 0)
                                     {
-                                        var sizeInfo = totalSize > 0 ? $" ({FormatBytes(completedSize)}/{FormatBytes(totalSize)})" : "";
-                                        var digestInfo = !string.IsNullOrEmpty(currentDigest) ? $" [{currentDigest}]" : "";
-                                        var progressLine = $"  Progress: {percent,3}%{sizeInfo}{digestInfo}";
-                                        // Pad to clear any previous longer content
-                                        var padding = Math.Max(0, 80 - progressLine.Length);
-                                        Console.Write($"\r{progressLine}{new string(' ', padding)}");
-                                        Console.Out.Flush(); // Ensure progress is displayed immediately
+                                        if (completedSize > 0)
+                                        {
+                                            lastCompletedSize = completedSize;
+                                            lastSpeedUpdate = now;
+                                        }
+                                    }
+                                    // Calculate speed when we have progress and enough time has elapsed
+                                    else if (completedSize > lastCompletedSize && timeSinceLastUpdate >= 0.1)
+                                    {
+                                        var bytesSinceLastUpdate = completedSize - lastCompletedSize;
+                                        var instantSpeed = bytesSinceLastUpdate / timeSinceLastUpdate;
+
+                                        // Exponential moving average for smoother speed display
+                                        currentSpeed = currentSpeed == 0 ? instantSpeed : (currentSpeed * 0.7 + instantSpeed * 0.3);
+                                        lastCompletedSize = completedSize;
+                                        lastSpeedUpdate = now;
+                                    }
+
+                                    if (percent != lastPercent || timeSinceLastUpdate >= 0.25)
+                                    {
+                                        // Build progress bar
+                                        int barWidth = 25;
+                                        int filled = (int)(barWidth * completedSize / totalSize);
+                                        var bar = new string('█', filled) + new string('░', barWidth - filled);
+
+                                        // Format size and speed
+                                        var sizeInfo = $"{FormatBytes(completedSize)}/{FormatBytes(totalSize)}";
+                                        var speedInfo = currentSpeed > 0 ? $"{FormatBytes((long)currentSpeed)}/s" : "---";
+
+                                        // Calculate ETA
+                                        var etaInfo = "";
+                                        if (currentSpeed > 0)
+                                        {
+                                            var remaining = totalSize - completedSize;
+                                            var etaSeconds = remaining / currentSpeed;
+                                            if (etaSeconds < 60)
+                                                etaInfo = $" ETA: {etaSeconds:F0}s";
+                                            else if (etaSeconds < 3600)
+                                                etaInfo = $" ETA: {etaSeconds / 60:F0}m {etaSeconds % 60:F0}s";
+                                            else
+                                                etaInfo = $" ETA: {etaSeconds / 3600:F0}h {(etaSeconds % 3600) / 60:F0}m";
+                                        }
+
+                                        var digestShort = !string.IsNullOrEmpty(currentDigest) && currentDigest.Length > 19
+                                            ? currentDigest.Substring(0, 19) : currentDigest;
+                                        var digestInfo = !string.IsNullOrEmpty(digestShort) ? $"[{digestShort}]" : "";
+                                        var progressLine = $"  {digestInfo} {bar} {percent,3}% ({sizeInfo}) {speedInfo}{etaInfo}";
+
+                                        try
+                                        {
+                                            var maxWidth = Math.Min(Console.WindowWidth - 1, 120);
+                                            if (progressLine.Length > maxWidth)
+                                                progressLine = progressLine.Substring(0, maxWidth);
+                                            var padding = Math.Max(0, maxWidth - progressLine.Length);
+                                            Console.Write($"\r{progressLine}{new string(' ', padding)}");
+                                            Console.Out.Flush();
+                                        }
+                                        catch { }
                                         lastPercent = percent;
                                     }
                                 }
@@ -4680,28 +5899,99 @@ Which response is better? Provide bestanswer and reason.";
 
                     if (hasError)
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: {Markup.Escape(errorMessage ?? "Unknown error")}[/]");
-                        if (attempt < maxRetries)
+                        Log($"[red]Error: {Markup.Escape(errorMessage ?? "Unknown error")}[/]");
+
+                        // Reset retry counter if progress was made (layers were downloaded)
+                        // This prevents exhausting retries when making steady progress despite intermittent rate limits
+                        if (layersCompletedThisAttempt > 0)
                         {
-                            await Task.Delay(2000, _cts.Token);
+                            Log($"[dim]Progress made ({layersCompletedThisAttempt} layer(s) completed), resetting retry counter[/]");
+                            attempt = 0; // Will be 1 on next iteration
+                        }
+
+                        // Check if this is a "model not found" error - don't retry, exit immediately
+                        bool isNotFoundError = errorMessage != null &&
+                            (errorMessage.Contains("file does not exist", StringComparison.OrdinalIgnoreCase) ||
+                             errorMessage.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+                             errorMessage.Contains("does not exist", StringComparison.OrdinalIgnoreCase));
+
+                        if (isNotFoundError)
+                        {
+                            Log($"[red]Model does not exist in registry. Not retrying.[/]");
+                            return false;
+                        }
+
+                        // Check if this is a rate limit error (429 or contains "rate limit")
+                        bool isRateLimitError = errorMessage != null &&
+                            (errorMessage.Contains("429") || errorMessage.Contains("rate limit", StringComparison.OrdinalIgnoreCase));
+
+                        if (attempt < maxRetriesPerPhase)
+                        {
+                            if (isRateLimitError && isHuggingFaceModel)
+                            {
+                                // Show HF_TOKEN warning only once when rate limit is hit
+                                if (!shownHfTokenWarning)
+                                {
+                                    shownHfTokenWarning = true;
+                                    var hfToken = Environment.GetEnvironmentVariable("HF_TOKEN");
+                                    if (string.IsNullOrEmpty(hfToken))
+                                    {
+                                        Log($"[yellow]Tip: Set HF_TOKEN environment variable to avoid rate limiting.[/]");
+                                    }
+                                }
+
+                                if (isSlowPhase)
+                                {
+                                    // Slow phase: use HF API delay or default 30s
+                                    int delaySeconds = slowRetryDelaySeconds;
+                                    var resetSeconds = await GetHuggingFaceRateLimitResetSecondsAsync();
+                                    if (resetSeconds.HasValue && resetSeconds.Value > 0)
+                                    {
+                                        delaySeconds = Math.Min(resetSeconds.Value + 5, 300);
+                                        Log($"[yellow]Rate limit detected, waiting {delaySeconds}s (from HF API) before retry...[/]");
+                                    }
+                                    else
+                                    {
+                                        Log($"[yellow]Rate limit detected, waiting {delaySeconds}s before retry...[/]");
+                                    }
+                                    await Task.Delay(delaySeconds * 1000, _cts.Token);
+                                }
+                                else
+                                {
+                                    // Quick phase: 2s delay to catch IP changes
+                                    Log($"[yellow]Rate limit detected, quick retry in {quickRetryDelayMs / 1000}s...[/]");
+                                    await Task.Delay(quickRetryDelayMs, _cts.Token);
+                                }
+                            }
+                            else if (isRateLimitError)
+                            {
+                                // Non-HF rate limit
+                                Log($"[yellow]Rate limit detected, waiting {slowRetryDelaySeconds}s before retry...[/]");
+                                await Task.Delay(slowRetryDelaySeconds * 1000, _cts.Token);
+                            }
+                            else
+                            {
+                                await Task.Delay(normalRetryDelayMs, _cts.Token);
+                            }
                             continue;
                         }
-                        return false;
+                        // End of this phase's retries - continue to next phase if available
+                        break;
                     }
 
                     // Verify the model was actually pulled successfully
                     if (!await CheckModelExistsAsync(modelName))
                     {
-                        AnsiConsole.MarkupLine($"[red]Error: Model pull completed but model not found[/]");
-                        if (attempt < maxRetries)
+                        Log($"[red]Error: Model pull completed but model not found[/]");
+                        if (attempt < maxRetriesPerPhase)
                         {
-                            await Task.Delay(2000, _cts.Token);
+                            await Task.Delay(normalRetryDelayMs, _cts.Token);
                             continue;
                         }
-                        return false;
+                        break;
                     }
 
-                    AnsiConsole.MarkupLine($"[green]✓ Model pulled successfully: {modelName}[/]");
+                    Log($"[green]✓ Model pulled successfully: {modelName}[/]");
                     return true;
                 }
                 catch (OperationCanceledException)
@@ -4710,17 +6000,70 @@ Which response is better? Provide bestanswer and reason.";
                 }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLine($"[red]Error pulling model: {ex.Message}[/]");
-                    if (attempt < maxRetries)
+                    Log($"[red]Error pulling model: {ex.Message}[/]");
+
+                    // Check if this is a rate limit error
+                    bool isRateLimitError = ex.Message.Contains("429") ||
+                        ex.Message.Contains("rate limit", StringComparison.OrdinalIgnoreCase);
+
+                    if (attempt < maxRetriesPerPhase)
                     {
-                        await Task.Delay(2000, _cts.Token);
+                        if (isRateLimitError && isHuggingFaceModel)
+                        {
+                            // Show HF_TOKEN warning only once
+                            if (!shownHfTokenWarning)
+                            {
+                                shownHfTokenWarning = true;
+                                var hfToken = Environment.GetEnvironmentVariable("HF_TOKEN");
+                                if (string.IsNullOrEmpty(hfToken))
+                                {
+                                    Log($"[yellow]Tip: Set HF_TOKEN environment variable to avoid rate limiting.[/]");
+                                }
+                            }
+
+                            if (isSlowPhase)
+                            {
+                                // Slow phase: use HF API delay or default 30s
+                                int delaySeconds = slowRetryDelaySeconds;
+                                var resetSeconds = await GetHuggingFaceRateLimitResetSecondsAsync();
+                                if (resetSeconds.HasValue && resetSeconds.Value > 0)
+                                {
+                                    delaySeconds = Math.Min(resetSeconds.Value + 5, 300);
+                                    Log($"[yellow]Rate limit detected, waiting {delaySeconds}s (from HF API) before retry...[/]");
+                                }
+                                else
+                                {
+                                    Log($"[yellow]Rate limit detected, waiting {delaySeconds}s before retry...[/]");
+                                }
+                                await Task.Delay(delaySeconds * 1000, _cts.Token);
+                            }
+                            else
+                            {
+                                // Quick phase: 2s delay to catch IP changes
+                                Log($"[yellow]Rate limit detected, quick retry in {quickRetryDelayMs / 1000}s...[/]");
+                                await Task.Delay(quickRetryDelayMs, _cts.Token);
+                            }
+                        }
+                        else if (isRateLimitError)
+                        {
+                            // Non-HF rate limit
+                            Log($"[yellow]Rate limit detected, waiting {slowRetryDelaySeconds}s before retry...[/]");
+                            await Task.Delay(slowRetryDelaySeconds * 1000, _cts.Token);
+                        }
+                        else
+                        {
+                            await Task.Delay(normalRetryDelayMs, _cts.Token);
+                        }
                         continue;
                     }
-                    return false;
+                    // End of this phase's retries - continue to next phase if available
+                    break;
+                }
                 }
             }
 
-            AnsiConsole.MarkupLine($"[red]Failed to pull model after {maxRetries} attempts[/]");
+            int totalRetries = totalPhases * maxRetriesPerPhase;
+            Log($"[red]Failed to pull model after {totalRetries} attempts[/]");
             return false;
         }
 
@@ -4747,7 +6090,7 @@ Which response is better? Provide bestanswer and reason.";
         {
             try
             {
-                AnsiConsole.MarkupLine($"[yellow]Removing on-demand model: {modelName}[/]");
+                Log($"[yellow]Removing on-demand model: {modelName}[/]");
 
                 var deleteRequest = new { model = modelName };
                 var jsonContent = JsonSerializer.Serialize(deleteRequest);
@@ -4760,17 +6103,17 @@ Which response is better? Provide bestanswer and reason.";
 
                 if (response.IsSuccessStatusCode)
                 {
-                    AnsiConsole.MarkupLine($"[green]✓ Model removed: {modelName}[/]");
+                    Log($"[green]✓ Model removed: {modelName}[/]");
                     return true;
                 }
                 else if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    AnsiConsole.MarkupLine($"[yellow]Model not found (may have been already removed): {modelName}[/]");
+                    Log($"[yellow]Model not found (may have been already removed): {modelName}[/]");
                     return true; // Not an error - model is gone which is what we wanted
                 }
                 else
                 {
-                    AnsiConsole.MarkupLine($"[red]Error: Failed to remove model (HTTP {response.StatusCode})[/]");
+                    Log($"[red]Error: Failed to remove model (HTTP {response.StatusCode})[/]");
                     return false;
                 }
             }
@@ -4780,7 +6123,7 @@ Which response is better? Provide bestanswer and reason.";
             }
             catch (Exception ex)
             {
-                AnsiConsole.MarkupLine($"[red]Error removing model: {ex.Message}[/]");
+                Log($"[red]Error removing model: {ex.Message}[/]");
                 return false;
             }
         }

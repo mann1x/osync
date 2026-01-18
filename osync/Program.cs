@@ -32,10 +32,67 @@ using ByteSizeLib;
 
 namespace osync
 {
-    [ArgExceptionBehavior(ArgExceptionPolicy.StandardExceptionHandling), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true)]
+    /// <summary>
+    /// Module initializer to fix terminal detection issues before any library loads.
+    /// This runs before Main() and before any static constructors in the assembly.
+    /// </summary>
+    internal static class TerminalInitializer
+    {
+        // Store original TERM to restore on exit
+        internal static string? OriginalTerm { get; private set; }
+
+        [ModuleInitializer]
+        internal static void Initialize()
+        {
+            // Skip on Windows - no terminal detection issues there
+            if (OperatingSystem.IsWindows())
+                return;
+
+            try
+            {
+                var term = System.Environment.GetEnvironmentVariable("TERM") ?? "";
+
+                // Store original TERM for restoration on exit
+                OriginalTerm = term;
+
+                // Force TERM=xterm-16color on non-Windows to avoid capability detection hangs
+                // Some .NET console libraries (Spectre.Console, PrettyConsole) query terminal
+                // capabilities with escape sequences that hang over SSH/tmux with 256-color terms
+                // Using xterm-16color is safe and still provides good color support
+                if (!string.IsNullOrEmpty(term) && term != "dumb")
+                {
+                    System.Environment.SetEnvironmentVariable("TERM", "xterm-16color");
+                }
+            }
+            catch
+            {
+                // Ignore any errors in module initialization
+            }
+        }
+
+        /// <summary>
+        /// Restore the original TERM environment variable
+        /// </summary>
+        internal static void RestoreTerm()
+        {
+            if (!OperatingSystem.IsWindows() && OriginalTerm != null)
+            {
+                try
+                {
+                    System.Environment.SetEnvironmentVariable("TERM", OriginalTerm);
+                }
+                catch
+                {
+                    // Ignore errors
+                }
+            }
+        }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        static string version = "1.2.8";
+        public static string AppVersion = "1.2.9";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -47,7 +104,7 @@ namespace osync
 
         public static string GetAppVersion()
         {
-            return version;
+            return AppVersion;
         }
 
         public static string GetBuildVersion()
@@ -82,7 +139,7 @@ namespace osync
 
         public static string GetFullVersion()
         {
-            return $"v{version} ({GetBuildVersion()})";
+            return $"v{AppVersion} ({GetBuildVersion()})";
         }
 
         [HelpHook, ArgShortcut("-?"), ArgShortcut("-h"), ArgDescription("Shows this help")]
@@ -175,11 +232,8 @@ namespace osync
                 ollamaHost = "http://localhost:11434";
             }
 
-            // Ensure the URL has a protocol
-            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
-            {
-                ollamaHost = "http://" + ollamaHost;
-            }
+            // Normalize URL to add protocol and default port
+            ollamaHost = NormalizeServerUrl(ollamaHost);
 
             // Ensure model has a tag
             var modelName = args.ModelName;
@@ -218,14 +272,22 @@ namespace osync
                 ollamaHost = "http://localhost:11434";
             }
 
-            // Ensure the URL has a protocol
-            if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
-            {
-                ollamaHost = "http://" + ollamaHost;
-            }
+            // Normalize URL to add protocol and default port
+            ollamaHost = NormalizeServerUrl(ollamaHost);
+
+            bool isLocalHost = string.IsNullOrEmpty(args.Destination) ||
+                              ollamaHost.Contains("localhost") ||
+                              ollamaHost.Contains("127.0.0.1");
 
             try
             {
+                // If running locally, show GPU and ollama process stats first
+                if (isLocalHost)
+                {
+                    await ShowGpuStatsAsync();
+                    ShowOllamaProcessStats();
+                }
+
                 using var httpClient = new HttpClient
                 {
                     BaseAddress = new Uri(ollamaHost),
@@ -314,6 +376,197 @@ namespace osync
             }
         }
 
+        [ArgActionMethod, ArgDescription("Real-time system and GPU monitoring (aliases: monitor, psm)"), ArgShortcut("monitor"), ArgShortcut("psm")]
+        public void PsMonitor(PsMonitorArgs args)
+        {
+            // Check if running in redirected console
+            if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
+            {
+                Console.WriteLine("Error: Monitor mode requires an interactive terminal.");
+                Console.WriteLine("Cannot run in piped/redirected mode.");
+                return;
+            }
+
+            // Parse time durations
+            int refreshSeconds = ParseTimeDuration(args.Loop, 5);
+            // For history, plain integers are treated as minutes
+            int historyMinutes = ParseTimeDuration(args.History, 5 * 60, plainIntegerAsMinutes: true) / 60;
+
+            // Validate ranges
+            if (refreshSeconds < 1) refreshSeconds = 1;
+            if (refreshSeconds > 300) refreshSeconds = 300; // Max 5 minutes
+            if (historyMinutes < 1) historyMinutes = 1;
+            if (historyMinutes > 60) historyMinutes = 60;
+
+            var destination = !string.IsNullOrEmpty(args.Destination) ? NormalizeServerUrl(args.Destination) : null;
+
+            var monitorUI = new PsMonitorUI(destination, refreshSeconds, historyMinutes);
+            monitorUI.Run();
+        }
+
+        [ArgActionMethod, ArgDescription("Test D3DKMT GPU monitoring (Windows only)"), ArgShortcut("d3dkmt")]
+        public void D3dkmtTest(D3dkmtTestArgs args)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                Console.WriteLine("D3DKMT is only available on Windows.");
+                return;
+            }
+
+            Console.WriteLine("=== D3DKMT Diagnostic Test ===\n");
+
+            var monitor = new D3DKMTProcessGpuMonitor();
+            Console.WriteLine("Initializing D3DKMT...");
+            var initialized = monitor.Initialize();
+
+            Console.WriteLine(monitor.GetDiagnostics());
+
+            if (!initialized)
+            {
+                Console.WriteLine("ERROR: D3DKMT failed to initialize.");
+                return;
+            }
+
+            // Find process to test
+            var ollamaPatterns = new[] { "ollama", "ollama_llama_server", "llama-server" };
+            List<int> testPids = new();
+
+            if (args.Pid.HasValue)
+            {
+                testPids.Add(args.Pid.Value);
+            }
+            else
+            {
+                // Find all Ollama-related processes (main server and GPU runners)
+                var allProcs = System.Diagnostics.Process.GetProcesses();
+                var ollamaProcs = allProcs
+                    .Where(p =>
+                    {
+                        try
+                        {
+                            var name = p.ProcessName.ToLowerInvariant();
+                            return ollamaPatterns.Any(pattern => name.Contains(pattern));
+                        }
+                        catch { return false; }
+                    })
+                    .ToList();
+
+                // Dispose non-matching processes
+                foreach (var p in allProcs)
+                {
+                    if (!ollamaProcs.Contains(p))
+                        p.Dispose();
+                }
+
+                if (ollamaProcs.Count == 0)
+                {
+                    Console.WriteLine("No Ollama processes found. Please specify a PID with: osync d3dkmt <pid>");
+                    // Use current process as fallback
+                    var curPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                    testPids.Add(curPid);
+                    Console.WriteLine($"Using current process (PID {curPid}) for testing.\n");
+                }
+                else
+                {
+                    Console.WriteLine($"Found {ollamaProcs.Count} Ollama-related process(es):");
+                    foreach (var p in ollamaProcs)
+                    {
+                        Console.WriteLine($"  PID {p.Id}: {p.ProcessName}");
+                        testPids.Add(p.Id);
+                        p.Dispose();
+                    }
+                    System.Console.WriteLine();
+                }
+            }
+
+            // Test each process
+            foreach (var testPid in testPids)
+            {
+                Console.WriteLine($"--- Testing PID {testPid} ---");
+                Console.WriteLine(monitor.TestQueryProcess(testPid));
+            }
+
+            if (testPids.Count == 0)
+            {
+                Console.WriteLine("No processes to query.");
+                monitor.Dispose();
+                return;
+            }
+
+            // Now test the full metrics query with delta calculation
+            Console.WriteLine("\n=== Full Metrics Query ===");
+
+            // First query to establish baseline
+            Console.WriteLine("First query (establishing baseline)...");
+            var metrics1 = monitor.GetProcessGpuMetrics(testPids);
+            Console.WriteLine($"  Got {metrics1.Count} results");
+
+            // Wait a bit
+            Console.WriteLine("Waiting 2 seconds...");
+            System.Threading.Thread.Sleep(2000);
+
+            // Second query to get delta
+            Console.WriteLine("Second query (calculating utilization)...");
+            var metrics2 = monitor.GetProcessGpuMetrics(testPids);
+
+            Console.WriteLine($"\n=== Results ===");
+            foreach (var m in metrics2)
+            {
+                Console.WriteLine($"PID {m.ProcessId} ({m.ProcessName}):");
+                Console.WriteLine($"  GPU Index: {m.GpuIndex}");
+                Console.WriteLine($"  GPU Utilization: {m.GpuUtilization:F2}%");
+                Console.WriteLine($"  Dedicated Memory: {m.DedicatedMemoryMB:F2} MB");
+                Console.WriteLine($"  Running Time: {m.RunningTimeNs}");
+            }
+
+            if (metrics2.Count == 0)
+            {
+                Console.WriteLine("No GPU metrics returned. The process may not be using the GPU.");
+            }
+
+            monitor.Dispose();
+        }
+
+        private int ParseTimeDuration(string input, int defaultSeconds, bool plainIntegerAsMinutes = false)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return defaultSeconds;
+
+            input = input.Trim().ToLowerInvariant();
+
+            // Try parsing as plain integer
+            if (int.TryParse(input, out int plainValue))
+            {
+                // For history, plain integer = minutes; for loop, plain integer = seconds
+                return plainIntegerAsMinutes ? plainValue * 60 : plainValue;
+            }
+
+            int totalSeconds = 0;
+            var regex = new System.Text.RegularExpressions.Regex(@"(\d+)\s*(h|m|s)?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var matches = regex.Matches(input);
+
+            if (matches.Count == 0)
+                return defaultSeconds;
+
+            foreach (System.Text.RegularExpressions.Match match in matches)
+            {
+                if (!int.TryParse(match.Groups[1].Value, out int value))
+                    continue;
+
+                string unit = match.Groups[2].Value.ToLowerInvariant();
+                totalSeconds += unit switch
+                {
+                    "h" => value * 3600,
+                    "m" => value * 60,
+                    "s" => value,
+                    "" => value, // No unit = seconds
+                    _ => value
+                };
+            }
+
+            return totalSeconds > 0 ? totalSeconds : defaultSeconds;
+        }
+
         // Helper methods for ps command
         private string TruncateString(string str, int maxLength)
         {
@@ -372,6 +625,474 @@ namespace osync
             if (duration.TotalSeconds >= 60)
                 return $"{(int)duration.TotalMinutes}m {duration.Seconds}s";
             return $"{duration.TotalSeconds:F1}s";
+        }
+
+        /// <summary>
+        /// Show ollama process CPU and memory usage
+        /// </summary>
+        private void ShowOllamaProcessStats()
+        {
+            try
+            {
+                var processes = Process.GetProcessesByName("ollama");
+                if (processes.Length == 0)
+                {
+                    // Try alternative names
+                    processes = Process.GetProcessesByName("ollama_llama_server");
+                }
+
+                if (processes.Length == 0)
+                    return;
+
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine("[bold]Ollama Process:[/]");
+                AnsiConsole.WriteLine(new string('-', 80));
+
+                foreach (var proc in processes)
+                {
+                    try
+                    {
+                        proc.Refresh();
+                        var memoryMB = proc.WorkingSet64 / (1024.0 * 1024.0);
+                        var privateMB = proc.PrivateMemorySize64 / (1024.0 * 1024.0);
+
+                        // Get CPU usage (requires two samples)
+                        var cpuPercent = GetProcessCpuUsage(proc);
+                        var cpuColor = GetPercentageColor(cpuPercent);
+
+                        // Format memory nicely
+                        string memoryStr;
+                        if (memoryMB >= 1024)
+                            memoryStr = $"{memoryMB / 1024:F1} GB";
+                        else
+                            memoryStr = $"{memoryMB:F0} MB";
+
+                        string privateStr;
+                        if (privateMB >= 1024)
+                            privateStr = $"{privateMB / 1024:F1} GB";
+                        else
+                            privateStr = $"{privateMB:F0} MB";
+
+                        AnsiConsole.MarkupLine($"  PID: {proc.Id,-8} Memory: {memoryStr} (Private: {privateStr})  CPU: [{cpuColor}]{cpuPercent:F1}%[/]");
+                    }
+                    catch
+                    {
+                        // Skip processes we can't access
+                    }
+                    finally
+                    {
+                        proc.Dispose();
+                    }
+                }
+
+                AnsiConsole.WriteLine(new string('-', 80));
+            }
+            catch
+            {
+                // Silently ignore errors getting process info
+            }
+        }
+
+        /// <summary>
+        /// Get CPU usage for a process (approximate, single sample)
+        /// </summary>
+        private double GetProcessCpuUsage(Process proc)
+        {
+            try
+            {
+                var startTime = DateTime.UtcNow;
+                var startCpuUsage = proc.TotalProcessorTime;
+
+                System.Threading.Thread.Sleep(100); // Brief sample
+
+                proc.Refresh();
+                var endTime = DateTime.UtcNow;
+                var endCpuUsage = proc.TotalProcessorTime;
+
+                var cpuUsedMs = (endCpuUsage - startCpuUsage).TotalMilliseconds;
+                var totalMsPassed = (endTime - startTime).TotalMilliseconds;
+                var cpuUsageTotal = cpuUsedMs / (System.Environment.ProcessorCount * totalMsPassed) * 100;
+
+                return Math.Min(cpuUsageTotal, 100);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Show GPU statistics if available (NVIDIA or AMD)
+        /// </summary>
+        private async Task ShowGpuStatsAsync()
+        {
+            // Try NVIDIA first
+            var nvidiaStats = await GetNvidiaGpuStatsAsync();
+            if (nvidiaStats != null && nvidiaStats.Count > 0)
+            {
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine("[bold]GPU Status (NVIDIA):[/]");
+                AnsiConsole.WriteLine(new string('-', 80));
+
+                foreach (var gpu in nvidiaStats)
+                {
+                    var memUsedGB = gpu.MemoryUsed / 1024.0;
+                    var memTotalGB = gpu.MemoryTotal / 1024.0;
+                    var memPercent = gpu.MemoryTotal > 0 ? (gpu.MemoryUsed * 100.0 / gpu.MemoryTotal) : 0;
+                    var powerPercent = gpu.PowerLimit > 0 ? (gpu.PowerDraw * 100.0 / gpu.PowerLimit) : 0;
+
+                    AnsiConsole.MarkupLine($"  [bold][[{gpu.Index}]][/] {Markup.Escape(gpu.Name)}");
+
+                    var computeColor = GetPercentageColor(gpu.GpuUtilization);
+                    var memColor = GetPercentageColor(memPercent);
+                    AnsiConsole.MarkupLine($"      Compute: [{computeColor}]{gpu.GpuUtilization}%[/]  Memory: {memUsedGB:F1}/{memTotalGB:F1} GB ([{memColor}]{memPercent:F0}%[/])");
+
+                    if (gpu.Temperature > 0 || gpu.PowerDraw > 0)
+                    {
+                        var tempColor = GetTemperatureColor(gpu.Temperature);
+                        var powerColor = GetPercentageColor(powerPercent);
+                        var powerInfo = gpu.PowerLimit > 0 ? $"{gpu.PowerDraw:F0}/{gpu.PowerLimit:F0}W" : $"{gpu.PowerDraw:F0}W";
+                        AnsiConsole.MarkupLine($"      Temp: [{tempColor}]{gpu.Temperature}°C[/]  Power: [{powerColor}]{powerInfo}[/]  Clock: {gpu.ClockSM} MHz");
+                    }
+
+                    // Show ollama memory usage if detected
+                    if (gpu.ProcessMemoryUsed > 0)
+                    {
+                        var ollamaMemGB = gpu.ProcessMemoryUsed / 1024.0;
+                        var ollamaPercent = gpu.MemoryTotal > 0 ? (gpu.ProcessMemoryUsed * 100.0 / gpu.MemoryTotal) : 0;
+                        var ollamaColor = GetPercentageColor(ollamaPercent);
+                        if (ollamaMemGB >= 1.0)
+                            AnsiConsole.MarkupLine($"      Ollama VRAM: [{ollamaColor}]{ollamaMemGB:F1} GB ({ollamaPercent:F0}%)[/]");
+                        else
+                            AnsiConsole.MarkupLine($"      Ollama VRAM: [{ollamaColor}]{gpu.ProcessMemoryUsed:F0} MB ({ollamaPercent:F0}%)[/]");
+                    }
+                }
+
+                AnsiConsole.WriteLine(new string('-', 80));
+                return;
+            }
+
+            // Try AMD (via rocm-smi)
+            var amdStats = await GetAmdGpuStatsAsync();
+            if (amdStats != null && amdStats.Count > 0)
+            {
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine("[bold]GPU Status (AMD):[/]");
+                AnsiConsole.WriteLine(new string('-', 80));
+
+                foreach (var gpu in amdStats)
+                {
+                    var memUsedGB = gpu.MemoryUsed / 1024.0;
+                    var memTotalGB = gpu.MemoryTotal / 1024.0;
+                    var memPercent = gpu.MemoryTotal > 0 ? (gpu.MemoryUsed * 100.0 / gpu.MemoryTotal) : 0;
+
+                    AnsiConsole.MarkupLine($"  [bold][[{gpu.Index}]][/] {Markup.Escape(gpu.Name)}");
+
+                    var computeColor = GetPercentageColor(gpu.GpuUtilization);
+                    var memColor = GetPercentageColor(memPercent);
+                    AnsiConsole.MarkupLine($"      Compute: [{computeColor}]{gpu.GpuUtilization}%[/]  Memory: {memUsedGB:F1}/{memTotalGB:F1} GB ([{memColor}]{memPercent:F0}%[/])");
+
+                    if (gpu.Temperature > 0 || gpu.PowerDraw > 0)
+                    {
+                        var tempColor = GetTemperatureColor(gpu.Temperature);
+                        AnsiConsole.MarkupLine($"      Temp: [{tempColor}]{gpu.Temperature}°C[/]  Power: {gpu.PowerDraw:F0}W  Clock: {gpu.ClockSM} MHz");
+                    }
+
+                    // Show ollama memory usage if detected (for AMD)
+                    if (gpu.ProcessMemoryUsed > 0)
+                    {
+                        var ollamaMemGB = gpu.ProcessMemoryUsed / 1024.0;
+                        var ollamaPercent = gpu.MemoryTotal > 0 ? (gpu.ProcessMemoryUsed * 100.0 / gpu.MemoryTotal) : 0;
+                        var ollamaColor = GetPercentageColor(ollamaPercent);
+                        if (ollamaMemGB >= 1.0)
+                            AnsiConsole.MarkupLine($"      Ollama VRAM: [{ollamaColor}]{ollamaMemGB:F1} GB ({ollamaPercent:F0}%)[/]");
+                        else
+                            AnsiConsole.MarkupLine($"      Ollama VRAM: [{ollamaColor}]{gpu.ProcessMemoryUsed:F0} MB ({ollamaPercent:F0}%)[/]");
+                    }
+                }
+
+                AnsiConsole.WriteLine(new string('-', 80));
+            }
+        }
+
+        /// <summary>
+        /// Get color for a percentage value (0-100)
+        /// </summary>
+        private static string GetPercentageColor(double percent)
+        {
+            return percent switch
+            {
+                < 50 => "green",
+                < 75 => "yellow",
+                < 90 => "orange1",
+                _ => "red"
+            };
+        }
+
+        /// <summary>
+        /// Get color for temperature value (in Celsius)
+        /// </summary>
+        private static string GetTemperatureColor(int temp)
+        {
+            return temp switch
+            {
+                < 60 => "green",
+                < 70 => "yellow",
+                < 80 => "orange1",
+                _ => "red"
+            };
+        }
+
+        private class GpuStats
+        {
+            public int Index { get; set; }
+            public string Name { get; set; } = "";
+            public int GpuUtilization { get; set; }
+            public double MemoryUsed { get; set; } // MB
+            public double MemoryTotal { get; set; } // MB
+            public int Temperature { get; set; } // Celsius
+            public double PowerDraw { get; set; } // Watts
+            public double PowerLimit { get; set; } // Watts
+            public int ClockSM { get; set; } // MHz
+            public double ProcessMemoryUsed { get; set; } // MB (ollama's usage)
+        }
+
+        /// <summary>
+        /// Get NVIDIA GPU stats using nvidia-smi
+        /// </summary>
+        private async Task<List<GpuStats>?> GetNvidiaGpuStatsAsync()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "nvidia-smi",
+                    Arguments = "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,clocks.current.sm --format=csv,noheader,nounits",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) return null;
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+                    return null;
+
+                var stats = new List<GpuStats>();
+                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var line in lines)
+                {
+                    var parts = line.Split(',').Select(p => p.Trim()).ToArray();
+                    if (parts.Length >= 9)
+                    {
+                        var gpu = new GpuStats
+                        {
+                            Index = int.TryParse(parts[0], out var idx) ? idx : 0,
+                            Name = parts[1],
+                            GpuUtilization = int.TryParse(parts[2], out var util) ? util : 0,
+                            MemoryUsed = double.TryParse(parts[3], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var memUsed) ? memUsed : 0,
+                            MemoryTotal = double.TryParse(parts[4], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var memTotal) ? memTotal : 0,
+                            Temperature = int.TryParse(parts[5], out var temp) ? temp : 0,
+                            PowerDraw = double.TryParse(parts[6], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var power) ? power : 0,
+                            PowerLimit = double.TryParse(parts[7], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var powerLimit) ? powerLimit : 0,
+                            ClockSM = int.TryParse(parts[8], out var clock) ? clock : 0
+                        };
+                        stats.Add(gpu);
+                    }
+                }
+
+                // Try to get ollama's GPU memory usage
+                if (stats.Count > 0)
+                {
+                    await GetNvidiaProcessMemoryAsync(stats);
+                }
+
+                return stats;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Get ollama's GPU memory usage from nvidia-smi
+        /// </summary>
+        private async Task GetNvidiaProcessMemoryAsync(List<GpuStats> stats)
+        {
+            try
+            {
+                // First, get UUID mapping for each GPU index
+                var psiUuid = new ProcessStartInfo
+                {
+                    FileName = "nvidia-smi",
+                    Arguments = "--query-gpu=index,uuid --format=csv,noheader",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                var uuidMapping = new Dictionary<string, int>(); // UUID -> GPU index
+
+                using (var processUuid = Process.Start(psiUuid))
+                {
+                    if (processUuid != null)
+                    {
+                        var uuidOutput = await processUuid.StandardOutput.ReadToEndAsync();
+                        await processUuid.WaitForExitAsync();
+
+                        if (processUuid.ExitCode == 0 && !string.IsNullOrWhiteSpace(uuidOutput))
+                        {
+                            foreach (var line in uuidOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                var parts = line.Split(',').Select(p => p.Trim()).ToArray();
+                                if (parts.Length >= 2 && int.TryParse(parts[0], out var gpuIdx))
+                                {
+                                    uuidMapping[parts[1]] = gpuIdx;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Query compute apps for process memory
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "nvidia-smi",
+                    Arguments = "--query-compute-apps=gpu_uuid,pid,used_memory,name --format=csv,noheader,nounits",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) return;
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+                    return;
+
+                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines)
+                {
+                    var parts = line.Split(',').Select(p => p.Trim()).ToArray();
+                    if (parts.Length >= 4)
+                    {
+                        var gpuUuid = parts[0];
+                        var procName = parts[3].ToLower();
+                        if (procName.Contains("ollama") || procName.Contains("llama"))
+                        {
+                            var memUsed = double.TryParse(parts[2], System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var mem) ? mem : 0;
+
+                            // Find the matching GPU by UUID
+                            if (uuidMapping.TryGetValue(gpuUuid, out var gpuIdx) && gpuIdx < stats.Count)
+                            {
+                                stats[gpuIdx].ProcessMemoryUsed += memUsed;
+                            }
+                            else if (stats.Count > 0)
+                            {
+                                // Fallback to first GPU
+                                stats[0].ProcessMemoryUsed += memUsed;
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore errors
+            }
+        }
+
+        /// <summary>
+        /// Get AMD GPU stats using rocm-smi (Linux) or similar
+        /// </summary>
+        private async Task<List<GpuStats>?> GetAmdGpuStatsAsync()
+        {
+            try
+            {
+                // rocm-smi is the AMD equivalent of nvidia-smi on Linux
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "rocm-smi",
+                    Arguments = "--showuse --showmeminfo vram --showtemp --showpower --showclocks --json",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) return null;
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
+                    return null;
+
+                // Parse JSON output from rocm-smi
+                var stats = new List<GpuStats>();
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(output);
+                    var root = doc.RootElement;
+
+                    int index = 0;
+                    foreach (var prop in root.EnumerateObject())
+                    {
+                        if (prop.Name.StartsWith("card"))
+                        {
+                            var card = prop.Value;
+                            var gpu = new GpuStats { Index = index++ };
+
+                            if (card.TryGetProperty("GPU use (%)", out var util))
+                                gpu.GpuUtilization = int.TryParse(util.GetString(), out var u) ? u : 0;
+
+                            if (card.TryGetProperty("VRAM Total Memory (B)", out var vramTotal))
+                                gpu.MemoryTotal = double.TryParse(vramTotal.GetString(), out var mt) ? mt / (1024 * 1024) : 0;
+
+                            if (card.TryGetProperty("VRAM Total Used Memory (B)", out var vramUsed))
+                                gpu.MemoryUsed = double.TryParse(vramUsed.GetString(), out var mu) ? mu / (1024 * 1024) : 0;
+
+                            if (card.TryGetProperty("Temperature (Sensor edge) (C)", out var temp))
+                                gpu.Temperature = int.TryParse(temp.GetString(), out var t) ? t : 0;
+
+                            if (card.TryGetProperty("Average Graphics Package Power (W)", out var power))
+                                gpu.PowerDraw = double.TryParse(power.GetString(), out var p) ? p : 0;
+
+                            if (card.TryGetProperty("sclk clock speed:", out var clock))
+                                gpu.ClockSM = int.TryParse(clock.GetString()?.Replace("Mhz", "").Trim(), out var c) ? c : 0;
+
+                            if (card.TryGetProperty("Card series", out var name))
+                                gpu.Name = name.GetString() ?? "AMD GPU";
+
+                            stats.Add(gpu);
+                        }
+                    }
+                }
+                catch
+                {
+                    // JSON parsing failed, rocm-smi output format may have changed
+                }
+
+                return stats;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private string FormatUntil(DateTime expiresAt)
@@ -440,11 +1161,8 @@ namespace osync
                     ollamaHost = "http://localhost:11434";
                 }
 
-                // Ensure the URL has a protocol
-                if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
-                {
-                    ollamaHost = "http://" + ollamaHost;
-                }
+                // Normalize URL to add protocol and default port
+                ollamaHost = NormalizeServerUrl(ollamaHost);
             }
 
             // Ensure model has a tag
@@ -507,12 +1225,47 @@ namespace osync
                 }
                 catch { /* Ignore parsing errors */ }
 
-                Console.WriteLine($"✓ Model '{modelName}' loaded successfully ({timeStr}){apiTimeStr}");
+                // Verify model is loaded using /api/ps
+                bool verified = false;
+                try
+                {
+                    var psResponse = await httpClient.GetAsync("/api/ps");
+                    if (psResponse.IsSuccessStatusCode)
+                    {
+                        var psJson = await psResponse.Content.ReadAsStringAsync();
+                        var status = JsonSerializer.Deserialize<ProcessStatusResponse>(psJson);
+                        if (status?.Models != null)
+                        {
+                            verified = status.Models.Any(m =>
+                                m.Name.Equals(modelName, StringComparison.OrdinalIgnoreCase));
+                        }
+                    }
+                }
+                catch { /* Ignore verification errors */ }
+
+                if (verified)
+                    Console.WriteLine($"✓ Model '{modelName}' loaded successfully ({timeStr}){apiTimeStr}");
+                else
+                    Console.WriteLine($"✓ Model '{modelName}' loaded ({timeStr}){apiTimeStr}");
             }
             catch (HttpRequestException ex)
             {
-                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
-                Console.WriteLine($"Details: {ex.Message}");
+                // Check if it's a 404 (model not found) vs connection error
+                if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    Console.WriteLine($"Error: Model '{modelName}' not found");
+                    Console.WriteLine($"Details: The model does not exist on the server. Check the model name and try again.");
+                }
+                else if (ex.StatusCode.HasValue)
+                {
+                    Console.WriteLine($"Error: Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
+                    Console.WriteLine($"Details: {ex.Message}");
+                }
+                else
+                {
+                    Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                    Console.WriteLine($"Details: {ex.Message}");
+                }
                 System.Environment.Exit(1);
             }
             catch (Exception ex)
@@ -553,11 +1306,8 @@ namespace osync
                     ollamaHost = "http://localhost:11434";
                 }
 
-                // Ensure the URL has a protocol
-                if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
-                {
-                    ollamaHost = "http://" + ollamaHost;
-                }
+                // Normalize URL to add protocol and default port
+                ollamaHost = NormalizeServerUrl(ollamaHost);
             }
 
             try
@@ -600,6 +1350,7 @@ namespace osync
                 }
 
                 // Unload each model
+                int unloadedCount = 0;
                 foreach (var modelName in modelsToUnload)
                 {
                     Console.WriteLine($"Unloading model '{modelName}'...");
@@ -624,18 +1375,68 @@ namespace osync
                     // Consume the response
                     await response.Content.ReadAsStringAsync();
 
-                    Console.WriteLine($"✓ Model '{modelName}' unloaded successfully");
+                    // Verify model is unloaded using /api/ps
+                    bool verified = false;
+                    try
+                    {
+                        // Brief delay to allow Ollama to process the unload
+                        await Task.Delay(100);
+
+                        var psResponse = await httpClient.GetAsync("/api/ps");
+                        if (psResponse.IsSuccessStatusCode)
+                        {
+                            var psJson = await psResponse.Content.ReadAsStringAsync();
+                            var status = JsonSerializer.Deserialize<ProcessStatusResponse>(psJson);
+                            if (status?.Models != null)
+                            {
+                                // Model is unloaded if it's NOT in the list
+                                verified = !status.Models.Any(m =>
+                                    m.Name.Equals(modelName, StringComparison.OrdinalIgnoreCase));
+                            }
+                            else
+                            {
+                                // No models loaded = verified
+                                verified = true;
+                            }
+                        }
+                    }
+                    catch { /* Ignore verification errors */ }
+
+                    if (verified)
+                    {
+                        Console.WriteLine($"✓ Model '{modelName}' unloaded successfully");
+                        unloadedCount++;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"✓ Model '{modelName}' unloaded");
+                        unloadedCount++;
+                    }
                 }
 
                 if (modelsToUnload.Count > 1)
                 {
-                    Console.WriteLine($"\nUnloaded {modelsToUnload.Count} models");
+                    Console.WriteLine($"\nUnloaded {unloadedCount} models");
                 }
             }
             catch (HttpRequestException ex)
             {
-                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
-                Console.WriteLine($"Details: {ex.Message}");
+                // Check if it's a specific error vs connection error
+                if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    Console.WriteLine($"Error: Model not found on the server");
+                    Console.WriteLine($"Details: {ex.Message}");
+                }
+                else if (ex.StatusCode.HasValue)
+                {
+                    Console.WriteLine($"Error: Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
+                    Console.WriteLine($"Details: {ex.Message}");
+                }
+                else
+                {
+                    Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                    Console.WriteLine($"Details: {ex.Message}");
+                }
                 System.Environment.Exit(1);
             }
             catch (Exception ex)
@@ -664,16 +1465,16 @@ namespace osync
             {
                 ollamaHost = "http://localhost:11434";
             }
-            // If OLLAMA_HOST doesn't have protocol, add it
-            else if (!ollamaHost.StartsWith("http://") && !ollamaHost.StartsWith("https://"))
+            else
             {
-                ollamaHost = "http://" + ollamaHost;
+                // Normalize URL with default protocol and port
+                ollamaHost = NormalizeServerUrl(ollamaHost);
             }
 
             // Validate server URL if it's not localhost
             if (!ollamaHost.Contains("localhost") && !ollamaHost.Contains("127.0.0.1"))
             {
-                if (!ValidateServerUrl(ollamaHost, silent: true))
+                if (!ValidateServerUrl(ollamaHost, silent: false))
                 {
                     System.Environment.Exit(1);
                 }
@@ -694,22 +1495,74 @@ namespace osync
             System.Environment.Exit(exitCode);
         }
 
+        [ArgActionMethod, ArgDescription("Run context length benchmarks with optional tool calling")]
+        public async Task Bench(BenchArgs args)
+        {
+            Init();
+
+            // Get Ollama host from argument, environment variable, or default
+            var ollamaHost = !string.IsNullOrEmpty(args.Destination)
+                ? args.Destination
+                : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                    ?? "http://localhost:11434";
+
+            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
+            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
+            {
+                ollamaHost = "http://localhost:11434";
+            }
+            else
+            {
+                // Normalize URL with default protocol and port
+                ollamaHost = NormalizeServerUrl(ollamaHost);
+            }
+
+            // Validate server URL if it's not localhost (skip for special flags)
+            if (!args.HelpCloud && !args.ShowTools && !args.GenerateSuite)
+            {
+                if (!ollamaHost.Contains("localhost") && !ollamaHost.Contains("127.0.0.1"))
+                {
+                    if (!ValidateServerUrl(ollamaHost, silent: false))
+                    {
+                        System.Environment.Exit(1);
+                    }
+                }
+            }
+
+            var benchCommand = new BenchCommand(args, ollamaHost);
+            var exitCode = await benchCommand.ExecuteAsync();
+            System.Environment.Exit(exitCode);
+        }
+
+        [ArgActionMethod, ArgDescription("View benchmark results from bench command")]
+        public async Task BenchView(BenchViewArgs args)
+        {
+            Init();
+
+            var benchViewCommand = new BenchViewCommand(args);
+            var exitCode = await benchViewCommand.ExecuteAsync();
+            System.Environment.Exit(exitCode);
+        }
+
         [ArgActionMethod, ArgDescription("Interactive TUI for model management")]
         public void Manage(ManageArgs args)
         {
             Init();
 
-            // Validate destination if provided
-            if (!string.IsNullOrEmpty(args.Destination))
+            var destination = args.Destination;
+
+            // Normalize and validate destination if provided
+            if (!string.IsNullOrEmpty(destination))
             {
-                if (!ValidateServerUrl(args.Destination, silent: true))
+                destination = NormalizeServerUrl(destination);
+                if (!ValidateServerUrl(destination, silent: true))
                 {
                     System.Environment.Exit(1);
                 }
             }
 
             // Launch TUI
-            var manageUI = new ManageUI(this, args.Destination);
+            var manageUI = new ManageUI(this, destination);
             manageUI.Run();
         }
 
@@ -750,7 +1603,7 @@ namespace osync
             if (!args.Verbose)
                 return;
 
-            Console.WriteLine();
+            System.Console.WriteLine();
 
             // Get binary path and installation status
             string binaryPath = System.Environment.ProcessPath ?? "unknown";
@@ -779,7 +1632,7 @@ namespace osync
             {
                 // Get version and build of installed binary and compare
                 var (installedVersion, installedBuild) = GetInstalledBinaryVersionInfo(installedBinaryPath);
-                string currentVersion = version;
+                string currentVersion = AppVersion;
                 string currentBuild = GetBuildVersion();
 
                 if (installedVersion != null)
@@ -807,7 +1660,7 @@ namespace osync
             }
 
             // Detect shell type and version
-            Console.WriteLine();
+            System.Console.WriteLine();
             var (shellType, shellVersion) = DetectShellInfo();
             Console.WriteLine($"Shell: {shellType} {shellVersion}");
 
@@ -1265,6 +2118,8 @@ namespace osync
         {
             try
             {
+                // Normalize the URL with default protocol and port
+                RemoteServer = NormalizeServerUrl(RemoteServer);
 
                 Uri RemoteUri = new Uri(RemoteServer);
                 if ((RemoteUri.Scheme == "http" || RemoteUri.Scheme == "https") == false) { return false; };
@@ -1287,10 +2142,115 @@ namespace osync
             return true;
         }
 
+        /// <summary>
+        /// Normalize a server URL by adding default protocol (http://) and port (11434) if not specified.
+        /// </summary>
+        internal static string NormalizeServerUrl(string serverUrl)
+        {
+            if (string.IsNullOrWhiteSpace(serverUrl))
+                return serverUrl;
+
+            var url = serverUrl.Trim();
+
+            // Add default protocol if not specified
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                url = "http://" + url;
+            }
+
+            try
+            {
+                var uri = new Uri(url);
+
+                // Add default port 11434 if no port is specified (port will be -1 or 80/443 for default)
+                if (uri.Port == -1 || uri.Port == 80 || uri.Port == 443)
+                {
+                    // Check if original URL explicitly had a port
+                    var hostPart = serverUrl;
+                    if (hostPart.Contains("://"))
+                        hostPart = hostPart.Substring(hostPart.IndexOf("://") + 3);
+
+                    // If no explicit port in the original, add default
+                    if (!hostPart.Contains(":") || hostPart.EndsWith(":"))
+                    {
+                        var builder = new UriBuilder(uri)
+                        {
+                            Port = 11434
+                        };
+                        url = builder.ToString().TrimEnd('/');
+                    }
+                }
+
+                return url.TrimEnd('/');
+            }
+            catch
+            {
+                return url;
+            }
+        }
+
+        /// <summary>
+        /// Check if a string looks like a remote server URL or address (IP, hostname, or URL).
+        /// This is used to distinguish between a remote server and a local model name.
+        ///
+        /// Detection rules:
+        /// - Has protocol (http:// or https://) → remote server
+        /// - Is an IP address (192.168.0.100) → remote server
+        /// - Has port number (host:11434) → remote server
+        /// - Ends with "/" (host/) → remote server (model names cannot end with /)
+        /// - Starts with "localhost" → remote server
+        /// - Plain hostname without port or trailing slash → treated as model name
+        /// </summary>
+        internal static bool LooksLikeRemoteServer(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            var trimmed = input.Trim();
+
+            // Already has protocol
+            if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // Skip known model prefixes that are not remote servers
+            if (trimmed.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("huggingface.co/", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("registry.ollama.ai/", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // Ends with "/" - model names cannot end with slash, so this is a server URL
+            // e.g., "myserver/" → http://myserver:11434
+            if (trimmed.EndsWith("/"))
+                return true;
+
+            // Check if it looks like an IP address (with optional port)
+            // Pattern: numbers and dots, optionally followed by :port
+            var ipPattern = @"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?(/.*)?$";
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, ipPattern))
+                return true;
+
+            // Check if it looks like a hostname with port (hostname:port)
+            // Must have a colon followed by numbers and no slash before the colon
+            var hostPortPattern = @"^[a-zA-Z][a-zA-Z0-9\-\.]*:\d+(\/.*)?$";
+            if (System.Text.RegularExpressions.Regex.IsMatch(trimmed, hostPortPattern))
+                return true;
+
+            // Check if it looks like "localhost" with optional port
+            if (trimmed.StartsWith("localhost", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
+        }
+
         private bool ValidateServerUrl(string serverUrl, bool silent = false)
         {
             try
             {
+                // Normalize the URL with default protocol and port
+                serverUrl = NormalizeServerUrl(serverUrl);
+
                 Uri serverUri = new Uri(serverUrl);
                 if (serverUri.Scheme != "http" && serverUri.Scheme != "https")
                 {
@@ -1687,16 +2647,23 @@ namespace osync
             }
         }
 
-        private (string serverUrl, string modelName) ParseRemoteSource(string source)
+        /// <summary>
+        /// Parse a remote URL into server URL and model name components.
+        /// Model name may be empty if the URL doesn't contain one.
+        /// </summary>
+        private (string serverUrl, string modelName) ParseRemoteSource(string source, bool requireModelName = false)
         {
             // Format: http://server:port/modelname:tag or http://server:port/namespace/modelname:tag
             try
             {
-                Uri uri = new Uri(source);
+                // Normalize the URL first to add protocol and port
+                var normalizedSource = NormalizeServerUrl(source);
+
+                Uri uri = new Uri(normalizedSource);
                 string serverUrl = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
                 string modelName = uri.AbsolutePath.TrimStart('/');
 
-                if (string.IsNullOrEmpty(modelName))
+                if (requireModelName && string.IsNullOrEmpty(modelName))
                 {
                     Console.WriteLine("Error: model name must be specified in the URL (e.g., http://server:port/modelname:tag)");
                     System.Environment.Exit(1);
@@ -1708,7 +2675,7 @@ namespace osync
             {
                 Console.WriteLine($"Error parsing remote URL: {ex.Message}");
                 System.Environment.Exit(1);
-                return (null, null);
+                return (null!, null!);
             }
         }
 
@@ -1722,14 +2689,21 @@ namespace osync
             cancellationToken.ThrowIfCancellationRequested();
 
             // Detect if source and destination are remote or local
+            // Use LooksLikeRemoteServer to detect IP addresses and hostnames without protocol
             bool isSourceRemote = Source.StartsWith("http://") || Source.StartsWith("https://");
-            bool isDestinationRemote = Destination.StartsWith("http://") || Destination.StartsWith("https://");
+            bool isDestinationRemote = LooksLikeRemoteServer(Destination);
 
             if (isSourceRemote && isDestinationRemote)
             {
                 // Remote to Remote copy - use streaming buffer
-                var (sourceServer, sourceModel) = ParseRemoteSource(Source);
-                var (destServer, destModel) = ParseRemoteSource(Destination);
+                var (sourceServer, sourceModel) = ParseRemoteSource(Source, requireModelName: true);
+                var (destServer, destModel) = ParseRemoteSource(Destination, requireModelName: false);
+
+                // If destination has no model name, use source model name
+                if (string.IsNullOrEmpty(destModel))
+                {
+                    destModel = sourceModel;
+                }
 
                 Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}...");
                 ActionCopyRemoteToRemoteStreaming(sourceServer, sourceModel, destServer, destModel, BufferSize).GetAwaiter().GetResult();
@@ -1737,15 +2711,22 @@ namespace osync
             else if (isSourceRemote && !isDestinationRemote)
             {
                 // Remote to Local copy
-                var (sourceServer, sourceModel) = ParseRemoteSource(Source);
+                var (sourceServer, sourceModel) = ParseRemoteSource(Source, requireModelName: true);
 
                 Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to local '{Destination}'...");
                 ActionCopyRemoteToLocal(sourceServer, sourceModel, Destination);
             }
             else if (!isSourceRemote && isDestinationRemote)
             {
-                // Local to Remote copy
-                var (destServer, destModel) = ParseRemoteSource(Destination);
+                // Local to Remote copy (including hf.co models which are "local" in terms of source)
+                var (destServer, destModel) = ParseRemoteSource(Destination, requireModelName: false);
+
+                // If destination has no model name, derive from source
+                if (string.IsNullOrEmpty(destModel))
+                {
+                    // Extract model name from source (handle hf.co/namespace/model:tag format)
+                    destModel = GetModelNameFromSource(Source);
+                }
 
                 if (!Directory.Exists(ollama_models))
                 {
@@ -1765,6 +2746,31 @@ namespace osync
                 // Local to Local copy
                 ActionCopyLocal(Source, Destination);
             }
+        }
+
+        /// <summary>
+        /// Extract a model name from a source string (handles hf.co/namespace/model:tag format)
+        /// </summary>
+        private string GetModelNameFromSource(string source)
+        {
+            // Handle hf.co/namespace/model:tag format
+            if (source.StartsWith("hf.co/", StringComparison.OrdinalIgnoreCase) ||
+                source.StartsWith("huggingface.co/", StringComparison.OrdinalIgnoreCase))
+            {
+                // Extract the model name part (last segment after the prefix)
+                var parts = source.Split('/');
+                if (parts.Length >= 3)
+                {
+                    // Format: hf.co/namespace/model:tag -> return model:tag or namespace/model:tag
+                    var modelPart = string.Join("/", parts.Skip(1)); // Skip "hf.co"
+                    // Clean up the model name - remove special characters that aren't valid
+                    modelPart = modelPart.Replace("-GGUF", "").Replace("-gguf", "");
+                    return modelPart;
+                }
+            }
+
+            // For regular model names, just return as-is
+            return source;
         }
 
         private void ActionCopyLocal(string source, string destination)
@@ -3365,8 +4371,8 @@ namespace osync
         {
             Init();
 
-            // If pattern looks like a URL, treat it as destination
-            if (!string.IsNullOrEmpty(Pattern) && (Pattern.StartsWith("http://") || Pattern.StartsWith("https://")))
+            // If pattern looks like a URL or IP address, treat it as destination
+            if (!string.IsNullOrEmpty(Pattern) && LooksLikeRemoteServer(Pattern))
             {
                 Destination = Pattern;
                 Pattern = null;
@@ -3395,6 +4401,8 @@ namespace osync
             }
             else
             {
+                // Normalize URL with default protocol and port
+                Destination = NormalizeServerUrl(Destination);
                 if (!ValidateServerUrl(Destination, silent: true))
                 {
                     System.Environment.Exit(1);
@@ -3636,8 +4644,8 @@ namespace osync
         {
             Init();
 
-            // If pattern looks like a URL, treat it as destination
-            if (!string.IsNullOrEmpty(Pattern) && (Pattern.StartsWith("http://") || Pattern.StartsWith("https://")))
+            // If pattern looks like a URL or IP address, treat it as destination
+            if (!string.IsNullOrEmpty(Pattern) && LooksLikeRemoteServer(Pattern))
             {
                 Destination = Pattern;
                 Pattern = null;
@@ -3665,6 +4673,8 @@ namespace osync
             }
             else
             {
+                // Normalize URL with default protocol and port
+                Destination = NormalizeServerUrl(Destination);
                 if (!ValidateServerUrl(Destination, silent: true))
                 {
                     System.Environment.Exit(1);
@@ -3800,6 +4810,9 @@ namespace osync
                     p.StartInfo.RedirectStandardError = true;
 
                     p.Start();
+                    // Read and discard stdout/stderr to prevent ANSI codes leaking to console
+                    p.StandardOutput.ReadToEnd();
+                    string error = p.StandardError.ReadToEnd();
                     p.WaitForExit();
 
                     if (p.ExitCode == 0)
@@ -3808,7 +4821,6 @@ namespace osync
                     }
                     else
                     {
-                        string error = p.StandardError.ReadToEnd();
                         Console.WriteLine($"failed to delete '{modelName}': {error}");
                     }
                 }
@@ -4070,8 +5082,8 @@ namespace osync
         {
             Init();
 
-            // If pattern looks like a URL, treat it as destination and extract model name if present
-            if (!string.IsNullOrEmpty(Pattern) && (Pattern.StartsWith("http://") || Pattern.StartsWith("https://")))
+            // If pattern looks like a URL or IP address, treat it as destination and extract model name if present
+            if (!string.IsNullOrEmpty(Pattern) && LooksLikeRemoteServer(Pattern))
             {
                 // Check if URL contains a model name (e.g., http://server:port/model:tag)
                 var (serverUrl, modelName) = ParseRemoteSource(Pattern);
@@ -4111,6 +5123,8 @@ namespace osync
             }
             else
             {
+                // Normalize URL with default protocol and port
+                Destination = NormalizeServerUrl(Destination);
                 if (!ValidateServerUrl(Destination))
                 {
                     System.Environment.Exit(1);
@@ -4161,6 +5175,8 @@ namespace osync
             }
             else
             {
+                // Normalize URL with default protocol and port
+                destination = NormalizeServerUrl(destination);
                 if (!ValidateServerUrl(destination))
                 {
                     System.Environment.Exit(1);
@@ -4203,7 +5219,7 @@ namespace osync
             {
                 Console.WriteLine($"  - {tag.Tag}");
             }
-            Console.WriteLine();
+            System.Console.WriteLine();
 
             // Pull each matching model
             int successCount = 0;
@@ -4237,7 +5253,7 @@ namespace osync
                     Console.WriteLine($"Error pulling {fullModelName}: {ex.Message}");
                     failCount++;
                 }
-                Console.WriteLine();
+                System.Console.WriteLine();
             }
 
             Console.WriteLine($"Pull complete: {successCount} succeeded, {failCount} failed");
@@ -4516,6 +5532,8 @@ namespace osync
             }
             else
             {
+                // Normalize URL with default protocol and port
+                destination = NormalizeServerUrl(destination);
                 if (!ValidateServerUrl(destination))
                 {
                     System.Environment.Exit(1);
@@ -6290,10 +7308,181 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             return args;
         }
 
+        /// <summary>
+        /// Configure terminal capabilities for Spectre.Console and other console libraries.
+        /// This fixes hangs with xterm-256color and other 256-color terminal types in SSH/tmux.
+        /// The issue is that some console libraries try to query terminal capabilities using
+        /// escape sequences, which can hang when the terminal doesn't respond properly.
+        /// </summary>
+        static void ConfigureTerminalCapabilities()
+        {
+            try
+            {
+                // Get terminal info early
+                var term = System.Environment.GetEnvironmentVariable("TERM") ?? "";
+                var colorTerm = System.Environment.GetEnvironmentVariable("COLORTERM") ?? "";
+                var sshConnection = System.Environment.GetEnvironmentVariable("SSH_CONNECTION");
+                var tmux = System.Environment.GetEnvironmentVariable("TMUX");
+                var sshTty = System.Environment.GetEnvironmentVariable("SSH_TTY");
+
+                // Check for OSYNC_COLOR_MODE environment variable for user override
+                var colorModeOverride = System.Environment.GetEnvironmentVariable("OSYNC_COLOR_MODE");
+
+                // On Windows, console libraries usually work fine - let them auto-detect
+                if (OperatingSystem.IsWindows())
+                {
+                    if (!string.IsNullOrEmpty(colorModeOverride))
+                    {
+                        ApplyColorModeOverride(colorModeOverride);
+                    }
+                    return;
+                }
+
+                // Check for known problematic environments (SSH, tmux, screen)
+                bool isRemoteSession = !string.IsNullOrEmpty(sshConnection) || !string.IsNullOrEmpty(sshTty);
+                bool isTmux = !string.IsNullOrEmpty(tmux);
+                bool isScreen = term.StartsWith("screen", StringComparison.OrdinalIgnoreCase);
+
+                // Detect 256-color TERM that causes hangs
+                bool has256ColorTerm = term.Contains("256color", StringComparison.OrdinalIgnoreCase) ||
+                                       term.Contains("256-color", StringComparison.OrdinalIgnoreCase);
+
+                // The problematic case: 256-color terminal over SSH/tmux
+                // Some console libraries try to query the terminal for capabilities using
+                // escape sequences like DA1/DA2/XTVERSION, which can hang if the terminal
+                // doesn't respond or the response isn't received properly over SSH.
+                if ((isRemoteSession || isTmux || isScreen) && has256ColorTerm)
+                {
+                    // Downgrade TERM to avoid the problematic capability detection
+                    // Keep color support but use a simpler terminal type
+                    System.Environment.SetEnvironmentVariable("TERM", "xterm");
+
+                    // Set COLORTERM to indicate we support colors (some apps check this)
+                    if (string.IsNullOrEmpty(colorTerm))
+                    {
+                        System.Environment.SetEnvironmentVariable("COLORTERM", "256");
+                    }
+                }
+
+                // Apply user override if specified
+                if (!string.IsNullOrEmpty(colorModeOverride))
+                {
+                    ApplyColorModeOverride(colorModeOverride);
+                    return;
+                }
+
+                // Configure Spectre.Console based on environment
+                // Detect true color support from COLORTERM
+                bool hasTrueColor = colorTerm.Equals("truecolor", StringComparison.OrdinalIgnoreCase) ||
+                                   colorTerm.Equals("24bit", StringComparison.OrdinalIgnoreCase);
+
+                if (isRemoteSession || isTmux || isScreen)
+                {
+                    if (hasTrueColor)
+                    {
+                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.TrueColor;
+                    }
+                    else if (has256ColorTerm || colorTerm == "256")
+                    {
+                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.EightBit;
+                    }
+                    else
+                    {
+                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.Standard;
+                    }
+
+                    // Disable interactive features that might cause issues
+                    AnsiConsole.Profile.Capabilities.Interactive = System.Console.IsInputRedirected == false;
+                }
+
+                // Handle dumb terminals
+                if (term.Equals("dumb", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(term))
+                {
+                    AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.NoColors;
+                    AnsiConsole.Profile.Capabilities.Unicode = false;
+                }
+
+                // Disable Unicode on Linux console (not xterm/screen)
+                if (term.Equals("linux", StringComparison.OrdinalIgnoreCase))
+                {
+                    AnsiConsole.Profile.Capabilities.Unicode = false;
+                }
+            }
+            catch
+            {
+                // If anything fails during terminal configuration, continue with defaults
+            }
+        }
+
+        /// <summary>
+        /// Apply user-specified color mode override
+        /// </summary>
+        static void ApplyColorModeOverride(string colorModeOverride)
+        {
+            ColorSystem? colorSystem = colorModeOverride.ToLowerInvariant() switch
+            {
+                "none" => ColorSystem.NoColors,
+                "0" => ColorSystem.NoColors,
+                "legacy" => ColorSystem.Legacy,
+                "8" => ColorSystem.Legacy,
+                "standard" => ColorSystem.Standard,
+                "16" => ColorSystem.Standard,
+                "256" => ColorSystem.EightBit,
+                "eightbit" => ColorSystem.EightBit,
+                "true" => ColorSystem.TrueColor,
+                "truecolor" => ColorSystem.TrueColor,
+                "24bit" => ColorSystem.TrueColor,
+                _ => null
+            };
+
+            if (colorSystem.HasValue)
+            {
+                AnsiConsole.Profile.Capabilities.ColorSystem = colorSystem.Value;
+            }
+        }
+
+        /// <summary>
+        /// Print a short help message showing only global options and available commands
+        /// </summary>
+        static void PrintShortHelp()
+        {
+            System.Console.WriteLine("Usage: osync <command> [options]");
+            System.Console.WriteLine("");
+            System.Console.WriteLine("Global Options:");
+            System.Console.WriteLine("  -h, -?           Show this help");
+            System.Console.WriteLine("  -bt <value>      Bandwidth throttling (B, KB, MB, GB)");
+            System.Console.WriteLine("");
+            System.Console.WriteLine("Commands:");
+            System.Console.WriteLine("  copy, cp         Copy a model locally or to a remote server");
+            System.Console.WriteLine("  list, ls         List models on a local or remote server");
+            System.Console.WriteLine("  remove, rm       Remove models matching pattern");
+            System.Console.WriteLine("  rename, mv       Rename a model (copy + delete)");
+            System.Console.WriteLine("  update           Update models to latest versions");
+            System.Console.WriteLine("  pull             Pull (download) a model from registry");
+            System.Console.WriteLine("  show             Show information about a model");
+            System.Console.WriteLine("  run, chat        Run an interactive chat session");
+            System.Console.WriteLine("  ps               Show running models and their status");
+            System.Console.WriteLine("  psmonitor        Real-time system and GPU monitoring");
+            System.Console.WriteLine("  load             Load a model into memory");
+            System.Console.WriteLine("  unload           Unload a model from memory");
+            System.Console.WriteLine("  manage           Interactive TUI for model management");
+            System.Console.WriteLine("  qc               Run quantization comparison tests");
+            System.Console.WriteLine("  qcview           View quantization comparison results");
+            System.Console.WriteLine("  bench            Run context length benchmarks");
+            System.Console.WriteLine("  benchview        View benchmark results");
+            System.Console.WriteLine("  install          Install osync to user directory");
+            System.Console.WriteLine("  showversion, -v  Show version information");
+            System.Console.WriteLine("");
+            System.Console.WriteLine("Use 'osync <command> -h' for detailed help on a specific command.");
+        }
+
         static void Main(string[] args)
         {
             try
             {
+                // Configure terminal/console capabilities early, before any Spectre.Console output
+                ConfigureTerminalCapabilities();
+
                 // Skip startup banner for version command to avoid duplicate output
                 bool isVersionCommand = args.Length > 0 &&
                     (args[0].Equals("showversion", StringComparison.OrdinalIgnoreCase) ||
@@ -6311,6 +7500,13 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 args = HandleShellExpansion(args);
                 args = ReorderArguments(args);
 
+                // Check for global help request (osync -h without a command)
+                if (args.Length == 1 && (args[0] == "-h" || args[0] == "-?" || args[0] == "--help"))
+                {
+                    PrintShortHelp();
+                    return;
+                }
+
                 if (args.Length == 0)
                 {
                     OsyncProgram.isInteractiveMode = true;
@@ -6325,8 +7521,48 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             catch (ArgException ex)
             {
                 Console.WriteLine(ex.Message);
-                Console.WriteLine("Use 'osync -h' or 'osync -?' for usage information.");
+                System.Console.WriteLine();
+
+                // Check if this is an unknown command error
+                if (ex.Message.StartsWith("Unknown command:", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Show compact global help for unknown commands
+                    PrintShortHelp();
+                }
+                else if (args.Length > 0)
+                {
+                    // For known commands with bad arguments, show command-specific help
+                    var commandName = args[0];
+                    try
+                    {
+                        Args.InvokeAction<OsyncProgram>(new[] { commandName, "-h" });
+                    }
+                    catch
+                    {
+                        // If showing command help also fails, fall back to generic message
+                        System.Console.WriteLine("Use 'osync -h' or 'osync -?' for usage information.");
+                    }
+                }
+                else
+                {
+                    System.Console.WriteLine("Use 'osync -h' or 'osync -?' for usage information.");
+                }
                 System.Environment.Exit(1);
+            }
+            finally
+            {
+                // Reset ANSI escape sequences to prevent color bleed to terminal
+                // This is especially important on Linux/macOS where Spectre.Console
+                // may leave the terminal in a colored state
+                // Only write raw ANSI on non-Windows - Windows CMD displays it as literal characters
+                if (!OperatingSystem.IsWindows())
+                {
+                    System.Console.Write("\x1b[0m");
+                }
+                System.Console.ResetColor();
+
+                // Restore original TERM environment variable on exit
+                TerminalInitializer.RestoreTerm();
             }
         }
     }

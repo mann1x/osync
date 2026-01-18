@@ -10,7 +10,7 @@ namespace osync
 
         public int TotalQuestions => 50;
 
-        public int NumPredict => 8192;
+        public int? NumPredict => 8192;
 
         public int ContextLength => 8192;
 

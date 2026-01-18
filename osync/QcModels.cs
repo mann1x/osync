@@ -105,6 +105,14 @@ namespace osync
         public int TopK { get; set; }
         public double? RepeatPenalty { get; set; }
         public double? FrequencyPenalty { get; set; }
+        /// <summary>
+        /// Whether thinking mode is enabled. Default is false.
+        /// </summary>
+        public bool EnableThinking { get; set; }
+        /// <summary>
+        /// Thinking level (low, medium, high). Overrides EnableThinking for models that require level.
+        /// </summary>
+        public string? ThinkLevel { get; set; }
     }
 
     /// <summary>
@@ -221,7 +229,7 @@ namespace osync
     {
         public string Token { get; set; } = string.Empty;
         public double Logprob { get; set; }
-        public List<int>? Bytes { get; set; }
+        // Note: Bytes array removed in v1.2.9 to reduce file size - not used by scoring
     }
 
     /// <summary>
@@ -240,6 +248,14 @@ namespace osync
 
         [JsonPropertyName("logprobs")]
         public bool Logprobs { get; set; } = false;
+
+        /// <summary>
+        /// Control thinking mode for thinking models (e.g., qwen3, deepseek-r1)
+        /// Must be at request level, not inside options
+        /// </summary>
+        [JsonPropertyName("think")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public object? Think { get; set; }
 
         [JsonPropertyName("options")]
         public OllamaGenerateOptions? Options { get; set; }
@@ -273,6 +289,8 @@ namespace osync
 
         [JsonPropertyName("num_ctx")]
         public int? NumCtx { get; set; }
+
+        // Note: Think parameter moved to request level in OllamaGenerateRequest
     }
 
     /// <summary>
