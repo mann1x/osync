@@ -14,7 +14,8 @@ public class TestContext
         {
             ["{model}"] = config.RegistryModel,
             ["{remote1}"] = config.RemoteDestination1,
-            ["{remote2}"] = config.RemoteDestination2
+            ["{remote2}"] = config.RemoteDestination2,
+            ["{RemoteServer}"] = config.RemoteDestination1
         };
     }
 

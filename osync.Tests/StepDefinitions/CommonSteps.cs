@@ -30,6 +30,14 @@ public class CommonSteps
         _context.LastResult = await _runner.RunAsync(resolvedArgs);
     }
 
+    [When(@"I run ""osync (.*)""")]
+    public async Task WhenIRunOsync(string args)
+    {
+        var resolvedArgs = _context.ResolveVariables(args);
+        Console.WriteLine($"Executing: osync {resolvedArgs}");
+        _context.LastResult = await _runner.RunAsync(resolvedArgs);
+    }
+
     [Then(@"the command should succeed")]
     public void ThenTheCommandShouldSucceed()
     {

@@ -11,7 +11,7 @@ namespace osync
     /// Implementation of the qc (Quants Compare) command
     /// Runs test suite on model quantizations and captures logprobs for comparison
     /// </summary>
-    public class QcCommand
+    public class QcCommand : IDisposable
     {
         private readonly HttpClient _httpClient;
         private readonly string _baseUrl;
@@ -213,93 +213,29 @@ Output your judgment:
         /// </summary>
         private void ParseJudgeArgument(string judge)
         {
-            // Check for cloud provider syntax (@provider[:token]/model)
-            if (CloudJudgeProviderFactory.IsCloudProvider(judge))
+            var result = JudgeArgumentParser.Parse(judge, _args.Timeout);
+            if (!result.Success)
             {
-                var config = CloudJudgeProviderFactory.ParseArgument(judge);
-                if (config == null)
-                {
-                    Log($"[yellow]Warning: Invalid cloud judge format. Expected @provider[:token]/model[/]");
-                    return;
-                }
-
-                if (string.IsNullOrEmpty(config.ApiKey))
-                {
-                    var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
-                    Log($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
-                    return;
-                }
-
-                _cloudJudgeProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
-                if (_cloudJudgeProvider == null)
-                {
-                    Log($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
-                    return;
-                }
-
-                _judgeModelName = config.ModelName;
-                _judgeEnabled = true;
-
-                var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
-                var version = _cloudJudgeProvider.GetApiVersion();
-                var versionStr = version != null ? $" v{version}" : "";
-                Log($"[dim]Judge model: {_judgeModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                Log($"[red]Error: {result.Error}[/]");
                 return;
             }
 
-            // Check if it's a remote server with model
-            string? serverPart = null;
-            string modelPart = judge;
-
-            if (judge.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                judge.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            if (result.IsCloud)
             {
-                // Parse as full URL: http://host:port/model
-                var uri = new Uri(judge);
-                serverPart = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
-                modelPart = uri.AbsolutePath.TrimStart('/');
+                _cloudJudgeProvider = result.CloudProvider;
+                _judgeModelName = result.ModelName;
+                _judgeEnabled = true;
+                var versionStr = result.ApiVersion != null ? $" v{result.ApiVersion}" : "";
+                Log($"[dim]Judge model: {_judgeModelName} @ [cyan]{_cloudJudgeProvider!.ProviderName}{versionStr}[/] (key:{result.KeySource})[/]");
             }
             else
             {
-                // Check for IP or hostname:port before model name
-                var slashIndex = judge.IndexOf('/');
-                if (slashIndex > 0)
-                {
-                    var possibleServer = judge.Substring(0, slashIndex);
-                    if (OsyncProgram.LooksLikeRemoteServer(possibleServer) ||
-                        OsyncProgram.LooksLikeRemoteServer(possibleServer + "/"))
-                    {
-                        serverPart = OsyncProgram.NormalizeServerUrl(possibleServer);
-                        modelPart = judge.Substring(slashIndex + 1).TrimStart('/');
-                    }
-                }
+                _judgeBaseUrl = result.BaseUrl;
+                _judgeModelName = result.ModelName;
+                _judgeHttpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                _judgeEnabled = true;
+                Log($"[dim]Judge model: {_judgeModelName} @ {_judgeBaseUrl}[/]");
             }
-
-            if (serverPart != null)
-            {
-                _judgeBaseUrl = serverPart;
-                _judgeModelName = modelPart;
-            }
-            else
-            {
-                // Local judge: just model name, use local server
-                _judgeBaseUrl = "http://localhost:11434";
-                _judgeModelName = judge;
-            }
-
-            // Add :latest if no tag specified
-            if (!_judgeModelName.Contains(':'))
-            {
-                _judgeModelName += ":latest";
-            }
-
-            _judgeHttpClient = new HttpClient
-            {
-                Timeout = Timeout.InfiniteTimeSpan
-            };
-
-            _judgeEnabled = true;
-            Log($"[dim]Judge model: {_judgeModelName} @ {_judgeBaseUrl}[/]");
         }
 
         /// <summary>
@@ -314,93 +250,29 @@ Output your judgment:
         /// </summary>
         private void ParseJudgeBestArgument(string judgeBest)
         {
-            // Check for cloud provider syntax (@provider[:token]/model)
-            if (CloudJudgeProviderFactory.IsCloudProvider(judgeBest))
+            var result = JudgeArgumentParser.Parse(judgeBest, _args.Timeout);
+            if (!result.Success)
             {
-                var config = CloudJudgeProviderFactory.ParseArgument(judgeBest);
-                if (config == null)
-                {
-                    Log($"[yellow]Warning: Invalid cloud judgebest format. Expected @provider[:token]/model[/]");
-                    return;
-                }
-
-                if (string.IsNullOrEmpty(config.ApiKey))
-                {
-                    var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
-                    Log($"[red]Error: No API key found for {config.ProviderName}. Set {string.Join(" or ", envVars)} environment variable or provide key in command.[/]");
-                    return;
-                }
-
-                _cloudJudgeBestProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
-                if (_cloudJudgeBestProvider == null)
-                {
-                    Log($"[red]Error: Failed to create cloud provider '{config.ProviderName}'[/]");
-                    return;
-                }
-
-                _judgeBestModelName = config.ModelName;
-                _judgeBestEnabled = true;
-
-                var keySource = config.ApiKeyFromEnv ? "env" : "cmd";
-                var version = _cloudJudgeBestProvider.GetApiVersion();
-                var versionStr = version != null ? $" v{version}" : "";
-                Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ [cyan]{config.ProviderName}{versionStr}[/] (key:{keySource})[/]");
+                Log($"[red]Error: {result.Error}[/]");
                 return;
             }
 
-            // Check if it's a remote server with model
-            string? serverPart = null;
-            string modelPart = judgeBest;
-
-            if (judgeBest.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                judgeBest.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            if (result.IsCloud)
             {
-                // Parse as full URL: http://host:port/model
-                var uri = new Uri(judgeBest);
-                serverPart = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
-                modelPart = uri.AbsolutePath.TrimStart('/');
+                _cloudJudgeBestProvider = result.CloudProvider;
+                _judgeBestModelName = result.ModelName;
+                _judgeBestEnabled = true;
+                var versionStr = result.ApiVersion != null ? $" v{result.ApiVersion}" : "";
+                Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ [cyan]{_cloudJudgeBestProvider!.ProviderName}{versionStr}[/] (key:{result.KeySource})[/]");
             }
             else
             {
-                // Check for IP or hostname:port before model name
-                var slashIndex = judgeBest.IndexOf('/');
-                if (slashIndex > 0)
-                {
-                    var possibleServer = judgeBest.Substring(0, slashIndex);
-                    if (OsyncProgram.LooksLikeRemoteServer(possibleServer) ||
-                        OsyncProgram.LooksLikeRemoteServer(possibleServer + "/"))
-                    {
-                        serverPart = OsyncProgram.NormalizeServerUrl(possibleServer);
-                        modelPart = judgeBest.Substring(slashIndex + 1).TrimStart('/');
-                    }
-                }
+                _judgeBestBaseUrl = result.BaseUrl;
+                _judgeBestModelName = result.ModelName;
+                _judgeBestHttpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                _judgeBestEnabled = true;
+                Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ {_judgeBestBaseUrl}[/]");
             }
-
-            if (serverPart != null)
-            {
-                _judgeBestBaseUrl = serverPart;
-                _judgeBestModelName = modelPart;
-            }
-            else
-            {
-                // Local judge: just model name, use local server
-                _judgeBestBaseUrl = "http://localhost:11434";
-                _judgeBestModelName = judgeBest;
-            }
-
-            // Add :latest if no tag specified
-            if (!_judgeBestModelName.Contains(':'))
-            {
-                _judgeBestModelName += ":latest";
-            }
-
-            _judgeBestHttpClient = new HttpClient
-            {
-                Timeout = Timeout.InfiniteTimeSpan
-            };
-
-            _judgeBestEnabled = true;
-            Log($"[dim]Judge BestAnswer model: {_judgeBestModelName} @ {_judgeBestBaseUrl}[/]");
         }
 
         /// <summary>
@@ -521,7 +393,16 @@ Output your judgment:
             finally
             {
                 _logger?.Dispose();
+                Dispose();
             }
+        }
+
+        public void Dispose()
+        {
+            _httpClient.Dispose();
+            _judgeHttpClient?.Dispose();
+            _judgeBestHttpClient?.Dispose();
+            _cts.Dispose();
         }
 
         /// <summary>

@@ -84,7 +84,7 @@ namespace osync.Tests.Features
     testRunner.Given("the Ollama server is running", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 8
-    testRunner.And("the test model \"mistral-nemo:latest\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the test model \"{model}\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
         }
         
@@ -96,12 +96,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Start chat session with model preloading")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Start chat session with model preloading")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void StartChatSessionWithModelPreloading()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Start chat session with model preloading", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 10
+#line 11
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -114,31 +116,31 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 11
-    testRunner.When("I run \"osync run mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
 #line 12
-    testRunner.Then("the model should be preloaded into memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.When("I run \"osync run {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 13
-    testRunner.And("the process status table should be displayed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Then("the model should be preloaded into memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 14
-    testRunner.And("the process status table should show the model name", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the process status table should be displayed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 15
-    testRunner.And("the process status table should show the model ID", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the process status table should show the model name", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 16
-    testRunner.And("the process status table should show the model size", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the process status table should show the model ID", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 17
-    testRunner.And("the process status table should show VRAM usage", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the process status table should show the model size", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 18
-    testRunner.And("the process status table should show context length", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the process status table should show VRAM usage", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 19
+    testRunner.And("the process status table should show context length", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 20
     testRunner.And("the process status table should show expiration time", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -148,12 +150,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Chat with local model")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Chat with local model")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void ChatWithLocalModel()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Chat with local model", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 21
+#line 23
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -166,16 +170,16 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 22
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
-#line hidden
-#line 23
-    testRunner.When("I send the message \"What is 2+2?\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
 #line 24
-    testRunner.Then("I should receive a response", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 25
+    testRunner.When("I send the message \"What is 2+2?\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+#line hidden
+#line 26
+    testRunner.Then("I should receive a response", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+#line hidden
+#line 27
     testRunner.And("the response should be streamed in real-time", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -185,12 +189,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Chat with remote model")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Chat with remote model")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void ChatWithRemoteModel()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Chat with remote model", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 27
+#line 30
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -203,25 +209,25 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 28
-    testRunner.Given("I have a remote Ollama server at \"http://localhost:11434\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
-#line hidden
-#line 29
-    testRunner.When("I run \"osync run mistral-nemo -d http://localhost:11434\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 30
-    testRunner.Then("the model should be preloaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
-#line hidden
 #line 31
-    testRunner.And("the process status should show models from the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Given("I have a remote Ollama server at \"{remote1}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 32
-    testRunner.When("I send the message \"What is the capital of France?\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync run {model} -d {remote1}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 33
-    testRunner.Then("I should receive a response", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.Then("the model should be preloaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 34
+    testRunner.And("the process status should show models from the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 35
+    testRunner.When("I send the message \"What is the capital of France?\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+#line hidden
+#line 36
+    testRunner.Then("I should receive a response", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+#line hidden
+#line 37
     testRunner.And("the response streaming should be fast without delays", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -231,12 +237,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Process status shows correct model information")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Process status shows correct model information")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void ProcessStatusShowsCorrectModelInformation()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Process status shows correct model information", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 36
+#line 40
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -249,28 +257,28 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 37
-    testRunner.Given("the model \"llama3:latest\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
-#line hidden
-#line 38
-    testRunner.When("I view the process status", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 39
-    testRunner.Then("the NAME column should show \"llama3:latest\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
-#line hidden
-#line 40
-    testRunner.And("the ID column should show a 12-character digest", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
 #line 41
-    testRunner.And("the SIZE column should show disk size and parameter count", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 42
-    testRunner.And("the VRAM USAGE column should show memory usage", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.When("I view the process status", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 43
-    testRunner.And("the CONTEXT column should show the context window size", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Then("the NAME column should show \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 44
+    testRunner.And("the ID column should show a 12-character digest", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 45
+    testRunner.And("the SIZE column should show disk size and parameter count", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 46
+    testRunner.And("the VRAM USAGE column should show memory usage", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 47
+    testRunner.And("the CONTEXT column should show the context window size", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 48
     testRunner.And("the UNTIL column should show human-readable expiration time", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -280,12 +288,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Multiple models loaded shows in status table")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Multiple models loaded shows in status table")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void MultipleModelsLoadedShowsInStatusTable()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Multiple models loaded shows in status table", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 46
+#line 51
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -298,16 +308,16 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 47
-    testRunner.Given("the models \"llama3:latest\" and \"mistral-nemo:latest\" are loaded", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 52
+    testRunner.Given("the models \"{model}\" and \"{model}\" are loaded", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 48
+#line 53
     testRunner.When("I view the process status", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 49
+#line 54
     testRunner.Then("the status table should show 2 models", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 50
+#line 55
     testRunner.And("each model should have complete information displayed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -317,12 +327,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Chat keyboard shortcuts work correctly")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Chat keyboard shortcuts work correctly")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void ChatKeyboardShortcutsWorkCorrectly()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Chat keyboard shortcuts work correctly", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 52
+#line 58
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -335,13 +347,13 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 53
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 59
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 54
+#line 60
     testRunner.When("I press \"Ctrl+D\" on an empty line", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 55
+#line 61
     testRunner.Then("the chat session should exit", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
@@ -351,12 +363,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Multiline input with triple quotes")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Multiline input with triple quotes")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void MultilineInputWithTripleQuotes()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Multiline input with triple quotes", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 57
+#line 64
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -369,22 +383,22 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 58
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 65
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 59
+#line 66
     testRunner.When("I enter \'\"\"\"\' to start multiline mode", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 60
+#line 67
     testRunner.And("I enter \"This is line 1\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 61
+#line 68
     testRunner.And("I enter \"This is line 2\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 62
+#line 69
     testRunner.And("I enter \'\"\"\"\' to end multiline mode", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 63
+#line 70
     testRunner.Then("the message should be sent as a single multiline message", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
@@ -394,12 +408,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Multiline with content on same line as delimiter")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Multiline with content on same line as delimiter")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void MultilineWithContentOnSameLineAsDelimiter()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Multiline with content on same line as delimiter", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 65
+#line 73
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -412,19 +428,19 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 66
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 74
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 67
+#line 75
     testRunner.When("I enter \'\"\"\"This is the start\'", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 68
+#line 76
     testRunner.And("I enter \"Middle content\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 69
+#line 77
     testRunner.And("I enter \'This is the end\"\"\"\'", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 70
+#line 78
     testRunner.Then("the message should include all three lines", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
@@ -434,57 +450,13 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Command history navigation")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Command history navigation")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void CommandHistoryNavigation()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Command history navigation", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 72
-  this.ScenarioInitialize(scenarioInfo);
-#line hidden
-            if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
-            {
-                testRunner.SkipScenario();
-            }
-            else
-            {
-                this.ScenarioStart();
-#line 6
-  this.FeatureBackground();
-#line hidden
-#line 73
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
-#line hidden
-#line 74
-    testRunner.When("I send the message \"First message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 75
-    testRunner.And("I send the message \"Second message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 76
-    testRunner.And("I press \"Up\" arrow", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 77
-    testRunner.Then("the input should show \"Second message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
-#line hidden
-#line 78
-    testRunner.When("I press \"Up\" arrow again", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 79
-    testRunner.Then("the input should show \"First message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
-#line hidden
-            }
-            this.ScenarioCleanup();
-        }
-        
-        [Xunit.SkippableFactAttribute(DisplayName="Session save and load")]
-        [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
-        [Xunit.TraitAttribute("Description", "Session save and load")]
-        public void SessionSaveAndLoad()
-        {
-            string[] tagsOfScenario = ((string[])(null));
-            System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
-            TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Session save and load", null, tagsOfScenario, argumentsOfScenario, featureTags);
 #line 81
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
@@ -499,24 +471,72 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 82
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 83
-    testRunner.When("I send the message \"Remember this conversation\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I send the message \"First message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 84
-    testRunner.And("I run the command \"/save test-session\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("I send the message \"Second message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 85
-    testRunner.And("I exit the chat session", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("I press \"Up\" arrow", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 86
-    testRunner.And("I start a new chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Then("the input should show \"Second message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 87
-    testRunner.And("I run the command \"/load test-session\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.When("I press \"Up\" arrow again", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 88
+    testRunner.Then("the input should show \"First message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+#line hidden
+            }
+            this.ScenarioCleanup();
+        }
+        
+        [Xunit.SkippableFactAttribute(DisplayName="Session save and load")]
+        [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
+        [Xunit.TraitAttribute("Description", "Session save and load")]
+        [Xunit.TraitAttribute("Category", "interactive")]
+        public void SessionSaveAndLoad()
+        {
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
+            System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
+            TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Session save and load", null, tagsOfScenario, argumentsOfScenario, featureTags);
+#line 91
+  this.ScenarioInitialize(scenarioInfo);
+#line hidden
+            if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
+            {
+                testRunner.SkipScenario();
+            }
+            else
+            {
+                this.ScenarioStart();
+#line 6
+  this.FeatureBackground();
+#line hidden
+#line 92
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line hidden
+#line 93
+    testRunner.When("I send the message \"Remember this conversation\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+#line hidden
+#line 94
+    testRunner.And("I run the command \"/save test-session\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 95
+    testRunner.And("I exit the chat session", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 96
+    testRunner.And("I start a new chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 97
+    testRunner.And("I run the command \"/load test-session\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 98
     testRunner.Then("the conversation history should be restored", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
@@ -526,12 +546,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Performance statistics tracking")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Performance statistics tracking")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void PerformanceStatisticsTracking()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Performance statistics tracking", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 90
+#line 101
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -544,19 +566,19 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 91
-    testRunner.Given("I start a chat session with \"mistral-nemo\" with \"--verbose\" flag", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 102
+    testRunner.Given("I start a chat session with \"{model}\" with \"--verbose\" flag", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 92
+#line 103
     testRunner.When("I send the message \"Test message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 93
+#line 104
     testRunner.Then("performance statistics should be displayed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 94
+#line 105
     testRunner.And("the statistics should include total duration", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 95
+#line 106
     testRunner.And("the statistics should include tokens per second", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -566,12 +588,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Set model parameters during chat")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Set model parameters during chat")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void SetModelParametersDuringChat()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Set model parameters during chat", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 97
+#line 109
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -584,19 +608,19 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 98
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 110
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 99
+#line 111
     testRunner.When("I run the command \"/set parameter temperature 0.8\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 100
+#line 112
     testRunner.Then("the temperature parameter should be set to 0.8", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 101
+#line 113
     testRunner.When("I send a message", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 102
+#line 114
     testRunner.Then("the model should use the updated temperature parameter", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
@@ -606,12 +630,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Clear conversation history")]
         [Xunit.TraitAttribute("FeatureTitle", "Chat Command")]
         [Xunit.TraitAttribute("Description", "Clear conversation history")]
+        [Xunit.TraitAttribute("Category", "interactive")]
         public void ClearConversationHistory()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "interactive"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Clear conversation history", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 104
+#line 117
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -624,25 +650,25 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 105
-    testRunner.Given("I start a chat session with \"mistral-nemo\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 118
+    testRunner.Given("I start a chat session with \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 106
+#line 119
     testRunner.When("I send the message \"First message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 107
+#line 120
     testRunner.And("I send the message \"Second message\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 108
+#line 121
     testRunner.And("I run the command \"/clear\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 109
+#line 122
     testRunner.Then("the conversation history should be empty", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 110
+#line 123
     testRunner.When("I send the message \"New conversation\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 111
+#line 124
     testRunner.Then("only the new message should be in the history", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }

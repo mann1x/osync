@@ -84,7 +84,7 @@ namespace osync.Tests.Features
     testRunner.Given("the Ollama server is running", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 8
-    testRunner.And("the test model \"llama3.2:1b\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the test model \"{model}\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
         }
         
@@ -115,10 +115,10 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 11
-    testRunner.Given("the model \"llama3.2:1b\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 12
-    testRunner.When("I run \"osync unload llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync unload {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 13
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
@@ -155,18 +155,15 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 18
-    testRunner.Given("the model \"llama3.2:1b\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 19
-    testRunner.When("I run \"osync unload llama3.2\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync unload {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 20
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 21
-    testRunner.And("the output should contain \"llama3.2:latest\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 22
     testRunner.And("the output should contain \"unloaded successfully\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -181,7 +178,7 @@ namespace osync.Tests.Features
             string[] tagsOfScenario = ((string[])(null));
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload all loaded models", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 24
+#line 23
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -194,20 +191,17 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 25
-    testRunner.Given("the models \"llama3.2:1b\" and \"mistral-nemo:latest\" are loaded", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 24
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 26
+#line 25
     testRunner.When("I run \"osync unload\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 27
+#line 26
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 28
+#line 27
     testRunner.And("the output should contain \"Fetching loaded models\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 29
-    testRunner.And("the output should contain \"Unloaded 2 models\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
             this.ScenarioCleanup();
@@ -221,7 +215,7 @@ namespace osync.Tests.Features
             string[] tagsOfScenario = ((string[])(null));
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload single model when only one loaded", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 31
+#line 29
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -234,17 +228,14 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 32
-    testRunner.Given("the model \"llama3.2:1b\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line 30
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 33
+#line 31
     testRunner.When("I run \"osync unload\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 34
+#line 32
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
-#line hidden
-#line 35
-    testRunner.And("the output should contain \"Unloaded 1 models\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
             this.ScenarioCleanup();
@@ -258,7 +249,7 @@ namespace osync.Tests.Features
             string[] tagsOfScenario = ((string[])(null));
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload when no models loaded", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 37
+#line 34
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -271,16 +262,16 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 38
+#line 35
     testRunner.Given("no models are loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 39
+#line 36
     testRunner.When("I run \"osync unload\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 40
+#line 37
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 41
+#line 38
     testRunner.And("the output should contain \"No models currently loaded\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -290,12 +281,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Unload specific model on remote server")]
         [Xunit.TraitAttribute("FeatureTitle", "Unload Command")]
         [Xunit.TraitAttribute("Description", "Unload specific model on remote server")]
+        [Xunit.TraitAttribute("Category", "remote")]
         public void UnloadSpecificModelOnRemoteServer()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "remote"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload specific model on remote server", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 43
+#line 41
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -308,19 +301,19 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 44
+#line 42
     testRunner.Given("a remote Ollama server is configured", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
+#line 43
+    testRunner.And("the model \"{model}\" is loaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
+#line 44
+    testRunner.When("I run \"osync unload {model} -d {RemoteServer}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+#line hidden
 #line 45
-    testRunner.And("the model \"llama3.2:1b\" is loaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 46
-    testRunner.When("I run \"osync unload llama3.2:1b -d {RemoteServer}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 47
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 48
+#line 46
     testRunner.And("the output should contain \"unloaded successfully\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -330,12 +323,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Unload all models on remote server")]
         [Xunit.TraitAttribute("FeatureTitle", "Unload Command")]
         [Xunit.TraitAttribute("Description", "Unload all models on remote server")]
+        [Xunit.TraitAttribute("Category", "remote")]
         public void UnloadAllModelsOnRemoteServer()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "remote"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload all models on remote server", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 50
+#line 49
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -348,23 +343,20 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 51
+#line 50
     testRunner.Given("a remote Ollama server is configured", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 52
+#line 51
     testRunner.And("multiple models are loaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 53
+#line 52
     testRunner.When("I run \"osync unload -d {RemoteServer}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
-#line 54
+#line 53
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 55
+#line 54
     testRunner.And("the output should contain \"Fetching loaded models\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 56
-    testRunner.And("the output should contain \"Unloaded\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
             this.ScenarioCleanup();
@@ -373,12 +365,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Unload model with destination before model name")]
         [Xunit.TraitAttribute("FeatureTitle", "Unload Command")]
         [Xunit.TraitAttribute("Description", "Unload model with destination before model name")]
+        [Xunit.TraitAttribute("Category", "remote")]
         public void UnloadModelWithDestinationBeforeModelName()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "remote"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload model with destination before model name", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 58
+#line 57
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -391,19 +385,19 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 59
+#line 58
     testRunner.Given("a remote Ollama server is configured", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
+#line 59
+    testRunner.And("the model \"{model}\" is loaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+#line hidden
 #line 60
-    testRunner.And("the model \"llama3.2:1b\" is loaded on the remote server", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.When("I run \"osync unload -d {RemoteServer} {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 61
-    testRunner.When("I run \"osync unload -d {RemoteServer} llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 62
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
-#line 63
+#line 62
     testRunner.And("the output should contain \"unloaded successfully\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -418,7 +412,7 @@ namespace osync.Tests.Features
             string[] tagsOfScenario = ((string[])(null));
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Verify unloaded model not in process status", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 65
+#line 64
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -431,17 +425,17 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
+#line 65
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+#line hidden
 #line 66
-    testRunner.Given("the model \"llama3.2:1b\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.When("I run \"osync unload {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 67
-    testRunner.When("I run \"osync unload llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
-#line 68
     testRunner.And("I run \"osync ps\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
-#line 69
-    testRunner.Then("the model \"llama3.2:1b\" should not appear in the output", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+#line 68
+    testRunner.Then("the model \"{model}\" should not appear in the output", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
             this.ScenarioCleanup();
@@ -450,9 +444,11 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Unload frees VRAM")]
         [Xunit.TraitAttribute("FeatureTitle", "Unload Command")]
         [Xunit.TraitAttribute("Description", "Unload frees VRAM")]
+        [Xunit.TraitAttribute("Category", "skip")]
         public void UnloadFreesVRAM()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "skip"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Unload frees VRAM", null, tagsOfScenario, argumentsOfScenario, featureTags);
 #line 71
@@ -469,13 +465,13 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 72
-    testRunner.Given("the model \"llama3.2:1b\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.Given("the model \"{model}\" is loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 73
     testRunner.And("I check the VRAM usage", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 74
-    testRunner.When("I run \"osync unload llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync unload {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 75
     testRunner.And("I check the VRAM usage again", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
@@ -509,22 +505,22 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 79
-    testRunner.When("I run \"osync load llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync load {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 80
     testRunner.And("I run \"osync ps\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 81
-    testRunner.Then("the output should contain \"llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.Then("the output should contain \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 82
-    testRunner.When("I run \"osync unload llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync unload {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 83
     testRunner.And("I run \"osync ps\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 84
-    testRunner.Then("the output should not contain \"llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.Then("the output should not contain \"{model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
             this.ScenarioCleanup();

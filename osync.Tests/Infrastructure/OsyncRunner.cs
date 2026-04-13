@@ -14,6 +14,11 @@ public class OsyncRunner
 
     public async Task<OsyncResult> RunAsync(string arguments, int? timeoutMs = null)
     {
+        return await RunAsync(arguments, stdinInput: null, timeoutMs: timeoutMs);
+    }
+
+    public async Task<OsyncResult> RunAsync(string arguments, string? stdinInput, int? timeoutMs = null)
+    {
         var timeout = timeoutMs ?? _config.TestTimeout;
         var osyncPath = _config.OsyncExecutablePath ?? FindOsyncExecutable();
 
@@ -23,6 +28,7 @@ public class OsyncRunner
             Arguments = arguments,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = stdinInput != null,
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -56,6 +62,13 @@ public class OsyncRunner
         process.Start();
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+
+        if (stdinInput != null)
+        {
+            await process.StandardInput.WriteAsync(stdinInput);
+            await process.StandardInput.FlushAsync();
+            process.StandardInput.Close();
+        }
 
         var completed = await Task.Run(() => process.WaitForExit(timeout));
         var duration = DateTime.UtcNow - startTime;

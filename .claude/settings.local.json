@@ -87,7 +87,12 @@
       "Bash(for model in \"gemma3:12b-it-qat\" \"qwen3:4b\" \"deepseek-r1:7b\" \"hf.co/unsloth/Nemotron-3-Nano-30B-A3B-GGUF:q4_k_m\")",
       "Bash(dir:*)",
       "WebFetch(domain:spectreconsole.net)",
-      "Bash(./osync benchview:*)"
+      "Bash(./osync benchview:*)",
+      "mcp__qdrant__qdrant-find",
+      "mcp__memory__search_nodes",
+      "mcp__qdrant__qdrant-store",
+      "mcp__memory__create_entities",
+      "mcp__memory__create_relations"
     ]
   },
   "model": "opus"

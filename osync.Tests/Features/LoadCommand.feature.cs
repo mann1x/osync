@@ -84,7 +84,7 @@ namespace osync.Tests.Features
     testRunner.Given("the Ollama server is running", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 8
-    testRunner.And("the test model \"llama3.2:1b\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.And("the test model \"{model}\" is available", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
         }
         
@@ -115,7 +115,7 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 11
-    testRunner.When("I run \"osync load llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync load {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 12
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
@@ -152,15 +152,12 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 17
-    testRunner.When("I run \"osync load llama3.2\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync load {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 18
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 19
-    testRunner.And("the output should contain \"llama3.2:latest\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
-#line hidden
-#line 20
     testRunner.And("the output should contain \"loaded successfully\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -170,9 +167,11 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Load model on remote server")]
         [Xunit.TraitAttribute("FeatureTitle", "Load Command")]
         [Xunit.TraitAttribute("Description", "Load model on remote server")]
+        [Xunit.TraitAttribute("Category", "remote")]
         public void LoadModelOnRemoteServer()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "remote"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Load model on remote server", null, tagsOfScenario, argumentsOfScenario, featureTags);
 #line 22
@@ -192,7 +191,7 @@ namespace osync.Tests.Features
     testRunner.Given("a remote Ollama server is configured", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 24
-    testRunner.When("I run \"osync load llama3.2:1b -d {RemoteServer}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync load {model} -d {RemoteServer}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 25
     testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
@@ -210,12 +209,14 @@ namespace osync.Tests.Features
         [Xunit.SkippableFactAttribute(DisplayName="Load model with destination before model name")]
         [Xunit.TraitAttribute("FeatureTitle", "Load Command")]
         [Xunit.TraitAttribute("Description", "Load model with destination before model name")]
+        [Xunit.TraitAttribute("Category", "remote")]
         public void LoadModelWithDestinationBeforeModelName()
         {
-            string[] tagsOfScenario = ((string[])(null));
+            string[] tagsOfScenario = new string[] {
+                    "remote"};
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Load model with destination before model name", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 29
+#line 30
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -228,16 +229,16 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 30
+#line 31
     testRunner.Given("a remote Ollama server is configured", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
-#line 31
-    testRunner.When("I run \"osync load -d {RemoteServer} llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
 #line 32
-    testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.When("I run \"osync load -d {RemoteServer} {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 33
+    testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+#line hidden
+#line 34
     testRunner.And("the output should contain \"loaded successfully\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
             }
@@ -252,7 +253,7 @@ namespace osync.Tests.Features
             string[] tagsOfScenario = ((string[])(null));
             System.Collections.Specialized.OrderedDictionary argumentsOfScenario = new System.Collections.Specialized.OrderedDictionary();
             TechTalk.SpecFlow.ScenarioInfo scenarioInfo = new TechTalk.SpecFlow.ScenarioInfo("Verify loaded model appears in process status", null, tagsOfScenario, argumentsOfScenario, featureTags);
-#line 35
+#line 36
   this.ScenarioInitialize(scenarioInfo);
 #line hidden
             if ((TagHelper.ContainsIgnoreTag(tagsOfScenario) || TagHelper.ContainsIgnoreTag(featureTags)))
@@ -265,17 +266,14 @@ namespace osync.Tests.Features
 #line 6
   this.FeatureBackground();
 #line hidden
-#line 36
-    testRunner.When("I run \"osync load llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
-#line hidden
 #line 37
-    testRunner.And("I run \"osync ps\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.When("I run \"osync load {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 38
-    testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.And("I run \"osync ps\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 39
-    testRunner.And("the output should contain \"llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
+    testRunner.Then("the command should succeed", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
 #line 40
     testRunner.And("the output should contain \"Loaded Models\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
@@ -306,16 +304,16 @@ namespace osync.Tests.Features
   this.FeatureBackground();
 #line hidden
 #line 43
-    testRunner.Given("the model \"llama3.2:1b\" is not loaded", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
+    testRunner.Given("the model \"{model}\" is not loaded", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Given ");
 #line hidden
 #line 44
-    testRunner.When("I run \"osync load llama3.2:1b\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
+    testRunner.When("I run \"osync load {model}\"", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "When ");
 #line hidden
 #line 45
     testRunner.And("I check the process status", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "And ");
 #line hidden
 #line 46
-    testRunner.Then("the model \"llama3.2:1b\" should be loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
+    testRunner.Then("the model \"{model}\" should be loaded in memory", ((string)(null)), ((TechTalk.SpecFlow.Table)(null)), "Then ");
 #line hidden
             }
             this.ScenarioCleanup();

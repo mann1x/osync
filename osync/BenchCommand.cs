@@ -49,7 +49,7 @@ namespace osync
     /// Implementation of the bench command for context length benchmarking.
     /// Supports ctxbench (no tools) and ctxtoolsbench (with tools) test types.
     /// </summary>
-    public class BenchCommand
+    public class BenchCommand : IDisposable
     {
         private readonly HttpClient _httpClient;
         private readonly string _baseUrl;
@@ -172,62 +172,23 @@ Always respond in valid JSON format: {""Answer"": ""YES"" or ""NO"", ""Reason"":
         /// </summary>
         private void ParseJudgeArgument(string judgeArg)
         {
-            if (judgeArg.StartsWith("@"))
+            var result = JudgeArgumentParser.Parse(judgeArg, _args.Timeout);
+            if (!result.Success)
             {
-                // Cloud provider syntax: @provider[:key]/model
-                var config = CloudJudgeProviderFactory.ParseArgument(judgeArg);
-                if (config != null)
-                {
-                    _cloudJudgeProvider = CloudJudgeProviderFactory.CreateProvider(config, _args.Timeout);
-                    _judgeModelName = _cloudJudgeProvider?.ModelName;
-                    _judgeEnabled = _cloudJudgeProvider != null;
-                }
+                Log($"[red]Error: {result.Error}[/]");
                 return;
             }
 
-            // Check if it's a remote server with model
-            string? serverPart = null;
-            string modelPart = judgeArg;
-
-            if (judgeArg.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                judgeArg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            if (result.IsCloud)
             {
-                // Parse as full URL: http://host:port/model
-                var uri = new Uri(judgeArg);
-                serverPart = $"{uri.Scheme}://{uri.Host}:{uri.Port}";
-                modelPart = uri.AbsolutePath.TrimStart('/');
-            }
-            else
-            {
-                // Check for IP or hostname:port before model name
-                // Split by first `/` and check if first part looks like a server
-                var slashIndex = judgeArg.IndexOf('/');
-                if (slashIndex > 0)
-                {
-                    var possibleServer = judgeArg.Substring(0, slashIndex);
-                    // Check if it looks like a remote server (IP, hostname:port, or with trailing /)
-                    if (OsyncProgram.LooksLikeRemoteServer(possibleServer) ||
-                        OsyncProgram.LooksLikeRemoteServer(possibleServer + "/"))
-                    {
-                        serverPart = OsyncProgram.NormalizeServerUrl(possibleServer);
-                        modelPart = judgeArg.Substring(slashIndex + 1).TrimStart('/');
-                    }
-                }
-            }
-
-            if (serverPart != null)
-            {
-                // Remote Ollama server
-                _judgeBaseUrl = serverPart;
-                _judgeModelName = modelPart;
-                _judgeHttpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                _cloudJudgeProvider = result.CloudProvider;
+                _judgeModelName = result.ModelName;
                 _judgeEnabled = true;
             }
             else
             {
-                // Local Ollama model - always uses localhost regardless of -d destination
-                _judgeBaseUrl = "http://localhost:11434";
-                _judgeModelName = judgeArg;
+                _judgeBaseUrl = result.BaseUrl;
+                _judgeModelName = result.ModelName;
                 _judgeHttpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
                 _judgeEnabled = true;
             }
@@ -327,7 +288,15 @@ Always respond in valid JSON format: {""Answer"": ""YES"" or ""NO"", ""Reason"":
             finally
             {
                 _logger?.Dispose();
+                Dispose();
             }
+        }
+
+        public void Dispose()
+        {
+            _httpClient.Dispose();
+            _judgeHttpClient?.Dispose();
+            _cts.Dispose();
         }
 
         /// <summary>

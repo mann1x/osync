@@ -17,7 +17,8 @@ public class LogFileWriter : IDisposable
     // Regex patterns for stripping formatting
     private static readonly Regex AnsiEscapePattern = new(@"\x1B\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
     // Match Spectre.Console markup: [tag], [/], [/tag], [tag attr], [#hex], etc.
-    private static readonly Regex SpectreMarkupPattern = new(@"\[/?[a-zA-Z0-9_#\s\-\.]*\]", RegexOptions.Compiled);
+    // Requires at least one letter or # to avoid stripping array indices like [0]
+    private static readonly Regex SpectreMarkupPattern = new(@"\[/?[a-zA-Z#][a-zA-Z0-9_#\s\-\.]*\]|\[/\]", RegexOptions.Compiled);
     private static readonly Regex SpectreEscapedBrackets = new(@"\[\[|\]\]", RegexOptions.Compiled);
 
     /// <summary>

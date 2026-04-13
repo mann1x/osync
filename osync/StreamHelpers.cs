@@ -85,6 +85,7 @@ namespace osync
         private long _currentBufferSize;
         private bool _writeCompleted;
         private Exception? _exception;
+        private int _readOffset; // offset into front chunk for partial reads
 
         public BufferedPipeStream(long maxBufferSize)
         {
@@ -153,24 +154,22 @@ namespace osync
                 {
                     if (_bufferQueue.Count > 0)
                     {
-                        byte[] data = _bufferQueue.Dequeue();
-                        int bytesToCopy = Math.Min(data.Length, count);
-                        Array.Copy(data, 0, buffer, offset, bytesToCopy);
-                        _currentBufferSize -= data.Length;
+                        byte[] data = _bufferQueue.Peek();
+                        int available = data.Length - _readOffset;
+                        int bytesToCopy = Math.Min(available, count);
+                        Array.Copy(data, _readOffset, buffer, offset, bytesToCopy);
 
-                        // If we didn't copy all data, put the rest back
-                        if (bytesToCopy < data.Length)
+                        if (bytesToCopy == available)
                         {
-                            byte[] remaining = new byte[data.Length - bytesToCopy];
-                            Array.Copy(data, bytesToCopy, remaining, 0, remaining.Length);
-                            var tempQueue = new Queue<byte[]>();
-                            tempQueue.Enqueue(remaining);
-                            while (_bufferQueue.Count > 0)
-                                tempQueue.Enqueue(_bufferQueue.Dequeue());
-                            _bufferQueue.Clear();
-                            while (tempQueue.Count > 0)
-                                _bufferQueue.Enqueue(tempQueue.Dequeue());
-                            _currentBufferSize += remaining.Length;
+                            // Consumed entire chunk
+                            _bufferQueue.Dequeue();
+                            _currentBufferSize -= data.Length;
+                            _readOffset = 0;
+                        }
+                        else
+                        {
+                            // Partial read — advance offset, no queue rebuild
+                            _readOffset += bytesToCopy;
                         }
 
                         return bytesToCopy;
@@ -289,17 +288,17 @@ namespace osync
                 {
                     while (true)
                     {
-                        var length = sinput.Read(buffer, 0, buffer.Length);
+                        var length = await sinput.ReadAsync(buffer, 0, buffer.Length);
                         if (length <= 0) break;
 
                         uploaded += length;
                         progress?.Invoke(uploaded, size);
 
-                        stream.Write(buffer, 0, length);
-                        stream.Flush();
+                        await stream.WriteAsync(buffer, 0, length);
+                        await stream.FlushAsync();
                     }
                 }
-                stream.Flush();
+                await stream.FlushAsync();
             });
         }
 

@@ -8,14 +8,9 @@ using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text;
-using System.Reflection.Emit;
 using TqdmSharp;
-using static PowerArgs.Ansi.Cursor;
-using static System.Net.WebRequestMethods;
 using System.Net.Http.Json;
 using System.IO;
-using System.Xml.Linq;
-using System.Reflection;
 using Born2Code.Net;
 using static PrettyConsole.Console;
 using Console = PrettyConsole.Console;
@@ -23,10 +18,6 @@ using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Windows.Devices.Power;
-using Microsoft.VisualBasic;
-using static System.Runtime.InteropServices.JavaScript.JSType;
-using System.Drawing;
 using Spectre.Console;
 using ByteSizeLib;
 
@@ -92,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.2.9";
+        public static string AppVersion = "1.3.0";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -1100,7 +1091,11 @@ namespace osync
             var now = DateTime.Now;
             var timeSpan = expiresAt - now;
 
-            if (timeSpan.TotalMinutes < 1)
+            if (timeSpan.TotalSeconds <= 0)
+            {
+                return "Expired";
+            }
+            else if (timeSpan.TotalMinutes < 1)
             {
                 return "Less than a minute";
             }
@@ -2804,7 +2799,13 @@ namespace osync
                 string output = checkProcess.StandardOutput.ReadToEnd();
                 checkProcess.WaitForExit();
 
-                if (output.Contains(destModel))
+                // Check each line's first column (model name) for exact match
+                var modelExists = output.Split('\n')
+                    .Skip(1) // skip header
+                    .Select(line => line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                    .Any(parts => parts.Length > 0 && parts[0].Equals(destModel, StringComparison.OrdinalIgnoreCase));
+
+                if (modelExists)
                 {
                     Console.WriteLine($"Error: destination model '{destModel}' already exists");
                     Console.WriteLine("Please choose a different name or remove the existing model first.");
@@ -3124,7 +3125,7 @@ namespace osync
                 Console.WriteLine($"Using buffer size: {ByteSize.FromBytes(bufferSize).ToString("#.##")}");
 
                 // Create dedicated client for source server
-                var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                using var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
                 sourceClient.BaseAddress = new Uri(sourceServer);
 
                 Console.WriteLine($"Fetching model information from source server...");
@@ -3180,15 +3181,12 @@ namespace osync
 
                 // Create model on destination server
                 Console.WriteLine($"\nCreating model '{destModel}' on destination server...");
-                var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                using var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
                 destClient.BaseAddress = new Uri(destServer);
 
                 await RunCreateModelWithClient(destClient, destModel, files, template, system, parameters);
 
                 Console.WriteLine($"\nSuccessfully copied '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}");
-
-                sourceClient.Dispose();
-                destClient.Dispose();
             }
             catch (Exception ex)
             {
@@ -3219,7 +3217,7 @@ namespace osync
             }
 
             // Create dedicated client for source server
-            var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            using var sourceClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
             sourceClient.BaseAddress = new Uri(sourceServer);
 
             Console.WriteLine($"Fetching model information from {sourceServer}...");
@@ -3278,8 +3276,6 @@ namespace osync
             await CreateLocalModelFromBlobs(destModel, files, template, system, parametersRaw);
 
             Console.WriteLine($"\nSuccessfully copied '{sourceModel}' from {sourceServer} to local '{destModel}'");
-
-            sourceClient.Dispose();
         }
 
         /// <summary>
@@ -3307,7 +3303,7 @@ namespace osync
                 : $"library/{modelNameWithoutTag}";  // Standard library model
 
             // Create a client for registry access
-            var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(2) };
+            using var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(2) };
             registryClient.DefaultRequestHeaders.UserAgent.ParseAdd("ollama/0.5.0");
 
             try
@@ -3392,10 +3388,6 @@ namespace osync
                     System.IO.File.Delete(blobPath);
                 }
                 throw new Exception($"Failed to download blob {digest}: {ex.Message}", ex);
-            }
-            finally
-            {
-                registryClient.Dispose();
             }
         }
 
@@ -3992,12 +3984,10 @@ namespace osync
 
         private async Task StreamBlobSourceToDestination(string sourceServer, string destServer, string sourceModel, string digest, long bufferSize)
         {
-            var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            using var destClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
             destClient.BaseAddress = new Uri(destServer);
 
-            try
-            {
-                // Check if blob exists on destination
+            // Check if blob exists on destination
                 var headResponse = await destClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, $"api/blobs/{digest}"));
                 if (headResponse.StatusCode == System.Net.HttpStatusCode.OK)
                 {
@@ -4007,7 +3997,7 @@ namespace osync
 
                 Console.WriteLine($"  Blob {digest.Substring(0, Math.Min(12, digest.Length))}... not on destination, fetching from registry");
 
-                var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+                using var registryClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
                 registryClient.DefaultRequestHeaders.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json");
 
                 // Parse model name to extract namespace and model
@@ -4236,134 +4226,118 @@ namespace osync
                 Console.WriteLine("success transferring layer");
 
                 downloadStream.Dispose();
-
-                registryClient.Dispose();
-            }
-            finally
-            {
-                destClient.Dispose();
-            }
         }
 
         private async Task TransferBlobRemoteToRemote(string sourceServer, string destServer, string digest)
         {
-            var originalBaseAddress = client.BaseAddress;
+            var srcBase = sourceServer.TrimEnd('/');
+            var dstBase = destServer.TrimEnd('/');
 
-            try
+            // Check if blob already exists on destination
+            var statusCode = (int)await BlobHead(digest, destServer);
+
+            if (statusCode == 200)
             {
-                // Check if blob already exists on destination
-                client.BaseAddress = new Uri(destServer);
-                var statusCode = (int)await BlobHead(digest);
+                Console.WriteLine($"skipping upload for already created layer {digest}");
+                return;
+            }
+            else if (statusCode != 404)
+            {
+                Console.WriteLine($"Error: unexpected status code {statusCode} when checking blob on destination");
+                System.Environment.Exit(1);
+            }
 
-                if (statusCode == 200)
+            // Download blob from source
+            Console.WriteLine($"downloading layer {digest} from source");
+
+            var downloadResponse = await client.GetAsync($"{srcBase}/api/blobs/{digest}", HttpCompletionOption.ResponseHeadersRead);
+
+            if (!downloadResponse.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Error: failed to download blob from source (HTTP {(int)downloadResponse.StatusCode})");
+                System.Environment.Exit(1);
+            }
+
+            // Upload blob to destination
+            Console.WriteLine($"uploading layer {digest} to destination");
+
+            using (var sourceStream = await downloadResponse.Content.ReadAsStreamAsync())
+            {
+                Stopwatch stopwatch = new Stopwatch();
+
+                try
                 {
-                    Console.WriteLine($"skipping upload for already created layer {digest}");
-                    return;
-                }
-                else if (statusCode != 404)
-                {
-                    Console.WriteLine($"Error: unexpected status code {statusCode} when checking blob on destination");
-                    System.Environment.Exit(1);
-                }
+                    SetCursorVisible(false);
 
-                // Download blob from source
-                Console.WriteLine($"downloading layer {digest} from source");
-                client.BaseAddress = new Uri(sourceServer);
+                    Stream destFileStream = new ThrottledStream(sourceStream, btvalue);
 
-                var downloadResponse = await client.GetAsync($"api/blobs/{digest}", HttpCompletionOption.ResponseHeadersRead);
+                    long totalSize = downloadResponse.Content.Headers.ContentLength ?? 0;
+                    var blob_size = ByteSize.FromBytes(totalSize);
+                    var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
+                    bool finished = false;
+                    int tick = 0;
 
-                if (!downloadResponse.IsSuccessStatusCode)
-                {
-                    Console.WriteLine($"Error: failed to download blob from source (HTTP {(int)downloadResponse.StatusCode})");
-                    System.Environment.Exit(1);
-                }
+                    var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
+                        tick++;
+                        if (tick < 40) { return; }
+                        tick = 0;
+                        double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
+                        double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
+                        try
+                        {
+                            int percentage = (int)((sent * 100.0) / total);
+                            var sent_size = ByteSize.FromBytes(sent);
+                            percentage = (int)sent_size.MebiBytes;
+                            bar.SetLabel($"({ByteSize.FromBytes(sent).ToString("#")} / {ByteSize.FromBytes(total).ToString("#")}) uploading at {ByteSize.FromBytes(speedInBytesPerSecond).ToString("#")}/s");
+                            if (!finished)
+                            {
+                                bar.Progress(percentage);
+                            }
+                            else
+                            {
+                                bar.Progress((int)blob_size.MebiBytes);
+                            }
+                        }
+                        catch
+                        {
+                            // Silently ignore progress bar errors
+                        }
+                    });
 
-                // Upload blob to destination
-                Console.WriteLine($"uploading layer {digest} to destination");
-                client.BaseAddress = new Uri(destServer);
+                    stopwatch.Start();
+                    var uploadResponse = await client.PostAsync($"{dstBase}/api/blobs/{digest}", streamcontent);
+                    finished = true;
 
-                using (var sourceStream = await downloadResponse.Content.ReadAsStreamAsync())
-                {
-                    Stopwatch stopwatch = new Stopwatch();
+                    SetCursorVisible(true);
 
-                    try
+                    if (uploadResponse.IsSuccessStatusCode)
                     {
-                        SetCursorVisible(false);
-
-                        Stream destFileStream = new ThrottledStream(sourceStream, btvalue);
-
-                        long totalSize = downloadResponse.Content.Headers.ContentLength ?? 0;
-                        var blob_size = ByteSize.FromBytes(totalSize);
-                        var bar = new Tqdm.ProgressBar(total: (int)blob_size.MebiBytes, useColor: GetPlatformColor(), useExpMovingAvg: false, printsPerSecond: 10);
-                        bool finished = false;
-                        int tick = 0;
-
-                        var streamcontent = new ProgressableStreamContent(new StreamContent(destFileStream), (sent, total) => {
-                            tick++;
-                            if (tick < 40) { return; }
-                            tick = 0;
-                            double elapsedTimeInSeconds = stopwatch.Elapsed.TotalSeconds;
-                            double speedInBytesPerSecond = sent / elapsedTimeInSeconds;
-                            try
-                            {
-                                int percentage = (int)((sent * 100.0) / total);
-                                var sent_size = ByteSize.FromBytes(sent);
-                                percentage = (int)sent_size.MebiBytes;
-                                bar.SetLabel($"({ByteSize.FromBytes(sent).ToString("#")} / {ByteSize.FromBytes(total).ToString("#")}) uploading at {ByteSize.FromBytes(speedInBytesPerSecond).ToString("#")}/s");
-                                if (!finished)
-                                {
-                                    bar.Progress(percentage);
-                                }
-                                else
-                                {
-                                    bar.Progress((int)blob_size.MebiBytes);
-                                }
-                            }
-                            catch
-                            {
-                                // Silently ignore progress bar errors
-                            }
-                        });
-
-                        stopwatch.Start();
-                        var uploadResponse = await client.PostAsync($"api/blobs/{digest}", streamcontent);
-                        finished = true;
-
-                        SetCursorVisible(true);
-
-                        if (uploadResponse.IsSuccessStatusCode)
-                        {
-                            bar.Finish();
-                            Console.WriteLine("success uploading layer");
-                        }
-                        else if (uploadResponse.StatusCode == System.Net.HttpStatusCode.BadRequest)
-                        {
-                            Console.WriteLine("Error: upload failed invalid digest, check both ollama are running the same version.");
-                            System.Environment.Exit(1);
-                        }
-                        else
-                        {
-                            Console.WriteLine($"Error: upload failed: {uploadResponse.ReasonPhrase}");
-                            System.Environment.Exit(1);
-                        }
-
-                        streamcontent.Dispose();
+                        bar.Finish();
+                        Console.WriteLine("success uploading layer");
                     }
-                    catch (Exception e)
+                    else if (uploadResponse.StatusCode == System.Net.HttpStatusCode.BadRequest)
                     {
-                        Console.WriteLine($"Error: {e.Message}");
-                        SetCursorVisible(true);
+                        Console.WriteLine("Error: upload failed invalid digest, check both ollama are running the same version.");
                         System.Environment.Exit(1);
                     }
-                    finally
+                    else
                     {
-                        stopwatch.Stop();
+                        Console.WriteLine($"Error: upload failed: {uploadResponse.ReasonPhrase}");
+                        System.Environment.Exit(1);
                     }
+
+                    streamcontent.Dispose();
                 }
-            }
-            finally
-            {
-                client.BaseAddress = originalBaseAddress;
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Error: {e.Message}");
+                    SetCursorVisible(true);
+                    System.Environment.Exit(1);
+                }
+                finally
+                {
+                    stopwatch.Stop();
+                }
             }
         }
 
@@ -4560,10 +4534,7 @@ namespace osync
         {
             try
             {
-                // Set the global client's BaseAddress for the API call
-                client.BaseAddress = new Uri(serverUrl);
-
-                HttpResponseMessage response = await client.GetAsync("api/tags");
+                HttpResponseMessage response = await client.GetAsync($"{serverUrl.TrimEnd('/')}/api/tags");
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -4834,7 +4805,7 @@ namespace osync
         private async Task RemoveRemoteModels(string pattern, string destination)
         {
             // Create dedicated HttpClient with BaseAddress
-            var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
+            using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             remoteClient.BaseAddress = new Uri(destination);
 
             try
@@ -4924,10 +4895,6 @@ namespace osync
             {
                 Console.WriteLine($"Error: failed to remove remote models: {e.Message}");
                 System.Environment.Exit(1);
-            }
-            finally
-            {
-                remoteClient.Dispose();
             }
         }
 
@@ -5379,15 +5346,13 @@ namespace osync
         {
             Console.WriteLine($"Pulling '{modelName}' to remote server {destination}...\n");
 
-            var httpClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            using var httpClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
             httpClient.BaseAddress = new Uri(destination);
 
-            try
+            var pullRequest = new
             {
-                var pullRequest = new
-                {
-                    name = modelName,
-                    stream = true
+                name = modelName,
+                stream = true
                 };
 
                 var content = new StringContent(
@@ -5506,11 +5471,6 @@ namespace osync
                 }
 
                 Console.WriteLine($"\n✓ Successfully pulled '{modelName}' to remote server");
-            }
-            finally
-            {
-                httpClient.Dispose();
-            }
         }
 
         public void ActionShow(string modelName, string destination, bool license, bool modelfile, bool parameters, bool system, bool template, bool verbose)
@@ -5576,7 +5536,7 @@ namespace osync
         private async Task ShowRemoteModel(string modelName, string destination, bool license, bool modelfile, bool parameters, bool system, bool template, bool verbose)
         {
             // Create dedicated HttpClient with BaseAddress
-            var httpClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
+            using var httpClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             httpClient.BaseAddress = new Uri(destination);
 
             try
@@ -5670,10 +5630,6 @@ namespace osync
             {
                 Console.WriteLine($"Error: Failed to show model: {e.Message}");
                 System.Environment.Exit(1);
-            }
-            finally
-            {
-                httpClient.Dispose();
             }
         }
 
@@ -5829,7 +5785,7 @@ namespace osync
         private async Task UpdateRemoteModels(string pattern, string destination)
         {
             // Create dedicated client for remote server
-            var remoteClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
+            using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
             remoteClient.BaseAddress = new Uri(destination);
 
             try
@@ -5874,10 +5830,6 @@ namespace osync
             {
                 Console.WriteLine($"Error: {e.Message}");
                 System.Environment.Exit(1);
-            }
-            finally
-            {
-                remoteClient.Dispose();
             }
         }
 
@@ -6929,7 +6881,7 @@ _osync_completions() {
             ;;
         run|chat)
             if [[ ""${cur}"" == -* ]]; then
-                COMPREPLY=( $(compgen -W ""-d --verbose --no-wordwrap --format --keepalive --dimensions --think --hide-thinking --insecure --truncate"" -- ""${cur}"") )
+                COMPREPLY=( $(compgen -W ""-d --verbose --no-wordwrap --format --keepalive --dimensions --think --hide-thinking --truncate"" -- ""${cur}"") )
             else
                 _do_model_completion
             fi

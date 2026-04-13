@@ -956,7 +956,7 @@ namespace osync
                 leftSide += $" Filter: {_filterText}";
             }
 
-            var version = "osync manage v1.1.6";
+            var version = $"osync manage v{OsyncProgram.AppVersion}";
             var termWidth = Application.Driver?.Cols ?? 80;
             var spacing = Math.Max(1, termWidth - leftSide.Length - version.Length);
 

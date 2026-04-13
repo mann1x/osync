@@ -1,6 +1,6 @@
 {
   "TestConfiguration": {
-    "RegistryModel": "llama3.2:1b",
+    "RegistryModel": "tinyllama",
     "RemoteDestination1": "http://192.168.178.2:11434",
     "RemoteDestination2": "http://192.168.178.12:11434",
     "TestTimeout": 300000,

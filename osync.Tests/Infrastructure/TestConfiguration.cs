@@ -4,7 +4,7 @@ namespace osync.Tests.Infrastructure;
 
 public class TestConfiguration
 {
-    public string RegistryModel { get; set; } = "llama3.2:1b";
+    public string RegistryModel { get; set; } = "tinyllama";
     public string RemoteDestination1 { get; set; } = string.Empty;
     public string RemoteDestination2 { get; set; } = string.Empty;
     public int TestTimeout { get; set; } = 300000;
