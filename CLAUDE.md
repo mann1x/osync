@@ -11,16 +11,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-osync is a CLI tool for managing Ollama models across local and remote servers. Written in C# targeting .NET 8 (net8.0-windows10.0.22621.0).
+osync is a CLI tool for managing Ollama models across local and remote servers. Written in C# targeting .NET 10 (`net10.0`, cross-platform: builds and runs on Windows, Linux and macOS). Windows-only APIs (WMI, NvAPI, D3DKMT) must stay behind `OperatingSystem.IsWindows()` guards.
 
 ## Build Commands
 
 ```bash
-dotnet build                    # Build debug
+dotnet build                    # Build debug (framework-dependent, any OS)
 dotnet build -c Release         # Build release
-dotnet publish -c Release       # Create standalone executables
-dotnet test                     # Run all tests
-dotnet test --filter DisplayName~CopyCommands  # Run specific feature tests
+dotnet publish -c Release -r win-x64      # Self-contained single-file exe (also linux-x64, osx-arm64, ...)
+dotnet test osync.Tests --filter "FullyQualifiedName~osync.Tests.UnitTests"  # Unit tests only (no Ollama needed)
+dotnet test                     # All tests (integration tests need a running Ollama)
 ```
 
 ## Architecture
@@ -92,7 +92,7 @@ QC test result files for testing qcview output are located in `d:\install\osync\
   - Creating temporary files
   - Executing benchmark or QC test runs
 - **Example paths:**
-  - Run osync: `.\osync\bin\Debug\net8.0-windows10.0.22621.0\osync.exe`
+  - Run osync: `.\osync\bin\Debug\net10.0\osync.exe` (or `dotnet osync/bin/Debug/net10.0/osync.dll` on any OS)
   - Save test results: `.\osync\bin\test-results.json`
   - Log files: `.\osync\bin\test_log.txt`
 

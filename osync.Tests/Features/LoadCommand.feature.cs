@@ -40,8 +40,8 @@ namespace osync.Tests.Features
         public static void FeatureSetup()
         {
             testRunner = TechTalk.SpecFlow.TestRunnerManager.GetTestRunner();
-            TechTalk.SpecFlow.FeatureInfo featureInfo = new TechTalk.SpecFlow.FeatureInfo(new System.Globalization.CultureInfo("en"), "Features", "Load Command", "  As a user of osync\r\n  I want to preload models into memory\r\n  So that I can red" +
-                    "uce first-request latency and warm up models", ProgrammingLanguage.CSharp, featureTags);
+            TechTalk.SpecFlow.FeatureInfo featureInfo = new TechTalk.SpecFlow.FeatureInfo(new System.Globalization.CultureInfo("en"), "Features", "Load Command", "  As a user of osync\n  I want to preload models into memory\n  So that I can reduc" +
+                    "e first-request latency and warm up models", ProgrammingLanguage.CSharp, featureTags);
             testRunner.OnFeatureStart(featureInfo);
         }
         

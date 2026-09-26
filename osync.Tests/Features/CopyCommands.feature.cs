@@ -40,8 +40,8 @@ namespace osync.Tests.Features
         public static void FeatureSetup()
         {
             testRunner = TechTalk.SpecFlow.TestRunnerManager.GetTestRunner();
-            TechTalk.SpecFlow.FeatureInfo featureInfo = new TechTalk.SpecFlow.FeatureInfo(new System.Globalization.CultureInfo("en"), "Features", "Copy Commands", "  As an osync user\r\n  I want to copy models between local and remote servers\r\n  S" +
-                    "o that I can distribute models across my infrastructure", ProgrammingLanguage.CSharp, featureTags);
+            TechTalk.SpecFlow.FeatureInfo featureInfo = new TechTalk.SpecFlow.FeatureInfo(new System.Globalization.CultureInfo("en"), "Features", "Copy Commands", "  As an osync user\n  I want to copy models between local and remote servers\n  So " +
+                    "that I can distribute models across my infrastructure", ProgrammingLanguage.CSharp, featureTags);
             testRunner.OnFeatureStart(featureInfo);
         }
         

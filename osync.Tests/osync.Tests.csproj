@@ -1,19 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- Test Framework -->
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
-    <PackageReference Include="Microsoft.NETCore.App" Version="2.2.8" />
-    <PackageReference Include="Microsoft.NETCore.Jit" Version="2.0.8" />
-    <PackageReference Include="System.Net.NameResolution" Version="4.3.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
@@ -26,7 +22,8 @@
     <PackageReference Include="SpecFlow.Tools.MsBuild.Generation" Version="3.9.74" />
 
     <!-- Assertions -->
-    <PackageReference Include="FluentAssertions" Version="8.8.0" />
+    <!-- Pinned to 7.x: v8+ requires a commercial license for non-open-source use -->
+    <PackageReference Include="FluentAssertions" Version="7.2.2" />
 
     <!-- Configuration -->
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.1" />

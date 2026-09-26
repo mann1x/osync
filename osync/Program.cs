@@ -6556,7 +6556,7 @@ namespace osync
             try
             {
                 var currentProcess = Process.GetCurrentProcess();
-                var parentProcess = GetParentProcess(currentProcess);
+                var parentProcess = OperatingSystem.IsWindows() ? GetParentProcess(currentProcess) : null;
 
                 if (parentProcess != null)
                 {
@@ -6619,6 +6619,7 @@ namespace osync
             return "powershell";
         }
 
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         private Process? GetParentProcess(Process process)
         {
             try
