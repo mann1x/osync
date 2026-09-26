@@ -1542,6 +1542,8 @@ namespace osync
             // Get binary path and installation status
             string binaryPath = System.Environment.ProcessPath ?? "unknown";
             Console.WriteLine($"Binary path: {binaryPath}");
+            Console.WriteLine($"Settings: {OsyncSettings.FilePath}{(System.IO.File.Exists(OsyncSettings.FilePath) ? "" : " (not created yet)")}");
+            Console.WriteLine($"Colors: {ColorSupport.DisplayName(ColorSupport.Current)} ({ColorSupport.Reason})");
 
             // Check installation status
             bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
@@ -7322,92 +7324,32 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         {
             try
             {
-                // Get terminal info early
-                var term = System.Environment.GetEnvironmentVariable("TERM") ?? "";
-                var colorTerm = System.Environment.GetEnvironmentVariable("COLORTERM") ?? "";
-                var sshConnection = System.Environment.GetEnvironmentVariable("SSH_CONNECTION");
-                var tmux = System.Environment.GetEnvironmentVariable("TMUX");
-                var sshTty = System.Environment.GetEnvironmentVariable("SSH_TTY");
+                // Color depth for all Spectre.Console output: OSYNC_COLOR_MODE, NO_COLOR, colorMode in the
+                // settings file, else detected from COLORTERM / the original TERM (see ColorSupport).
+                ColorSupport.ApplyToSpectre();
 
-                // Check for OSYNC_COLOR_MODE environment variable for user override
-                var colorModeOverride = System.Environment.GetEnvironmentVariable("OSYNC_COLOR_MODE");
-
-                // On Windows, console libraries usually work fine - let them auto-detect
                 if (OperatingSystem.IsWindows())
-                {
-                    if (!string.IsNullOrEmpty(colorModeOverride))
-                    {
-                        ApplyColorModeOverride(colorModeOverride);
-                    }
                     return;
-                }
 
-                // Check for known problematic environments (SSH, tmux, screen)
-                bool isRemoteSession = !string.IsNullOrEmpty(sshConnection) || !string.IsNullOrEmpty(sshTty);
-                bool isTmux = !string.IsNullOrEmpty(tmux);
-                bool isScreen = term.StartsWith("screen", StringComparison.OrdinalIgnoreCase);
+                // The TERM the user had (TerminalInitializer replaces it with xterm-16color at startup so that
+                // console libraries do not query the terminal, which could hang over SSH/tmux)
+                var term = TerminalInitializer.OriginalTerm ?? "";
+                bool isRemoteOrMultiplexed =
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("SSH_CONNECTION")) ||
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("SSH_TTY")) ||
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("TMUX")) ||
+                    term.StartsWith("screen", StringComparison.OrdinalIgnoreCase);
 
-                // Detect 256-color TERM that causes hangs
-                bool has256ColorTerm = term.Contains("256color", StringComparison.OrdinalIgnoreCase) ||
-                                       term.Contains("256-color", StringComparison.OrdinalIgnoreCase);
-
-                // The problematic case: 256-color terminal over SSH/tmux
-                // Some console libraries try to query the terminal for capabilities using
-                // escape sequences like DA1/DA2/XTVERSION, which can hang if the terminal
-                // doesn't respond or the response isn't received properly over SSH.
-                if ((isRemoteSession || isTmux || isScreen) && has256ColorTerm)
+                if (isRemoteOrMultiplexed)
                 {
-                    // Downgrade TERM to avoid the problematic capability detection
-                    // Keep color support but use a simpler terminal type
-                    System.Environment.SetEnvironmentVariable("TERM", "xterm");
-
-                    // Set COLORTERM to indicate we support colors (some apps check this)
-                    if (string.IsNullOrEmpty(colorTerm))
-                    {
-                        System.Environment.SetEnvironmentVariable("COLORTERM", "256");
-                    }
-                }
-
-                // Apply user override if specified
-                if (!string.IsNullOrEmpty(colorModeOverride))
-                {
-                    ApplyColorModeOverride(colorModeOverride);
-                    return;
-                }
-
-                // Configure Spectre.Console based on environment
-                // Detect true color support from COLORTERM
-                bool hasTrueColor = colorTerm.Equals("truecolor", StringComparison.OrdinalIgnoreCase) ||
-                                   colorTerm.Equals("24bit", StringComparison.OrdinalIgnoreCase);
-
-                if (isRemoteSession || isTmux || isScreen)
-                {
-                    if (hasTrueColor)
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.TrueColor;
-                    }
-                    else if (has256ColorTerm || colorTerm == "256")
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.EightBit;
-                    }
-                    else
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.Standard;
-                    }
-
-                    // Disable interactive features that might cause issues
+                    // Interactive prompts only with a real terminal on stdin
                     AnsiConsole.Profile.Capabilities.Interactive = System.Console.IsInputRedirected == false;
                 }
 
-                // Handle dumb terminals
-                if (term.Equals("dumb", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(term))
-                {
-                    AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.NoColors;
-                    AnsiConsole.Profile.Capabilities.Unicode = false;
-                }
-
-                // Disable Unicode on Linux console (not xterm/screen)
-                if (term.Equals("linux", StringComparison.OrdinalIgnoreCase))
+                // No Unicode box drawing on dumb terminals and the Linux text console
+                if (term.Length == 0 ||
+                    term.Equals("dumb", StringComparison.OrdinalIgnoreCase) ||
+                    term.Equals("linux", StringComparison.OrdinalIgnoreCase))
                 {
                     AnsiConsole.Profile.Capabilities.Unicode = false;
                 }
@@ -7415,33 +7357,6 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             catch
             {
                 // If anything fails during terminal configuration, continue with defaults
-            }
-        }
-
-        /// <summary>
-        /// Apply user-specified color mode override
-        /// </summary>
-        static void ApplyColorModeOverride(string colorModeOverride)
-        {
-            ColorSystem? colorSystem = colorModeOverride.ToLowerInvariant() switch
-            {
-                "none" => ColorSystem.NoColors,
-                "0" => ColorSystem.NoColors,
-                "legacy" => ColorSystem.Legacy,
-                "8" => ColorSystem.Legacy,
-                "standard" => ColorSystem.Standard,
-                "16" => ColorSystem.Standard,
-                "256" => ColorSystem.EightBit,
-                "eightbit" => ColorSystem.EightBit,
-                "true" => ColorSystem.TrueColor,
-                "truecolor" => ColorSystem.TrueColor,
-                "24bit" => ColorSystem.TrueColor,
-                _ => null
-            };
-
-            if (colorSystem.HasValue)
-            {
-                AnsiConsole.Profile.Capabilities.ColorSystem = colorSystem.Value;
             }
         }
 
