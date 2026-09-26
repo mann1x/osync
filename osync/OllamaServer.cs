@@ -101,6 +101,40 @@ namespace osync
             return builder.Uri.ToString().TrimEnd('/');
         }
 
+        private static readonly ConcurrentDictionary<string, int> DefaultPortCache = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Port to use for a server given without one: 11434 (Ollama). When the host is reachable but refuses
+        /// connections on 11434 and accepts them on 22434, it is an xOllama server and 22434 is used.
+        /// Unreachable hosts keep 11434 (the error then names the expected Ollama port). Cached per host.
+        /// </summary>
+        public static int DefaultPortFor(string host) =>
+            DefaultPortCache.GetOrAdd(host, h =>
+                TryConnect(h, OllamaDefaultPort) == ConnectResult.Refused && TryConnect(h, XOllamaDefaultPort) == ConnectResult.Connected
+                    ? XOllamaDefaultPort
+                    : OllamaDefaultPort);
+
+        private enum ConnectResult { Connected, Refused, Failed }
+
+        private static ConnectResult TryConnect(string host, int port)
+        {
+            try
+            {
+                using var client = new System.Net.Sockets.TcpClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(1500));
+                client.ConnectAsync(host, port, cts.Token).AsTask().GetAwaiter().GetResult();
+                return ConnectResult.Connected;
+            }
+            catch (System.Net.Sockets.SocketException ex) when (ex.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused)
+            {
+                return ConnectResult.Refused;
+            }
+            catch
+            {
+                return ConnectResult.Failed;
+            }
+        }
+
         /// <summary>Detects whether the server at <paramref name="url"/> is Ollama or xOllama (cached).</summary>
         public static ServerFlavor GetFlavor(string url) =>
             FlavorCache.GetOrAdd(url.TrimEnd('/'), DetectFlavor);

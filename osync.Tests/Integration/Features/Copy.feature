@@ -44,6 +44,15 @@ Feature: Copy models (cp)
       | full URL      | {remote1}/{dst}              |
       | host and port | {remote1.hostport}/{dst}     |
 
+  # Regression: in http://server/model:tag the ':' of the tag was taken for a port, so the URL got port 80.
+  # A server URL without a port uses 11434 (or 22434 when only an xOllama answers there).
+  @local @remote1 @defaultport
+  Scenario: A server URL without a port uses the default port even when the model has a tag
+    Given a test model "src:v1" on local
+    When I run osync "cp http://localhost/{src}:v1 {remote1}/{dst}"
+    Then the command succeeds
+    And the model "{dst}" on remote1 is identical to "{src}:v1" on local
+
   @local @remote1
   Scenario: Upload keeps the model name when only the server is given
     Given a test model "src" on local
