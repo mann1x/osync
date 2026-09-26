@@ -42,6 +42,7 @@ public sealed class ScenarioState
     /// Resolves placeholders in feature text:
     ///   {local} {remote1} {remote2}      server URL, e.g. http://localhost:11435
     ///   {remote1.hostport}               server without scheme, e.g. localhost:11435
+    ///   {remote1.host} {remote1.port}    its host and port
     ///   {prefix}                         this scenario's model-name prefix
     ///   {anything-else}                  a model name unique to this scenario: {prefix}anything-else
     /// </summary>
@@ -57,11 +58,13 @@ public sealed class ScenarioState
             case "prefix":
                 return Prefix;
         }
-        if (key.EndsWith(".hostport", StringComparison.Ordinal))
+        foreach (var part in new[] { ".hostport", ".host", ".port" })
         {
-            var url = TestEnvironment.ServerUrl(key[..^".hostport".Length])
+            if (!key.EndsWith(part, StringComparison.Ordinal)) continue;
+            var url = TestEnvironment.ServerUrl(key[..^part.Length])
                       ?? throw new InvalidOperationException($"Server '{key}' is not configured");
-            return new Uri(url).Authority;
+            var uri = new Uri(url);
+            return part switch { ".host" => uri.Host, ".port" => uri.Port.ToString(), _ => uri.Authority };
         }
         return Prefix + key;
     });

@@ -29,6 +29,9 @@ namespace osync
         public static ColorDepth Current => (_current ??= Detect(Environment.GetEnvironmentVariable, OsyncSettings.Current.ColorMode,
             TerminalInitializer.OriginalTerm, OperatingSystem.IsWindows())).Depth;
 
+        /// <summary>Forgets the detected depth (after the settings changed).</summary>
+        public static void Reset() => _current = null;
+
         /// <summary>Why <see cref="Current"/> was chosen, e.g. "COLORTERM=truecolor".</summary>
         public static string Reason => _current?.Reason ?? (Current.ToString());
 

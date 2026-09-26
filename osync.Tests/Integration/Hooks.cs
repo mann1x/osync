@@ -11,6 +11,7 @@ namespace osync.Tests.Integration;
 ///   @remote2   OSYNC_TEST_REMOTE2 configured and reachable (+ test model)
 ///   @registry  OSYNC_TEST_REGISTRY=1 (downloads from registry.ollama.ai / huggingface.co)
 ///   @cli       needs nothing but the osync binary (runs in the unit-test tier)
+///   @tty       runs osync in a pseudo terminal (interactive commands such as manage): Linux with script(1)
 ///   @defaultport the local server listens on localhost:11434 (Ollama) or localhost:22434 (xOllama)
 ///   @exclusive OSYNC_TEST_EXCLUSIVE=1 (servers are dedicated to tests; e.g. "unload all")
 ///   @knownbug  documents a confirmed osync bug; excluded from the required CI job until fixed
@@ -78,6 +79,7 @@ public sealed class Hooks
             else if (local.Port == 22434 && TestEnvironment.IsReachable("http://localhost:11434"))
                 missing.Add("no other server on localhost:11434");
         }
+        if (tags.Contains("tty") && !OsyncCli.TerminalAvailable) missing.Add("Linux with script(1) for a pseudo terminal");
         if (tags.Contains("registry") && !TestEnvironment.RegistryEnabled) missing.Add("OSYNC_TEST_REGISTRY=1");
         if (tags.Contains("xollamabug") && TestEnvironment.IsReachable(TestEnvironment.LocalUrl) &&
             TestEnvironment.IsXOllama(TestEnvironment.LocalUrl))

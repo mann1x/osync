@@ -39,7 +39,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - **Run/Chat** - Interactive chat with extended thinking mode support
 - **Ps** - List loaded models in memory
 - **Load/Unload** - VRAM management
-- **Manage** - Full-screen TUI using Terminal.Gui
+- **Manage** - Full-screen TUI using Terminal.Gui 2
 - **Qc** - Quantization comparison with test suites
 - **QcView** - Quantization comparison test results viewer
 
@@ -48,7 +48,9 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `Program.cs` - Entry point, CLI routing, all command action methods
 - `CommandArguments.cs` - All argument classes for commands
 - `ChatSession.cs` - Interactive chat session management
-- `ManageCommand.cs` - TUI implementation with themes
+- `ManageCommand.cs` - TUI implementation (Terminal.Gui 2)
+- `ManageThemes.cs` - `manage` themes (24-bit palettes) and their adaptation to 256/16 colors
+- `ColorSupport.cs` - terminal color depth detection; `OsyncSettings.cs` - preferences file
 - `QcCommand.cs` - Quantization comparison implementation
 - `QcViewCommand.cs` - QC results viewer with PDF/HTML/Markdown output generation
 - `QcModels.cs` - Data models for QC results (JudgmentResult, QuantResult, etc.)
@@ -74,7 +76,7 @@ xUnit v3 + Reqnroll (Gherkin) in `osync.Tests/` — see `docs/DEVELOPMENT.md` fo
 
 ### Dependencies
 
-Core: PowerArgs (CLI), Spectre.Console (formatting), Terminal.Gui (TUI), TqdmSharp (progress bars)
+Core: PowerArgs (CLI), Spectre.Console (formatting), Terminal.Gui 2 (TUI), TqdmSharp (progress bars)
 PDF: iText7 (AGPL-3.0 licensed) - used for PDF report generation in QcView
 AI SDKs: Anthropic, OpenAI, Azure.AI.OpenAI - for cloud judge providers
 Test: xUnit v3, Reqnroll, FluentAssertions (pinned to 7.x: v8+ license change)
@@ -150,6 +152,15 @@ Always use `OllamaServer` (OllamaServer.cs) — never hardcode `localhost:11434`
 - `OllamaServer.CliName` + `OllamaServer.ApplyCliEnvironment(startInfo)` for CLI shell-outs (`ollama` or `xollama`, `OSYNC_OLLAMA_CLI` override)
 - `OllamaServer.ModelsDirFromEnvironment()`: `XOLLAMA_MODELS`, then `OLLAMA_MODELS`
 - xOllama-only API features (`/api/tokenize`, numeric/extended `think` budgets) must be gated on `GetFlavor(url) == ServerFlavor.XOllama`
+
+### Terminal.Gui 2 (manage)
+
+- Instance API only: `Application.Create().Init()` per TUI session, never the obsolete static `Application.*`
+- Console operations (copy, run, update, pull) never run inside the TUI: set a pending action, `RequestStop`, dispose the app, run on the console, then start a new session (`ManageUI.Run` loop)
+- Colors come from the theme (`ManageThemes`), registered as the `Base`/`Dialog`/`Error` schemes on every session (so a `~/.tui/config.json` cannot change them); `Driver.Force16Colors` follows `ColorSupport` (no 256-color output in Terminal.Gui)
+- Set `HotKeySpecifier = (Rune)0xFFFF` on views showing model names (`_` is a hotkey marker), `KeystrokeNavigator = null` on lists fed by typing, handle `Esc` (app quit key) yourself
+- Dialogs: the last `AddButton` is the default (Enter); put the safe choice last for destructive confirmations; validate in `FormDialog.Validate`
+- Interactive behavior is covered by `@tty` scenarios (`Manage.feature`, pseudo terminal via `script`)
 
 ### MCP Server Notes
 

@@ -56,6 +56,38 @@ public sealed class OsyncSteps
         _output.WriteLine(result.ToString());
     }
 
+    [When("I open manage in a terminal and press {string}")]
+    public Task WhenIOpenManageAndPress(string keys) => OpenManage("manage", keys, withHostSettings: true);
+
+    [When("I open manage without host settings in a terminal and press {string}")]
+    public Task WhenIOpenManageWithoutHostSettingsAndPress(string keys) => OpenManage("manage", keys, withHostSettings: false);
+
+    private async Task OpenManage(string arguments, string keys, bool withHostSettings)
+    {
+        var result = await OsyncCli.RunInTerminalAsync(arguments, TerminalKeys.Parse(_state.Resolve(keys)),
+            readyText: "osync manage v", withHostSettings: withHostSettings, environment: Env());
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
+    [Then("the settings file has {string} set to {string}")]
+    public void ThenTheSettingsFileHas(string path, string expected)
+    {
+        var file = Path.Combine(_state.ConfigDir, "settings.json");
+        File.Exists(file).Should().BeTrue($"{file} should have been written");
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file));
+        var element = doc.RootElement;
+        foreach (var name in path.Split('.'))
+        {
+            element.TryGetProperty(name, out element).Should().BeTrue($"settings.json should contain {path}");
+        }
+        element.ToString().Should().Be(_state.Resolve(expected));
+    }
+
+    [Then("the settings file does not exist")]
+    public void ThenTheSettingsFileDoesNotExist() =>
+        File.Exists(Path.Combine(_state.ConfigDir, "settings.json")).Should().BeFalse();
+
     private Dictionary<string, string> Env() => new() { ["OSYNC_CONFIG_DIR"] = _state.ConfigDir };
 
     /// <summary>Writes a settings.json whose server entry points at one of the test servers.</summary>
