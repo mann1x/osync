@@ -1,85 +1,116 @@
 # osync development, build and release protocol
 
-> Status: **DRAFT for review**. Sections marked *(planned)* describe workflows that are not in the repo yet.
-
 ## Branches
 
 | Branch | Purpose | Who writes to it |
 |---|---|---|
-| `master` | Released code only. Every release is a tag `vX.Y.Z` on `master`. | Merge from `dev` (release) or `hotfix/*` only |
-| `dev` | Integration branch. Always builds, CI always green. | Pull requests from topic branches |
+| `master` | Released code. Every push that passes CI publishes release `v<AppVersion>` (once per version). | Merge from `dev` (release) or `hotfix/*` only |
+| `dev` | Integration branch. Every push that passes CI publishes a pre-release `v<next>-dev.<run>`. | Pull requests from topic branches |
 | `feat/*`, `fix/*`, `test/*`, `ci/*`, `claude/*` | One topic each (a feature, one bug/audit item, CI work, a Claude session) | The author |
 | `hotfix/*` | Urgent fix for the released version, branched from `master` | The author |
 
 Recommended GitHub settings (Settings → Branches → rules), set by the repository owner:
-- `master` and `dev`: require a pull request, require the **CI** status checks to pass, no force-push, no deletion.
-- Merge style: *squash* for topic → `dev`, *merge commit* for `dev` → `master` (keeps the release history readable).
+- `master` and `dev`: require a pull request, require the **CI** checks (`Build + unit tests (*)`, `Integration`) to pass, no force-push, no deletion.
+- Merge style: *squash* for topic → `dev`, *merge commit* for `dev` → `master`.
 
 ## Development cycle
 
 1. Pick an item (issue or audit finding). Branch from `dev`: `git switch -c fix/rm-exit-code origin/dev`.
-2. **Test first** for bugs: write a test that fails on the current code, then fix it, then see it pass.
-3. Run the fast checks locally (see *Local testing*): build + unit tests at minimum.
-4. Open a PR into `dev`. CI must be green on all three OSes, and the integration job must be green once it exists.
-5. Update the **Changelog in README.md** under the *unreleased* section (never under an already-released version; never bump the version in a feature PR).
-6. Squash-merge.
+2. **Test first** for bugs: write a scenario/test that fails on the current code, fix the code, see it pass.
+   If the bug is documented by an existing `@knownbug` scenario, remove the tag in the same change.
+3. Run the fast checks locally: `scripts/test.sh unit` (or `scripts\test.ps1 unit`), plus `integration` when the change touches server operations.
+4. Open a PR into `dev`. CI must be green on all three OSes and the integration job.
+5. Update the **Changelog in README.md** under the section of the next, unreleased version (never under an already-released version; never bump `AppVersion` in a feature PR).
+6. Squash-merge. The merge publishes a `dev` pre-release automatically.
 
 ### Dependency upgrades
 
 Spectre.Console, Terminal.Gui, PrettyConsole and PowerArgs have caused interactive-UI regressions before. Rules:
 - **One package per PR**, never bundled with other changes.
-- The PR must include the result of the *manual interactive checklist* below on Windows and on one Unix terminal.
-- A version that was deliberately held back gets a comment next to its `PackageReference` saying why.
-- Changing the target framework follows the same rule (the move to `net10.0` did not change any package version).
+- The PR must include the result of the *manual interactive checklist* (below) on Windows and on one Unix terminal.
+- A version that is deliberately held back gets a comment next to its `PackageReference` saying why.
+- Changing the target framework follows the same rule (the move to `net10.0` changed no package version).
 
-## Test tiers
+## Tests
 
-| Tier | Needs | Filter | Runs in |
+All tests live in `osync.Tests` (xUnit v3 + Reqnroll):
+
+| Tier | Where | Needs | Runs in |
 |---|---|---|---|
-| Unit | nothing | `FullyQualifiedName~osync.Tests.UnitTests` | everywhere (Windows/Linux/macOS, CI, cloud sessions) |
-| Integration: local *(planned)* | one Ollama server + `ollama` CLI | `Category=Local` | CI (Linux), developer machines |
-| Integration: remote *(planned)* | local + two remote Ollama servers | `Category=Remote` | CI (Linux, two Ollama containers), developer machines via docker compose |
+| Unit | `UnitTests/*.cs` | nothing | everywhere |
+| CLI | `Integration/Features/Cli.feature` (`@cli`) | the osync binary | everywhere |
+| Integration | `Integration/Features/*.feature` | Ollama servers, see tags | CI (Linux), developer machines |
 
-Integration-test rules *(planned, applies to the rewritten suite)*:
-- **Atomic**: every test creates what it needs under a unique name (`osync-t-<id>`), and deletes it in cleanup even on failure. No test depends on another test or on models the developer has.
-- **Arrange/verify through the Ollama HTTP API**, not through osync (osync is the thing under test). Existence is checked by exact `name:tag`.
-- **Never touch developer data**: no `update *`, no "unload all" against a server the test did not start, no deleting models the test did not create.
-- **Skip, don't fail**, when the required server is not reachable.
-- Integration tests run serially (single xUnit collection); unit tests run in parallel.
-- Base model: SmolLM2-135M-Instruct GGUF, created in Ollama from a Modelfile by the test fixture (not pulled from the registry). Only tests of `pull`/`update` themselves use the registry.
+Scenario tags declare requirements; a scenario whose requirements are missing is **skipped**, never failed:
 
-### Local testing
+| Tag | Requirement |
+|---|---|
+| `@local` | local Ollama reachable (`OSYNC_TEST_LOCAL`, else `OLLAMA_HOST`, else `http://localhost:11434`), `ollama` CLI on PATH, test model |
+| `@remote1`, `@remote2` | `OSYNC_TEST_REMOTE1` / `OSYNC_TEST_REMOTE2` set and reachable |
+| `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
+| `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
+| `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
+
+Other settings: `OSYNC_TEST_MODELS_DIR` (models dir of the local server, passed to osync as `OLLAMA_MODELS`), `OSYNC_TEST_MODEL_GGUF` (test model path), `OSYNC_TEST_OSYNC` (binary under test).
+
+Rules for integration scenarios:
+- **Atomic**: every model a scenario uses is created by the scenario under a unique name (`{alias}` in feature text becomes `osync-t-<run>-<n>-alias`), and everything under that prefix is deleted after the scenario, even on failure. Leftovers of interrupted runs (`osync-t-*`) are removed at the start of a run.
+- **Arrange and verify through the Ollama HTTP API**, not through osync (osync is the system under test). Existence is checked by exact `name:tag`; copies are checked for identical size, quantization, family, template and parameters.
+- **Never touch developer data**: no wildcard updates, no "unload all" unless `@exclusive`, never delete a model the scenario did not create (registry-pull scenarios are skipped if the model is already present).
+- Assert exit codes and server state first; assert output text only where the text is the feature (help, `ls`, `ps`).
+
+The base model is SmolLM2-135M-Instruct Q4_0 (~92 MB): `osync.Tests/Assets/test-model.json` pins it, `Assets/Modelfile` turns it into an Ollama model, and the GGUF is an asset of the `test-assets` pre-release of this repository. `scripts/get-test-model.sh` / `.ps1` download and verify it.
+
+### Running tests locally
 
 ```bash
-dotnet build
-dotnet test osync.Tests --filter "FullyQualifiedName~osync.Tests.UnitTests"
+scripts/test.sh unit                        # unit + CLI, no Ollama needed
+scripts/test.sh integration                 # against your local Ollama
+scripts/test.sh integration --servers       # + two throwaway Ollama servers on :11435/:11436 as remote1/remote2
+scripts/test.sh integration --knownbug      # only the documented known bugs
+OSYNC_TEST_REGISTRY=1 scripts/test.sh all   # include pull/update tests
 ```
 
-*(planned)* `scripts/test.ps1` / `scripts/test.sh` with `unit | local | remote | all`, and `docker-compose.test.yml` that starts two Ollama servers on ports 11435 and 11436 so the remote tests run without LAN servers. Remote servers can also be set with `OSYNC_TEST_REMOTE1` / `OSYNC_TEST_REMOTE2`.
+PowerShell: `scripts\test.ps1 unit|integration|all [-Servers] [-KnownBug]`.
+To use your LAN servers instead of throwaway ones, set `OSYNC_TEST_REMOTE1` / `OSYNC_TEST_REMOTE2`.
 
 ### Cloud development (Claude Code on the web)
 
-Cloud sessions can build and run unit tests (.NET SDK installed from Ubuntu packages). They cannot reach `ollama.com` / `registry.ollama.ai` under the current network policy, so integration tests run on the CI runners: push the branch and read the CI result.
+Cloud sessions can build and run the unit and CLI tiers. The environment's network policy decides whether Ollama release downloads (github.com) and the Ollama registry are reachable; when they are not, push the branch and use the CI result for the integration tier.
 
 ## CI
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | every push, PRs into `master`/`dev` | build + unit tests on Ubuntu, Windows, macOS; smoke-runs the CLI |
-| integration *(planned, part of `ci.yml`)* | same | Linux runner: installs the Ollama version recorded in `.github/ollama-version` as the local server, starts two `ollama/ollama` containers as remote servers, runs the local + remote integration tests |
-| `ollama-compat.yml` *(planned)* | daily **check only** (seconds) + manual | Looks up the latest **stable** (non-pre-release) Ollama release. If it differs from `.github/ollama-version`, runs the full integration suite against it: green → opens a PR bumping `.github/ollama-version`; red → opens an issue with the failing tests. Nothing heavy runs unless Ollama released something new. |
-| `release.yml` *(planned)* | tag `v*` pushed on `master` | builds self-contained single-file binaries (win-x64, linux-x64, linux-arm64, osx-x64, osx-arm64), attaches them to a **draft** GitHub Release with the changelog section; the owner publishes it |
+| `ci.yml` | every push; PRs into `master`/`dev` | build + unit/CLI tests on Ubuntu, Windows, macOS; integration suite; on `dev`/`master` pushes also packaging and publishing (see *Releases*) |
+| `integration.yml` | called by `ci.yml` and `ollama-compat.yml`; manual | one Linux runner with three Ollama servers of the version in `.github/ollama-version` (local :11434 with CLI, remote1 :11435, remote2 :11436); required step excludes `@knownbug`, a second step reports the known bugs without failing |
+| `ollama-compat.yml` | daily check (seconds) + manual | compares the latest **stable** Ollama release with `.github/ollama-version`; only when they differ (and no bump PR / failure issue is open) it runs the integration suite against the new release: pass → PR into `dev` bumping `.github/ollama-version`, fail → issue |
+| `test-assets.yml` | changes to `osync.Tests/Assets/test-model.json` | publishes/verifies the test model asset on the `test-assets` pre-release |
 
-## Release protocol
+## Releases
 
-1. On `dev`: all PRs for the release merged, CI green.
-2. Owner bumps `AppVersion` in `osync/Program.cs` and turns the *unreleased* changelog section in README.md into the new version section.
-3. **Manual interactive checklist** on Windows (Windows Terminal) and on one Linux/macOS terminal, using the CI-built artifact:
+Publishing is automatic and gated on all CI jobs (build + unit on three OSes, integration):
+
+| Push to | Publishes | Tag |
+|---|---|---|
+| `dev` | **pre-release** | `v<next>-dev.<run number>`: `<next>` is `AppVersion` if that version is not released yet, else the next patch version. The 10 newest dev pre-releases are kept. |
+| `master` | **release** (marked latest) | `v<AppVersion>`, only if that release does not exist yet (otherwise nothing is published) |
+
+Assets: `osync.exe` (Windows x64), `osync` (Linux x64), `osync-macos-arm64`, `osync-macos-x64` (built on macOS so they are ad-hoc signed). Release notes are the `v<AppVersion>` section of the README changelog.
+
+Release steps:
+1. On `dev`: all PRs for the release merged, CI green, a dev pre-release exists.
+2. Owner bumps `AppVersion` in `osync/Program.cs` and completes the `v<AppVersion>` changelog section in README.md (PR into `dev`).
+3. **Manual interactive checklist** with the latest dev pre-release, on Windows (Windows Terminal) and one Linux/macOS terminal:
    - `osync run <model>`: chat, multi-line input, `/set`, `/save`, `/load`, thinking output, Ctrl+C
    - `osync manage`: navigation, themes, copy/rename/delete dialogs, resize
    - `osync psmonitor`: graphs render, resize, exit restores the terminal (colors, cursor)
    - `osync qc` / `osync bench` progress displays; `qcview` / `benchview` PDF/HTML output opens correctly
    - `osync cp` local→remote progress bar and throttling (`-bt`)
-4. PR `dev` → `master`, merge commit.
-5. Tag `vX.Y.Z` on `master` and push the tag. `release.yml` builds the draft release; the owner checks the assets and publishes.
-6. Hotfix: branch `hotfix/*` from `master`, PR into `master`, tag, then merge `master` back into `dev`.
+4. PR `dev` → `master`, merge commit. CI publishes release `v<AppVersion>`.
+5. Hotfix: branch `hotfix/*` from `master`, bump the patch version, PR into `master`, then merge `master` back into `dev`.
+
+## Roadmap items decided during the audit
+
+- **Push-relay copy** for remote→remote and remote→local: osync runs a temporary registry endpoint, the source server `/api/push`es to it, osync streams each blob into the destination's `/api/blobs`, and the destination pulls the manifest. Copies any model (including created/imported ones) with its complete manifest. The `@knownbug` copy scenarios become regular scenarios.
+- **xOllama** (mann1x/xollama) support.

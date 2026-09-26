@@ -1,0 +1,138 @@
+name: Integration tests
+
+# Runs the Reqnroll integration suite against real Ollama servers on one Linux runner:
+#   local   :11434  ollama CLI on PATH, models dir known to osync (OLLAMA_MODELS)
+#   remote1 :11435  separate server with its own model store
+#   remote2 :11436  separate server with its own model store
+# Called by ci.yml (version from .github/ollama-version) and by ollama-compat.yml (new releases).
+on:
+  workflow_call:
+    inputs:
+      ollama-version:
+        description: "Ollama release tag (e.g. v0.34.4); empty = .github/ollama-version"
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      ollama-version:
+        description: "Ollama release tag (e.g. v0.34.4); empty = .github/ollama-version"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  integration:
+    name: Integration (Ollama ${{ inputs.ollama-version || 'pinned' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve Ollama version
+        id: ver
+        run: |
+          v="${{ inputs.ollama-version }}"
+          [ -n "$v" ] || v="$(tr -d '[:space:]' < .github/ollama-version)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Ollama $v" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache Ollama binaries
+        id: ollama-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/ollama
+          key: ollama-cpu-${{ steps.ver.outputs.version }}
+
+      - name: Install Ollama ${{ steps.ver.outputs.version }} (CPU)
+        if: steps.ollama-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/ollama
+          curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/${{ steps.ver.outputs.version }}/ollama-linux-amd64.tar.zst" \
+            | zstd -dc | tar -x -C ~/ollama --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
+
+      - name: Start Ollama servers
+        run: |
+          echo "$HOME/ollama/bin" >> "$GITHUB_PATH"
+          for s in "local 11434" "remote1 11435" "remote2 11436"; do
+            set -- $s
+            mkdir -p "$RUNNER_TEMP/$1/models"
+            OLLAMA_HOST=127.0.0.1:$2 OLLAMA_MODELS="$RUNNER_TEMP/$1/models" \
+              nohup "$HOME/ollama/bin/ollama" serve > "$RUNNER_TEMP/ollama-$1.log" 2>&1 &
+          done
+          for p in 11434 11435 11436; do
+            timeout 60 bash -c "until curl -fs localhost:$p/api/version; do sleep 1; done"; echo
+          done
+
+      - name: Cache test model
+        id: model-cache
+        uses: actions/cache@v6
+        with:
+          path: osync.Tests/Assets/*.gguf
+          key: test-model-${{ hashFiles('osync.Tests/Assets/test-model.json') }}
+
+      - name: Download test model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: scripts/get-test-model.sh
+
+      - name: Build
+        run: dotnet build osync.sln -c Release
+
+      - name: Integration tests
+        env:
+          OSYNC_TEST_LOCAL: http://localhost:11434
+          OSYNC_TEST_REMOTE1: http://localhost:11435
+          OSYNC_TEST_REMOTE2: http://localhost:11436
+          OSYNC_TEST_MODELS_DIR: ${{ runner.temp }}/local/models
+          OSYNC_TEST_REGISTRY: "1"
+          OSYNC_TEST_EXCLUSIVE: "1"
+        run: >
+          dotnet test osync.Tests -c Release --no-build
+          --filter "FullyQualifiedName~osync.Tests.Integration&Category!=knownbug"
+          --logger "trx;LogFileName=integration.trx"
+          --results-directory TestResults
+
+      # Known bugs are expected to fail; this step reports them without failing the job.
+      # A known-bug scenario that passes means the bug is fixed: remove its @knownbug tag.
+      - name: Known-bug scenarios (report only)
+        if: always()
+        continue-on-error: true
+        env:
+          OSYNC_TEST_LOCAL: http://localhost:11434
+          OSYNC_TEST_REMOTE1: http://localhost:11435
+          OSYNC_TEST_REMOTE2: http://localhost:11436
+          OSYNC_TEST_MODELS_DIR: ${{ runner.temp }}/local/models
+          OSYNC_TEST_REGISTRY: "1"
+          OSYNC_TEST_EXCLUSIVE: "1"
+        run: |
+          set +e
+          dotnet test osync.Tests -c Release --no-build \
+            --filter "FullyQualifiedName~osync.Tests.Integration&Category=knownbug" \
+            --logger "trx;LogFileName=knownbug.trx" --results-directory TestResults > knownbug.log 2>&1
+          {
+            echo "### Known-bug scenarios"
+            echo '```'
+            grep -E "^\s+(Passed|Failed|Skipped) |Total tests|Passed:|Failed:" knownbug.log | head -60
+            echo '```'
+            echo "Any scenario listed as **Passed** above is fixed: remove its @knownbug tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Upload results and server logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-${{ steps.ver.outputs.version }}
+          path: |
+            TestResults/*.trx
+            ${{ runner.temp }}/ollama-*.log
+          if-no-files-found: ignore

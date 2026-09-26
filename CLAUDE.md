@@ -59,10 +59,12 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 
 ### Test Structure
 
-BDD tests using SpecFlow + xUnit in `osync.Tests/`:
-- Feature files in `Features/` directory
-- Step definitions in `StepDefinitions/`
-- Test infrastructure in `Infrastructure/` (OsyncRunner, TestConfiguration)
+xUnit v3 + Reqnroll (Gherkin) in `osync.Tests/` — see `docs/DEVELOPMENT.md` for the full protocol:
+- `UnitTests/` - plain xUnit unit tests (no Ollama needed)
+- `Integration/Features/*.feature` - scenarios; tags declare requirements (`@cli`, `@local`, `@remote1`, `@remote2`, `@registry`, `@exclusive`); `@knownbug` marks documented unfixed bugs
+- `Integration/Steps/` - step definitions; `Integration/Infrastructure/` - `OsyncCli` (runs the binary), `OllamaApi` (arrange/verify via HTTP), `ScenarioState` (unique names + cleanup), `TestEnvironment` (`OSYNC_TEST_*` env vars)
+- Scenarios must be atomic: use `{alias}` placeholders for model names, create models with `Given a test model "alias" on <server>`, verify via the Ollama API, never touch models the scenario did not create
+- Run: `scripts/test.sh unit|integration|all [--servers] [--knownbug]` (or `scripts\test.ps1`)
 
 ### Key Technical Details
 
@@ -75,7 +77,7 @@ BDD tests using SpecFlow + xUnit in `osync.Tests/`:
 Core: PowerArgs (CLI), Spectre.Console (formatting), Terminal.Gui (TUI), TqdmSharp (progress bars)
 PDF: iText7 (AGPL-3.0 licensed) - used for PDF report generation in QcView
 AI SDKs: Anthropic, OpenAI, Azure.AI.OpenAI - for cloud judge providers
-Test: xUnit, SpecFlow, FluentAssertions
+Test: xUnit v3, Reqnroll, FluentAssertions (pinned to 7.x: v8+ license change)
 
 ### Test Data
 

@@ -1,5 +1,7 @@
 name: CI
 
+# Every push and PR: build + unit tests on Windows/Linux/macOS, integration tests against real Ollama servers.
+# Pushes to dev publish a pre-release, pushes to master publish a release (only when every test job passed).
 on:
   push:
     branches: ["**"]
@@ -9,7 +11,8 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a release in progress on dev/master; cancel superseded runs elsewhere
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/dev' }}
 
 permissions:
   contents: read
@@ -40,10 +43,11 @@ jobs:
       - name: Build
         run: dotnet build osync.sln -c Release --no-restore
 
-      - name: Unit tests
+      - name: Unit and CLI tests
+        # CLI scenarios need no Ollama server; everything that does is skipped automatically here
         run: >
           dotnet test osync.Tests -c Release --no-build
-          --filter "FullyQualifiedName~osync.Tests.UnitTests"
+          --filter "Category!=knownbug"
           --logger "trx;LogFileName=unit-${{ matrix.os }}.trx"
           --results-directory TestResults
 
@@ -60,3 +64,150 @@ jobs:
           name: unit-results-${{ matrix.os }}
           path: TestResults/*.trx
           if-no-files-found: ignore
+
+  integration:
+    name: Integration
+    uses: ./.github/workflows/integration.yml
+
+  # ---------------------------------------------------------------------------------------------
+  # Releases: dev -> pre-release v<next>-dev.<run>, master -> release v<AppVersion> (once per version)
+  # ---------------------------------------------------------------------------------------------
+  release-plan:
+    name: Release plan
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev')
+    needs: [build-unit, integration]
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.plan.outputs.publish }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Plan
+        id: plan
+        run: |
+          version=$(grep -oP 'AppVersion = "\K[0-9]+\.[0-9]+\.[0-9]+' osync/Program.cs)
+          [ -n "$version" ] || { echo "::error::AppVersion not found in osync/Program.cs"; exit 1; }
+          released=false
+          gh release view "v$version" >/dev/null 2>&1 && released=true
+
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            if [ "$released" = true ]; then
+              echo "::notice::v$version is already released; bump AppVersion to publish a new release"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            tag="v$version"; prerelease=false
+          else
+            # Pre-releases target the next version once the current one has been released
+            next="$version"
+            if [ "$released" = true ]; then
+              IFS=. read -r ma mi pa <<< "$version"; next="$ma.$mi.$((pa + 1))"
+            fi
+            tag="v$next-dev.${GITHUB_RUN_NUMBER}"; prerelease=true
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Release plan: $tag (prerelease=$prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  package:
+    name: Package ${{ matrix.rid }}
+    needs: release-plan
+    if: needs.release-plan.outputs.publish == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { rid: linux-x64, os: ubuntu-latest, file: osync, asset: osync, label: osync-linux-x64 }
+          - { rid: win-x64, os: windows-latest, file: osync.exe, asset: osync.exe, label: osync-windows-x64.exe }
+          # macOS binaries are built on macOS so the SDK can ad-hoc sign them (required on Apple Silicon)
+          - { rid: osx-arm64, os: macos-latest, file: osync, asset: osync-macos-arm64, label: osync-macos-arm64 }
+          - { rid: osx-x64, os: macos-latest, file: osync, asset: osync-macos-x64, label: osync-macos-x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Publish self-contained single file
+        shell: bash
+        run: |
+          dotnet publish osync/osync.csproj -c Release -r ${{ matrix.rid }} -p:DebugType=None -o "out/${{ matrix.rid }}"
+          mkdir -p dist
+          cp "out/${{ matrix.rid }}/${{ matrix.file }}" "dist/${{ matrix.asset }}"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-${{ matrix.rid }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.release-plan.outputs.tag }}
+    needs: [release-plan, package]
+    if: needs.release-plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.release-plan.outputs.tag }}
+      VERSION: ${{ needs.release-plan.outputs.version }}
+      PRERELEASE: ${{ needs.release-plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        run: |
+          # Changelog section "vX.Y.Z" in README.md, up to the next version heading
+          awk -v v="v$VERSION" '
+            /^## Changelog/ { in_log = 1; next }
+            in_log && /^## / { exit }
+            in_log && $0 == v { grab = 1; next }
+            grab && /^v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$/ { exit }
+            grab { print }
+          ' README.md > notes.md
+          if [ "$PRERELEASE" = true ]; then
+            { echo "Development build of \`dev\` at ${GITHUB_SHA::7}. Not a stable release."; echo; cat notes.md; } > notes.tmp && mv notes.tmp notes.md
+          fi
+          [ -s notes.md ] || echo "See the commit history for changes." > notes.md
+          cat >> notes.md <<'EOF'
+
+          ## Downloads
+          - **osync.exe** — Windows x64 single-file executable
+          - **osync** — Linux x64 single-file executable (`chmod +x osync`)
+          - **osync-macos-arm64** — macOS Apple Silicon (`chmod +x osync-macos-arm64`)
+          - **osync-macos-x64** — macOS Intel (`chmod +x osync-macos-x64`)
+          EOF
+
+      - name: Create release
+        run: |
+          flags=(--target "$GITHUB_SHA" --title "osync $TAG" --notes-file notes.md)
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); else flags+=(--latest); fi
+          gh release create "$TAG" "${flags[@]}" \
+            "dist/osync#osync-linux-x64" \
+            "dist/osync.exe#osync-windows-x64.exe" \
+            "dist/osync-macos-arm64#osync-macos-arm64" \
+            "dist/osync-macos-x64#osync-macos-x64"
+
+      - name: Prune old dev pre-releases (keep 10)
+        if: env.PRERELEASE == 'true'
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("-dev\\.[0-9]+$")))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' \
+          | while read -r t; do gh release delete "$t" --yes --cleanup-tag; done
