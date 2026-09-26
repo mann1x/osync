@@ -53,10 +53,11 @@
 - 📊 **Quantization Comparison** - Compare quality and performance across model quantizations with detailed scoring
 - 🔬 **Context Benchmark** - Test model context tracking with dynamic story-based benchmarks, tools, custom test suites
 - 📈 **Real-Time Monitor** - Live dashboard with GPU/CPU metrics, VRAM usage graphs, model status, and Ollama process tracking
+- 🔀 **Ollama and xOllama** - Works with [Ollama](https://github.com/ollama/ollama) and the [xOllama](https://github.com/mann1x/xollama) fork (see [Local server](#local-server-ollama-and-xollama))
 
 ### Built With
 
-> **[C# .NET 8]**
+> **[C# .NET 10]**
 
 ## Getting Started
 
@@ -74,7 +75,18 @@
 
 > Clone the repo
 
-> Compile with Visual Studio 2022
+> `dotnet build` (any OS, .NET 10 SDK) or Visual Studio 2022; `dotnet publish osync/osync.csproj -c Release -r <win-x64|linux-x64|osx-arm64|osx-x64>` for a single-file executable. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for tests, CI and releases.
+
+### Local server (Ollama and xOllama)
+
+Commands without `-d` work on the local server, found in this order:
+
+1. `XOLLAMA_HOST` (xOllama), then `OLLAMA_HOST` (Ollama); bind addresses such as `0.0.0.0` are mapped to `localhost`
+2. Otherwise the first server answering on `localhost:11434` (Ollama default) or `localhost:22434` (xOllama default)
+
+osync detects whether a server is Ollama or xOllama (`osync ps` shows it) and, for local operations, runs the matching CLI: `xollama` when the local server is xOllama (or only `xollama` is installed), else `ollama`. Set `OSYNC_OLLAMA_CLI` to force a specific CLI. The models directory is taken from `XOLLAMA_MODELS`, then `OLLAMA_MODELS`, then the platform default.
+
+Remote servers given without a port default to `:11434`; for an xOllama server add its port, e.g. `osync ls -d myserver:22434`.
 
 ## Usage
 
@@ -133,6 +145,9 @@ osync cp hf.co/unsloth/gemma-3-1b-it-GGUF:Q4_K_M 192.168.0.100
 osync cp http://192.168.0.100:11434/qwen2:7b http://192.168.0.200:11434/qwen2:latest
 osync cp http://server1:11434/llama3 http://server2:11434/llama3-copy
 
+# Remote to local (download from a server to the local server)
+osync cp http://192.168.0.100:11434/my-finetune my-finetune
+
 # With custom memory buffer size (default: 512MB)
 osync cp http://server1:11434/llama3 http://server2:11434/llama3 -BufferSize 256MB
 osync cp http://server1:11434/qwen2 http://server2:11434/qwen2 -BufferSize 1GB
@@ -151,11 +166,22 @@ osync cp llama3 http://192.168.0.100:11434 -bt 50MB
 - Smart server detection: IP addresses, `hostname:port`, or `hostname/` auto-detected as remote servers
 - Uses source model name when destination server has no model specified
 
-**Remote-to-Remote Limitations:**
-- ⚠️ The model must exist in the Ollama registry (registry.ollama.ai)
-- ⚠️ The registry must be accessible from the host running osync
-- ⚠️ Locally created models cannot be copied between remote servers
-- ⚠️ Only models originally pulled from the registry can be transferred remotely
+**Remote-to-remote and remote-to-local copies (push relay):**
+
+Ollama has no API to download a model, but a server can push a model to a registry. For copies out of a server, osync runs a temporary registry endpoint (the *relay*) on the machine where osync runs:
+1. the source server pushes the model to the relay under a temporary name;
+2. the relay streams every blob straight into the destination server (no disk use, memory bounded by `-BufferSize`, `-bt` throttling applies); blobs the destination already has are skipped;
+3. the destination installs the model's manifest from the relay, so the copy is complete: weights, projector, template, parameters, system prompt, license, messages;
+4. the temporary names are deleted on both servers.
+
+This copies **any** model the source has, including models you created or imported, works between Ollama and xOllama in both directions, and needs no internet access.
+
+Requirements and options:
+- The source server must be able to connect to the machine running osync (and the destination should too, to install the manifest; otherwise osync recreates the model from its files). The relay listens on port 80 when it can bind it, else on a random port; open your firewall accordingly.
+- `OSYNC_RELAY_HOST` - address the servers should use to reach osync (default: the local address that routes to the source server), e.g. behind NAT
+- `OSYNC_RELAY_PORT` - fixed relay port (e.g. one opened in the firewall)
+- `OSYNC_RELAY_INSTALL=create` - skip installing the manifest from the relay and recreate the model with `/api/create` (for destinations that cannot connect to osync, or Windows destination servers when the relay cannot use port 80)
+- If the source server cannot reach the relay, osync falls back to downloading the blobs from registry.ollama.ai, which only works for models pulled from the Ollama registry.
 
 #### List (`ls`)
 
@@ -1362,6 +1388,23 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.3.1
+- **xOllama support** - osync works with the [xOllama](https://github.com/mann1x/xollama) fork as well as Ollama
+  - Local server discovery: `XOLLAMA_HOST`, `OLLAMA_HOST`, then `localhost:11434` / `localhost:22434`
+  - Server flavor detection (`osync ps` shows `Server: Ollama|xOllama at <url>`)
+  - Local operations use the `xollama` CLI when the local server is xOllama (override with `OSYNC_OLLAMA_CLI`)
+  - `XOLLAMA_MODELS` honored for the models directory; xOllama processes shown in process stats
+- **Fixed `osync <command> -h` and missing-argument errors hanging forever** on Linux/macOS when output is redirected (pipes, scripts, CI): the help renderer looped endlessly at 100% CPU with growing memory
+- **Fixed `run`, `ps`, `qc` ignoring `OLLAMA_HOST`**; `manage`, `psmonitor` and local judge models now use the same local-server resolution
+- **Fixed `ps` truncating model names to 20 characters** when output is redirected
+- **Remote-to-remote and remote-to-local copy of any model** - new push relay: the source server pushes the model to a temporary registry endpoint run by osync, which streams the blobs straight into the destination. Models that only exist on the source server (created, imported, HuggingFace) can now be copied, the complete manifest is preserved (license, messages, projector, ...), copies work between Ollama and xOllama, and no internet access is needed (previously blobs were downloaded from registry.ollama.ai)
+- **Fixed remote `show`** printing only the Modelfile: it now shows the same sections as `ollama show` (model details, capabilities, projector, parameters, system, license; all metadata with `-v`), several section flags can be combined, and a missing model exits with an error
+- **Fixed `rm` and `update` exiting with code 0** when no model matches, or when deleting/updating a model failed (`update` of all models on an empty server is still a success)
+- **Fixed bandwidth throttling (`-bt`)** not limiting short bursts, counting requested instead of read bytes, and misbehaving after ~25 days of uptime
+- **.NET 10** - Retargeted from .NET 8 (Windows-only target framework) to cross-platform `net10.0`; builds and tests on Windows, Linux and macOS
+- **macOS binaries** - Releases now include `osync-macos-arm64` and `osync-macos-x64`
+- **New test suite and CI** - Atomic Reqnroll integration scenarios run against real Ollama and xOllama servers (local + two remotes) on every push; `dev` builds publish pre-releases, `master` publishes releases
 
 v1.2.9
 - **Real-Time Monitor Improvements** - Enhanced monitoring dashboard

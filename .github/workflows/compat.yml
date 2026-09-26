@@ -1,0 +1,24 @@
+name: Server compatibility
+
+# Daily, cheap check for new stable Ollama and xOllama releases; the integration suite only runs
+# when a release has not been handled yet (see server-compat.yml).
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  ollama:
+    uses: ./.github/workflows/server-compat.yml
+    with:
+      server: ollama
+
+  xollama:
+    uses: ./.github/workflows/server-compat.yml
+    with:
+      server: xollama

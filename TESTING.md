@@ -1,6 +1,8 @@
 # Testing Guide for osync
 
-This document provides comprehensive testing procedures for all osync commands and features.
+This document provides comprehensive **manual** testing procedures for all osync commands and features.
+
+> Automated tests (unit, CLI and integration scenarios against real Ollama servers) and how to run them are described in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#tests).
 
 ## Prerequisites
 

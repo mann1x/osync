@@ -1,0 +1,76 @@
+name: Test assets
+
+# Publishes the integration-test base model (see osync.Tests/Assets/test-model.json)
+# as an asset of the 'test-assets' pre-release, so tests never depend on third-party hosts.
+on:
+  push:
+    paths:
+      - osync.Tests/Assets/test-model.json
+      - .github/workflows/test-assets.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: test-assets
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read asset lock
+        id: lock
+        run: |
+          f=osync.Tests/Assets/test-model.json
+          echo "file=$(jq -r .file $f)" >> "$GITHUB_OUTPUT"
+          echo "size=$(jq -r .size $f)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(jq -r .sha256 $f)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(jq -r .releaseTag $f)" >> "$GITHUB_OUTPUT"
+          echo "upstream=$(jq -r .upstream $f)" >> "$GITHUB_OUTPUT"
+
+      - name: Check existing release asset
+        id: existing
+        run: |
+          if gh release view "${{ steps.lock.outputs.tag }}" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "${{ steps.lock.outputs.file }}"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download from upstream
+        if: steps.existing.outputs.present == 'false'
+        run: curl -fsSL --retry 5 -o "${{ steps.lock.outputs.file }}" "${{ steps.lock.outputs.upstream }}"
+
+      - name: Download existing asset for verification
+        if: steps.existing.outputs.present == 'true'
+        run: gh release download "${{ steps.lock.outputs.tag }}" -p "${{ steps.lock.outputs.file }}"
+
+      - name: Verify size and checksum
+        run: |
+          f="${{ steps.lock.outputs.file }}"
+          size=$(stat -c %s "$f"); sha=$(sha256sum "$f" | cut -d' ' -f1)
+          echo "size=$size sha256=$sha"
+          echo "### Test model: \`$f\`  size=$size  sha256=\`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+          test "$size" = "${{ steps.lock.outputs.size }}" || { echo "::error::size mismatch"; exit 1; }
+          if [ -n "${{ steps.lock.outputs.sha256 }}" ]; then
+            test "$sha" = "${{ steps.lock.outputs.sha256 }}" || { echo "::error::sha256 mismatch"; exit 1; }
+          else
+            echo "::warning::sha256 not pinned in test-model.json; pin it to: $sha"
+          fi
+
+      - name: Publish release asset
+        if: steps.existing.outputs.present == 'false'
+        run: |
+          tag="${{ steps.lock.outputs.tag }}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --prerelease --target "${{ github.sha }}" \
+              --title "Test assets (not a release)" \
+              --notes "Files used by the osync integration tests (see osync.Tests/Assets/). Not an osync release."
+          fi
+          gh release upload "$tag" "${{ steps.lock.outputs.file }}"

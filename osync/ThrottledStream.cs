@@ -46,7 +46,8 @@ namespace Born2Code.Net
         {
             get
             {
-                return Environment.TickCount;
+                // TickCount64 does not wrap after ~24.9 days of uptime like Environment.TickCount does.
+                return Environment.TickCount64;
             }
         }
 
@@ -210,9 +211,12 @@ namespace Born2Code.Net
         /// <exception cref="T:System.ArgumentOutOfRangeException">offset or count is negative. </exception>
         public override int Read(byte[] buffer, int offset, int count)
         {
-            Throttle(count);
+            int read = _baseStream.Read(buffer, offset, count);
 
-            return _baseStream.Read(buffer, offset, count);
+            // Throttle on the bytes actually read, not the bytes requested.
+            Throttle(read);
+
+            return read;
         }
 
         /// <summary>
@@ -290,34 +294,18 @@ namespace Born2Code.Net
             _byteCount += bufferSizeInBytes;
             long elapsedMilliseconds = CurrentMilliseconds - _start;
 
-            if (elapsedMilliseconds > 0)
+            // Compare against the time the transferred bytes should have taken at the limit.
+            // Do not require elapsedMilliseconds > 0: bursts completing within one timer tick
+            // were previously never throttled.
+            long wakeElapsed = _byteCount * 1000L / _maximumBytesPerSecond;
+            long toSleep = wakeElapsed - elapsedMilliseconds;
+
+            if (toSleep > 1)
             {
-				// Calculate the current bps.
-                long bps = _byteCount * 1000L / elapsedMilliseconds;
+                Thread.Sleep((int)Math.Min(toSleep, int.MaxValue));
 
-				// If the bps are more then the maximum bps, try to throttle.
-                if (bps > _maximumBytesPerSecond)
-                {
-                    // Calculate the time to sleep.
-                    long wakeElapsed = _byteCount * 1000L / _maximumBytesPerSecond;
-                    int toSleep = (int)(wakeElapsed - elapsedMilliseconds);
-
-                    if (toSleep > 1)
-                    {
-                        try
-                        {
-							// The time to sleep is more then a millisecond, so sleep.
-                            Thread.Sleep(toSleep);
-                        }
-                        catch (ThreadAbortException)
-                        {
-                            // Eatup ThreadAbortException.
-                        }
-
-                        // A sleep has been done, reset.
-                        Reset();
-                    }
-                }
+                // A sleep has been done, reset.
+                Reset();
             }
         }
 

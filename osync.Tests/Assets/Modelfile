@@ -1,0 +1,18 @@
+# Base model for osync integration tests (SmolLM2-135M-Instruct, Q4_0, ~92 MB).
+# Manual use:  ollama create osync-test-base -f Modelfile   (after scripts/get-test-model downloaded the GGUF here)
+# The test harness parses this file and creates the model through the Ollama HTTP API.
+FROM ./SmolLM2-135M-Instruct-Q4_0.gguf
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER num_ctx 2048
+PARAMETER num_predict 32
+PARAMETER temperature 0
+PARAMETER seed 42

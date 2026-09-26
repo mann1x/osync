@@ -1,0 +1,103 @@
+name: Server compatibility (reusable)
+
+# Checks one server implementation for a new *stable* release (pre-releases are ignored) and, only when
+# there is an unhandled one, runs the integration suite against it:
+#   pass -> PR into dev bumping .github/<server>-version
+#   fail -> issue with a link to the run (no re-test while that issue is open)
+on:
+  workflow_call:
+    inputs:
+      server:
+        description: "ollama or xollama"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.check.outputs.latest }}
+      run: ${{ steps.check.outputs.run }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SERVER: ${{ inputs.server }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Compare with the tested version
+        id: check
+        run: |
+          case "$SERVER" in
+            ollama)  repo=ollama/ollama ;;
+            xollama) repo=mann1x/xollama ;;
+            *) echo "::error::unknown server '$SERVER'"; exit 1 ;;
+          esac
+          tested="$(tr -d '[:space:]' < .github/$SERVER-version)"
+          # releases/latest never returns drafts or pre-releases (404 when no stable release exists)
+          latest="$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "$SERVER tested: $tested, latest stable: ${latest:-none}" >> "$GITHUB_STEP_SUMMARY"
+          run=false
+          if [ -n "$latest" ] && [ "$latest" != "$tested" ]; then
+            run=true
+            if gh pr list --state open --head "ci/$SERVER-$latest" --json number --jq '.[0].number' | grep -q .; then
+              echo "Bump PR for $latest already open" >> "$GITHUB_STEP_SUMMARY"; run=false
+            fi
+            if gh issue list --state open --search "\"$SERVER $latest\" in:title" --json number --jq '.[0].number' | grep -q .; then
+              echo "Open issue for $latest exists; not re-testing" >> "$GITHUB_STEP_SUMMARY"; run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: check
+    if: needs.check.outputs.run == 'true'
+    uses: ./.github/workflows/integration.yml
+    with:
+      server: ${{ inputs.server }}
+      version: ${{ needs.check.outputs.latest }}
+
+  report:
+    needs: [check, test]
+    if: always() && needs.check.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SERVER: ${{ inputs.server }}
+      LATEST: ${{ needs.check.outputs.latest }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Open bump PR
+        if: needs.test.result == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "ci/$SERVER-$LATEST"
+          echo "$LATEST" > ".github/$SERVER-version"
+          git commit -am "Test against $SERVER $LATEST"
+          git push -f origin "ci/$SERVER-$LATEST"
+          body="The integration suite passed against $SERVER $LATEST: $RUN_URL"
+          if ! gh pr create --base dev --head "ci/$SERVER-$LATEST" --title "Test against $SERVER $LATEST" --body "$body"; then
+            # Repositories can forbid Actions from creating PRs; fall back to an issue
+            gh issue create --title "$SERVER $LATEST passes: bump .github/$SERVER-version" \
+              --body "$body. Branch ci/$SERVER-$LATEST contains the bump."
+          fi
+
+      - name: Open failure issue
+        if: needs.test.result != 'success'
+        run: |
+          gh issue create --title "$SERVER $LATEST breaks osync integration tests" \
+            --body "The integration suite failed against $SERVER $LATEST (latest stable release). Run: $RUN_URL"

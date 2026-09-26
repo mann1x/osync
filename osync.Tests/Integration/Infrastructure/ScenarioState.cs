@@ -1,0 +1,63 @@
+using System.Text.RegularExpressions;
+
+namespace osync.Tests.Integration.Infrastructure;
+
+/// <summary>
+/// Per-scenario state (injected by Reqnroll). Every model a scenario touches lives under a unique
+/// prefix, so scenarios are independent of each other and of the developer's own models, and cleanup
+/// can remove everything the scenario (or osync) created, even if a step failed halfway.
+/// </summary>
+public sealed class ScenarioState
+{
+    /// <summary>Common prefix of all test model names; stale leftovers are removed at test-run start.</summary>
+    public const string TestModelPrefix = "osync-t-";
+
+    private static readonly string RunId = Guid.NewGuid().ToString("N")[..6];
+    private static int _counter;
+
+    private static readonly Regex Placeholder = new(@"\{([a-z0-9][a-z0-9._-]*)\}", RegexOptions.Compiled);
+
+    public ScenarioState()
+    {
+        Prefix = $"{TestModelPrefix}{RunId}-{Interlocked.Increment(ref _counter):D3}-";
+    }
+
+    /// <summary>Prefix of every model created by this scenario, e.g. osync-t-1a2b3c-007-.</summary>
+    public string Prefix { get; }
+
+    public OsyncResult? LastResult { get; set; }
+
+    /// <summary>Registry models (real names, outside the prefix) this scenario pulled and must remove again.</summary>
+    public List<(string Server, string Model)> ExtraCleanup { get; } = new();
+
+    /// <summary>
+    /// Resolves placeholders in feature text:
+    ///   {local} {remote1} {remote2}      server URL, e.g. http://localhost:11435
+    ///   {remote1.hostport}               server without scheme, e.g. localhost:11435
+    ///   {prefix}                         this scenario's model-name prefix
+    ///   {anything-else}                  a model name unique to this scenario: {prefix}anything-else
+    /// </summary>
+    public string Resolve(string text) => Placeholder.Replace(text, m =>
+    {
+        var key = m.Groups[1].Value;
+        switch (key)
+        {
+            case "local":
+            case "remote1":
+            case "remote2":
+                return TestEnvironment.ServerUrl(key) ?? throw new InvalidOperationException($"Server '{key}' is not configured");
+            case "prefix":
+                return Prefix;
+        }
+        if (key.EndsWith(".hostport", StringComparison.Ordinal))
+        {
+            var url = TestEnvironment.ServerUrl(key[..^".hostport".Length])
+                      ?? throw new InvalidOperationException($"Server '{key}' is not configured");
+            return new Uri(url).Authority;
+        }
+        return Prefix + key;
+    });
+
+    public static OllamaApi Api(string server) =>
+        new(TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured"));
+}
