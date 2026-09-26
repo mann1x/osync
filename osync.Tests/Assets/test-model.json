@@ -2,7 +2,7 @@
   "description": "Base model for integration tests. Stored as an asset of the 'test-assets' pre-release of this repository; the Modelfile next to this file turns it into an Ollama model.",
   "file": "SmolLM2-135M-Instruct-Q4_0.gguf",
   "size": 91893088,
-  "sha256": "",
+  "sha256": "bcc3af2849ad6095af57e9b5cd43775256efdc66e306acb529172f92d0c04b03",
   "releaseTag": "test-assets",
   "upstream": "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_0.gguf",
   "license": "apache-2.0 (HuggingFaceTB/SmolLM2-135M-Instruct)"

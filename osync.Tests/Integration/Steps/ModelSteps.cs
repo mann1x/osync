@@ -1,0 +1,172 @@
+using FluentAssertions;
+using osync.Tests.Integration.Infrastructure;
+using Reqnroll;
+using Reqnroll.UnitTestProvider;
+
+namespace osync.Tests.Integration.Steps;
+
+/// <summary>Arrange and verify model state through the Ollama API. Servers: local, remote1, remote2.</summary>
+[Binding]
+public sealed class ModelSteps
+{
+    private readonly ScenarioState _state;
+    private readonly IUnitTestRuntimeProvider _runtime;
+
+    public ModelSteps(ScenarioState state, IUnitTestRuntimeProvider runtime)
+    {
+        _state = state;
+        _runtime = runtime;
+    }
+
+    [Given("a test model {string} on {word}")]
+    public async Task GivenATestModelOn(string model, string server)
+    {
+        var asset = TestModelAsset.Instance ?? throw new InvalidOperationException(TestModelAsset.UnavailableReason);
+        var name = _state.Resolve(AsPlaceholder(model));
+        await ScenarioState.Api(server).CreateFromTestModelAsync(name, asset);
+    }
+
+    /// <summary>"alpha" -> "{alpha}", "alpha:v1" -> "{alpha}:v1"; text that already has placeholders is kept.</summary>
+    private static string AsPlaceholder(string model)
+    {
+        if (model.Contains('{')) return model;
+        var colon = model.IndexOf(':');
+        return colon < 0 ? $"{{{model}}}" : $"{{{model[..colon]}}}{model[colon..]}";
+    }
+
+    [Given("the registry model {string} on {word}")]
+    public async Task GivenTheRegistryModelOn(string model, string server)
+    {
+        var api = ScenarioState.Api(server);
+        if (!await api.ExistsAsync(model))
+        {
+            // Only remove it again if this scenario pulled it
+            _state.ExtraCleanup.Add((server, model));
+            await api.PullAsync(model);
+        }
+    }
+
+    /// <summary>
+    /// For tests that pull a real registry model: the model must not be present yet (a developer's own copy
+    /// is never deleted; the scenario is skipped instead) and is removed again after the scenario.
+    /// </summary>
+    [Given("the registry model {string} is not yet on {word}")]
+    public async Task GivenTheRegistryModelIsNotYetOn(string model, string server)
+    {
+        if (await ScenarioState.Api(server).ExistsAsync(model))
+            _runtime.TestIgnore($"{model} already exists on {server}; not deleting a model the tests did not create");
+        _state.ExtraCleanup.Add((server, model));
+    }
+
+    [Given("the model {string} is not on {word}")]
+    public async Task GivenTheModelIsNotOn(string model, string server)
+    {
+        var api = ScenarioState.Api(server);
+        var name = _state.Resolve(model);
+        if (await api.ExistsAsync(name))
+        {
+            if (!name.StartsWith(_state.Prefix, StringComparison.Ordinal))
+                throw new InvalidOperationException($"'{name}' exists on {server}; refusing to delete a model this scenario did not create");
+            await api.DeleteAsync(name);
+        }
+    }
+
+    [Given("the model {string} is loaded on {word}")]
+    public async Task GivenTheModelIsLoadedOn(string model, string server) =>
+        await ScenarioState.Api(server).LoadAsync(_state.Resolve(model));
+
+    [Then("the model {string} exists on {word}")]
+    public async Task ThenTheModelExistsOn(string model, string server)
+    {
+        var name = _state.Resolve(model);
+        var models = await ScenarioState.Api(server).ListAsync();
+        models.Select(m => m.Name).Should().Contain(OllamaApi.WithTag(name),
+            "{0} should exist on {1} after:\n{2}", name, server, _state.LastResult);
+    }
+
+    [Then("the model {string} does not exist on {word}")]
+    public async Task ThenTheModelDoesNotExistOn(string model, string server)
+    {
+        var name = _state.Resolve(model);
+        var models = await ScenarioState.Api(server).ListAsync();
+        models.Select(m => m.Name).Should().NotContain(OllamaApi.WithTag(name),
+            "{0} should not exist on {1} after:\n{2}", name, server, _state.LastResult);
+    }
+
+    [Then("no model starting with {string} exists on {word}")]
+    public async Task ThenNoModelStartingWithExistsOn(string prefix, string server)
+    {
+        var resolved = _state.Resolve(prefix);
+        var models = await ScenarioState.Api(server).ListAsync();
+        models.Select(m => m.Name).Where(n => n.StartsWith(resolved, StringComparison.Ordinal))
+            .Should().BeEmpty("after:\n{0}", _state.LastResult);
+    }
+
+    /// <summary>
+    /// A copy must be a complete, usable model: same size, quantization and family, and the same
+    /// template and parameters as the original (manifest digests legitimately differ between copy paths).
+    /// </summary>
+    [Then("the model {string} on {word} is identical to {string} on {word}")]
+    public async Task ThenTheModelIsIdenticalTo(string model, string server, string original, string originalServer)
+    {
+        var copyApi = ScenarioState.Api(server);
+        var origApi = ScenarioState.Api(originalServer);
+        var copyName = _state.Resolve(model);
+        var origName = _state.Resolve(original);
+
+        var copy = await copyApi.FindAsync(copyName);
+        var orig = await origApi.FindAsync(origName);
+        copy.Should().NotBeNull("{0} should exist on {1}", copyName, server);
+        orig.Should().NotBeNull("{0} should exist on {1}", origName, originalServer);
+
+        copy!.Size.Should().Be(orig!.Size, "the copy should contain the same layers");
+        copy.QuantizationLevel.Should().Be(orig.QuantizationLevel);
+        copy.Family.Should().Be(orig.Family);
+
+        var copyShow = await copyApi.ShowAsync(copyName);
+        var origShow = await origApi.ShowAsync(origName);
+        copyShow["template"]?.ToString().Should().Be(origShow["template"]?.ToString(), "the template should be preserved");
+        NormalizeParameters(copyShow["parameters"]?.ToString())
+            .Should().Be(NormalizeParameters(origShow["parameters"]?.ToString()), "the parameters should be preserved");
+    }
+
+    [Then("the model {string} is loaded on {word}")]
+    public async Task ThenTheModelIsLoadedOn(string model, string server)
+    {
+        var name = OllamaApi.WithTag(_state.Resolve(model));
+        var loaded = await WaitForAsync(server, l => l.Contains(name));
+        loaded.Should().Contain(name, "after:\n{0}", _state.LastResult);
+    }
+
+    [Then("the model {string} is not loaded on {word}")]
+    public async Task ThenTheModelIsNotLoadedOn(string model, string server)
+    {
+        var name = OllamaApi.WithTag(_state.Resolve(model));
+        var loaded = await WaitForAsync(server, l => !l.Contains(name));
+        loaded.Should().NotContain(name, "after:\n{0}", _state.LastResult);
+    }
+
+    [Then("no model is loaded on {word}")]
+    public async Task ThenNoModelIsLoadedOn(string server)
+    {
+        var loaded = await WaitForAsync(server, l => l.Count == 0);
+        loaded.Should().BeEmpty("after:\n{0}", _state.LastResult);
+    }
+
+    /// <summary>Unloading is asynchronous in Ollama; poll /api/ps for a short while.</summary>
+    private static async Task<List<string>> WaitForAsync(string server, Func<List<string>, bool> condition)
+    {
+        var api = ScenarioState.Api(server);
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        List<string> loaded;
+        while (!condition(loaded = await api.LoadedAsync()) && DateTime.UtcNow < deadline)
+            await Task.Delay(250);
+        return loaded;
+    }
+
+    private static string NormalizeParameters(string? parameters) =>
+        string.Join("\n", (parameters ?? "")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(l => string.Join(' ', l.Split(' ', StringSplitOptions.RemoveEmptyEntries)))
+            .Order(StringComparer.Ordinal));
+}
