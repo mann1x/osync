@@ -21,7 +21,7 @@ public sealed class OsyncSteps
     [When("I run osync {string}")]
     public async Task WhenIRunOsync(string arguments)
     {
-        var result = await OsyncCli.RunAsync(_state.Resolve(arguments));
+        var result = await OsyncCli.RunAsync(_state.Resolve(arguments), environment: Env());
         _state.LastResult = result;
         _output.WriteLine(result.ToString());
     }
@@ -29,7 +29,7 @@ public sealed class OsyncSteps
     [When("I run osync {string} without host settings")]
     public async Task WhenIRunOsyncWithoutHostSettings(string arguments)
     {
-        var result = await OsyncCli.RunAsync(_state.Resolve(arguments), withHostSettings: false);
+        var result = await OsyncCli.RunAsync(_state.Resolve(arguments), withHostSettings: false, environment: Env());
         _state.LastResult = result;
         _output.WriteLine(result.ToString());
     }
@@ -37,10 +37,23 @@ public sealed class OsyncSteps
     [When("I run osync {string} with {word} set to {string}")]
     public async Task WhenIRunOsyncWithEnvironment(string arguments, string variable, string value)
     {
-        var result = await OsyncCli.RunAsync(_state.Resolve(arguments),
-            environment: new Dictionary<string, string> { [variable] = _state.Resolve(value) });
+        var environment = Env();
+        environment[variable] = _state.Resolve(value);
+        var result = await OsyncCli.RunAsync(_state.Resolve(arguments), environment: environment);
         _state.LastResult = result;
         _output.WriteLine(result.ToString());
+    }
+
+    private Dictionary<string, string> Env() => new() { ["OSYNC_CONFIG_DIR"] = _state.ConfigDir };
+
+    /// <summary>Writes a settings.json whose server entry points at one of the test servers.</summary>
+    [Given("the settings file configures the {word} server")]
+    public void GivenTheSettingsFileConfiguresTheServer(string server)
+    {
+        var url = new Uri(TestEnvironment.ServerUrl(server)!);
+        var flavor = TestEnvironment.IsXOllama(url.ToString().TrimEnd('/')) ? "xollama" : "ollama";
+        File.WriteAllText(Path.Combine(_state.ConfigDir, "settings.json"),
+            $$"""{ "server": { "flavor": "{{flavor}}", "host": "{{url.Host}}", "port": {{url.Port}} } }""");
     }
 
     [Then("the output names the server flavor of {word}")]

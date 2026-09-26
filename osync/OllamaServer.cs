@@ -28,6 +28,16 @@ namespace osync
         private static string? _localUrl;
         private static string? _cliName;
 
+        /// <summary>Forgets the resolved local server and CLI (after the settings changed).</summary>
+        public static void ResetLocal()
+        {
+            lock (LocalLock)
+            {
+                _localUrl = null;
+            }
+            _cliName = null;
+        }
+
         /// <summary>
         /// Server URL for a command: the -d destination when given, otherwise the local server.
         /// </summary>
@@ -37,8 +47,9 @@ namespace osync
                 : OsyncProgram.NormalizeServerUrl(destination);
 
         /// <summary>
-        /// Local server URL: XOLLAMA_HOST, then OLLAMA_HOST, then whichever of localhost:11434 (Ollama)
-        /// or localhost:22434 (xOllama) answers, defaulting to localhost:11434.
+        /// Local server URL: XOLLAMA_HOST, then OLLAMA_HOST, then the server in the settings file (see
+        /// <see cref="OsyncSettings"/>), then whichever of localhost:11434 (Ollama) or localhost:22434 (xOllama)
+        /// answers, defaulting to localhost:11434.
         /// </summary>
         public static string LocalUrl
         {
@@ -60,6 +71,10 @@ namespace osync
             var ollamaHost = Environment.GetEnvironmentVariable("OLLAMA_HOST");
             if (!string.IsNullOrWhiteSpace(ollamaHost))
                 return ToClientUrl(ollamaHost, OllamaDefaultPort);
+
+            var configured = OsyncSettings.Current.ConfiguredServerUrl;
+            if (configured != null)
+                return configured;
 
             var ollamaUrl = $"http://localhost:{OllamaDefaultPort}";
             if (Responds(ollamaUrl)) return ollamaUrl;
@@ -167,8 +182,9 @@ namespace osync
         public static string DisplayName(ServerFlavor flavor) => flavor == ServerFlavor.XOllama ? "xOllama" : "Ollama";
 
         /// <summary>
-        /// CLI binary for local operations: OSYNC_OLLAMA_CLI when set; otherwise "xollama" when the local
-        /// server is xOllama (or only xollama is installed), else "ollama".
+        /// CLI binary for local operations: OSYNC_OLLAMA_CLI when set; otherwise the flavor configured in the
+        /// settings file; otherwise "xollama" when the local server is xOllama (or only xollama is installed),
+        /// else "ollama".
         /// </summary>
         public static string CliName
         {
@@ -179,6 +195,12 @@ namespace osync
                 var configured = Environment.GetEnvironmentVariable("OSYNC_OLLAMA_CLI");
                 if (!string.IsNullOrWhiteSpace(configured))
                     return _cliName = configured.Trim();
+
+                switch (OsyncSettings.Current.ConfiguredFlavor)
+                {
+                    case ServerFlavor.XOllama: return _cliName = "xollama";
+                    case ServerFlavor.Ollama: return _cliName = "ollama";
+                }
 
                 bool hasOllama = IsOnPath("ollama");
                 bool hasXOllama = IsOnPath("xollama");

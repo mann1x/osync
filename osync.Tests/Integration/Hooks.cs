@@ -92,6 +92,8 @@ public sealed class Hooks
     [AfterScenario]
     public async Task Cleanup()
     {
+        try { Directory.Delete(_state.ConfigDir, recursive: true); } catch { /* best effort */ }
+
         foreach (var server in new[] { "local", "remote1", "remote2" })
         {
             var url = TestEnvironment.ServerUrl(server);
