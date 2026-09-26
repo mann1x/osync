@@ -50,6 +50,7 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 | `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
 | `@defaultport` | the local server is on `localhost:11434` (Ollama) or `localhost:22434` (xOllama, with nothing on 11434) — tests osync's own server discovery |
 | `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
+| `@xollamabug` | Documents a bug of the xOllama server itself (not osync); the scenario is skipped when the local server is xOllama. Remove the tag once the pinned xOllama release fixes it. |
 | `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
 
 Other settings: `OSYNC_TEST_MODELS_DIR` (models dir of the local server, passed to osync as `OLLAMA_MODELS`), `OSYNC_TEST_MODEL_GGUF` (test model path), `OSYNC_TEST_OSYNC` (binary under test).

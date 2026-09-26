@@ -9,7 +9,10 @@ Feature: Pull and update models from registries (pull, update)
     Then the command succeeds
     And the model "smollm2:135m" exists on local
 
-  @local
+  # xOllama v0.34.2-xollama.1 (upstream base 0.34.2) only follows same-host redirects, and huggingface.co
+  # now redirects downloads to cdn.hf.co, so every HuggingFace pull fails with "blocked redirect to a
+  # different host". Upstream Ollama (0.34.4) allows redirects within ollama.com / hf.co / huggingface.co.
+  @local @xollamabug
   Scenario: Pull a GGUF from HuggingFace
     Given the registry model "hf.co/bartowski/SmolLM2-135M-Instruct-GGUF:Q2_K" is not yet on local
     When I run osync "pull hf.co/bartowski/SmolLM2-135M-Instruct-GGUF:Q2_K"
