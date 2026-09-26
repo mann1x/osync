@@ -35,7 +35,9 @@ public class OsyncSettingsTests : IDisposable
         loaded.Server.Flavor.Should().Be("xollama");
         loaded.Server.Host.Should().Be("gpu-box");
         loaded.Manage.Theme.Should().Be("Dracula");
-        File.ReadAllText(SettingsPath).Should().Contain("\"flavor\": \"xollama\"");
+        var json = File.ReadAllText(SettingsPath);
+        json.Should().Contain("\"flavor\": \"xollama\"");
+        json.Should().NotContain("configured", "computed properties must not be written");
     }
 
     [Fact]

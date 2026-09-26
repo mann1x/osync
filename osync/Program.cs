@@ -6043,8 +6043,12 @@ namespace osync
                 }
                 else
                 {
-                    // Copy the main executable
-                    string sourceExePath = Path.Combine(currentExeDir, exeName);
+                    // Copy the main executable. Use the running binary itself, which may be renamed
+                    // (e.g. the osync-macos-arm64 release asset); it is always installed as osync / osync.exe.
+                    string? processPath = System.Environment.ProcessPath;
+                    bool runningAsApphost = processPath != null &&
+                        !Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+                    string sourceExePath = runningAsApphost ? processPath! : Path.Combine(currentExeDir, exeName);
                     string targetExePath = Path.Combine(installDir, exeName);
 
                     if (!System.IO.File.Exists(sourceExePath))
@@ -6116,6 +6120,30 @@ namespace osync
             else
             {
                 Console.WriteLine($"✓ {installDir} is already in PATH");
+            }
+
+            // Local server: Ollama or xOllama, host and port (saved in the settings file)
+            Console.WriteLine("");
+            if (System.Console.IsInputRedirected)
+            {
+                Console.WriteLine($"Skipping local server setup (no terminal); edit {OsyncSettings.FilePath} or re-run 'osync install'.");
+            }
+            else
+            {
+                var settings = OsyncSettings.Current;
+                if (ServerSetup.Configure(settings, System.Console.In, System.Console.Out, ServerSetup.ProbeServer))
+                {
+                    try
+                    {
+                        settings.SaveAsCurrent();
+                        OllamaServer.ResetLocal();
+                        Console.WriteLine($"✓ Saved settings to {OsyncSettings.FilePath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: could not save settings to {OsyncSettings.FilePath}: {ex.Message}");
+                    }
+                }
             }
 
             // Check if shell completion is available before asking

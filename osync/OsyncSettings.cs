@@ -134,6 +134,7 @@ namespace osync
         }
 
         /// <summary>Configured server flavor, or null when it should be detected.</summary>
+        [JsonIgnore]
         public ServerFlavor? ConfiguredFlavor => Server.Flavor?.Trim().ToLowerInvariant() switch
         {
             "ollama" => ServerFlavor.Ollama,
@@ -145,6 +146,7 @@ namespace osync
         /// URL of the configured local server, or null when neither a host, a port nor a flavor is configured.
         /// The port defaults to the flavor's default port.
         /// </summary>
+        [JsonIgnore]
         public string? ConfiguredServerUrl
         {
             get
