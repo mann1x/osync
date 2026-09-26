@@ -13,7 +13,8 @@ public class JudgeArgumentParserTests
 
         result.Success.Should().BeTrue();
         result.IsCloud.Should().BeFalse();
-        result.BaseUrl.Should().Be("http://localhost:11434");
+        // The local server as osync resolves it (OLLAMA_HOST, settings file, default ports)
+        result.BaseUrl.Should().Be(OllamaServer.LocalUrl);
         result.ModelName.Should().Be("llama3:latest");
     }
 
