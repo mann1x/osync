@@ -11,7 +11,7 @@ public static class OsyncCli
 
     private static readonly string WorkDir = Directory.CreateTempSubdirectory("osync-tests-").FullName;
 
-    public static async Task<OsyncResult> RunAsync(string arguments, TimeSpan? timeout = null)
+    public static async Task<OsyncResult> RunAsync(string arguments, TimeSpan? timeout = null, bool withHostSettings = true)
     {
         var osync = TestEnvironment.OsyncPath;
         var isDll = osync.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
@@ -30,9 +30,24 @@ public static class OsyncCli
         if (isDll) psi.ArgumentList.Add(osync);
         foreach (var arg in SplitArguments(arguments)) psi.ArgumentList.Add(arg);
 
-        // Local operations of osync (and the ollama CLI it calls) target the test's local server and models dir
-        psi.Environment["OLLAMA_HOST"] = TestEnvironment.LocalUrl;
-        if (TestEnvironment.ModelsDir != null) psi.Environment["OLLAMA_MODELS"] = TestEnvironment.ModelsDir;
+        // Local operations of osync (and the ollama/xollama CLI it calls) target the test's local server and
+        // models dir. Both variable families are set: xOllama reads XOLLAMA_*, which also takes precedence in osync.
+        if (withHostSettings)
+        {
+            psi.Environment["OLLAMA_HOST"] = TestEnvironment.LocalUrl;
+            psi.Environment["XOLLAMA_HOST"] = TestEnvironment.LocalUrl;
+        }
+        else
+        {
+            // Exercise osync's own discovery of the local server on the default ports
+            psi.Environment.Remove("OLLAMA_HOST");
+            psi.Environment.Remove("XOLLAMA_HOST");
+        }
+        if (TestEnvironment.ModelsDir != null)
+        {
+            psi.Environment["OLLAMA_MODELS"] = TestEnvironment.ModelsDir;
+            psi.Environment["XOLLAMA_MODELS"] = TestEnvironment.ModelsDir;
+        }
         psi.Environment["NO_COLOR"] = "1";
 
         var stopwatch = Stopwatch.StartNew();

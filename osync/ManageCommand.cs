@@ -726,7 +726,7 @@ namespace osync
             try
             {
                 string serverUrl = string.IsNullOrEmpty(_destination)
-                    ? "http://localhost:11434"
+                    ? OllamaServer.LocalUrl
                     : _destination;
 
                 using var httpClient = new HttpClient
@@ -830,7 +830,7 @@ namespace osync
             try
             {
                 string serverUrl = string.IsNullOrEmpty(_destination)
-                    ? "http://localhost:11434"
+                    ? OllamaServer.LocalUrl
                     : _destination;
 
                 using var httpClient = new HttpClient
@@ -1737,7 +1737,7 @@ namespace osync
                 try
                 {
                     string serverUrl = string.IsNullOrEmpty(_destination)
-                        ? "http://localhost:11434"
+                        ? OllamaServer.LocalUrl
                         : _destination;
 
                     using var httpClient = new HttpClient
@@ -2148,7 +2148,7 @@ namespace osync
                 try
                 {
                     string serverUrl = string.IsNullOrEmpty(_destination)
-                        ? "http://localhost:11434"
+                        ? OllamaServer.LocalUrl
                         : _destination;
 
                     using var httpClient = new HttpClient
@@ -2276,7 +2276,7 @@ namespace osync
                 try
                 {
                     string serverUrl = string.IsNullOrEmpty(_destination)
-                        ? "http://localhost:11434"
+                        ? OllamaServer.LocalUrl
                         : _destination;
 
                     using var httpClient = new HttpClient
@@ -2611,7 +2611,7 @@ namespace osync
             try
             {
                 string serverUrl = string.IsNullOrEmpty(_destination)
-                    ? "http://localhost:11434"
+                    ? OllamaServer.LocalUrl
                     : _destination;
 
                 using var httpClient = new HttpClient
@@ -2668,7 +2668,7 @@ namespace osync
             try
             {
                 string serverUrl = string.IsNullOrEmpty(_destination)
-                    ? "http://localhost:11434"
+                    ? OllamaServer.LocalUrl
                     : _destination;
 
                 using var httpClient = new HttpClient
@@ -2709,7 +2709,7 @@ namespace osync
             {
                 // Fetch running models directly
                 string serverUrl = string.IsNullOrEmpty(_destination)
-                    ? "http://localhost:11434"
+                    ? OllamaServer.LocalUrl
                     : _destination;
 
                 using var httpClient = new HttpClient

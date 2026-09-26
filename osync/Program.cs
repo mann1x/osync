@@ -212,19 +212,8 @@ namespace osync
                 System.Environment.Exit(1);
             }
 
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-
-            // Normalize URL to add protocol and default port
-            ollamaHost = NormalizeServerUrl(ollamaHost);
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Ensure model has a tag
             var modelName = args.ModelName;
@@ -252,19 +241,8 @@ namespace osync
         [ArgActionMethod, ArgDescription("Show running models and their status")]
         public async Task Ps(PsArgs args)
         {
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-
-            // Normalize URL to add protocol and default port
-            ollamaHost = NormalizeServerUrl(ollamaHost);
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             bool isLocalHost = string.IsNullOrEmpty(args.Destination) ||
                               ollamaHost.Contains("localhost") ||
@@ -290,6 +268,8 @@ namespace osync
 
                 var json = await response.Content.ReadAsStringAsync();
                 var status = JsonSerializer.Deserialize<ProcessStatusResponse>(json);
+
+                Console.WriteLine($"Server: {OllamaServer.DisplayName(OllamaServer.GetFlavor(ollamaHost))} at {ollamaHost}");
 
                 if (status?.Models == null || status.Models.Count == 0)
                 {
@@ -633,6 +613,11 @@ namespace osync
             try
             {
                 var processes = Process.GetProcessesByName("ollama");
+                if (processes.Length == 0)
+                {
+                    // xOllama's server binary
+                    processes = Process.GetProcessesByName("xollama");
+                }
                 if (processes.Length == 0)
                 {
                     // Try alternative names
@@ -1151,20 +1136,8 @@ namespace osync
             }
             else
             {
-                // Get Ollama host from -d argument, environment variable, or default
-                ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                    ? args.Destination
-                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-                {
-                    ollamaHost = "http://localhost:11434";
-                }
-
-                // Normalize URL to add protocol and default port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
+                // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+                ollamaHost = OllamaServer.ResolveHost(args.Destination);
             }
 
             // Ensure model has a tag
@@ -1296,20 +1269,8 @@ namespace osync
             }
             else
             {
-                // Get Ollama host from -d argument, environment variable, or default
-                ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                    ? args.Destination
-                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-                {
-                    ollamaHost = "http://localhost:11434";
-                }
-
-                // Normalize URL to add protocol and default port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
+                // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+                ollamaHost = OllamaServer.ResolveHost(args.Destination);
             }
 
             try
@@ -1457,21 +1418,8 @@ namespace osync
         {
             Init();
 
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-            else
-            {
-                // Normalize URL with default protocol and port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
-            }
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Validate server URL if it's not localhost
             if (!ollamaHost.Contains("localhost") && !ollamaHost.Contains("127.0.0.1"))
@@ -1502,22 +1450,8 @@ namespace osync
         {
             Init();
 
-            // Get Ollama host from argument, environment variable, or default
-            var ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                ? args.Destination
-                : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-            else
-            {
-                // Normalize URL with default protocol and port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
-            }
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Validate server URL if it's not localhost (skip for special flags)
             if (!args.HelpCloud && !args.ShowTools && !args.GenerateSuite)
@@ -2793,7 +2727,8 @@ namespace osync
 
             // Check if destination already exists
             var checkProcess = new Process();
-            checkProcess.StartInfo.FileName = "ollama";
+            checkProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(checkProcess.StartInfo);
             checkProcess.StartInfo.Arguments = "list";
             checkProcess.StartInfo.CreateNoWindow = true;
             checkProcess.StartInfo.UseShellExecute = false;
@@ -2828,7 +2763,8 @@ namespace osync
 
             // Copy using ollama cp
             var copyProcess = new Process();
-            copyProcess.StartInfo.FileName = "ollama";
+            copyProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(copyProcess.StartInfo);
             copyProcess.StartInfo.Arguments = $"cp {sourceModel} {destModel}";
             copyProcess.StartInfo.CreateNoWindow = true;
             copyProcess.StartInfo.UseShellExecute = false;
@@ -2961,7 +2897,8 @@ namespace osync
             bool inTemplate = false;
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = @" show " + Source + " --modelfile";
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;
@@ -3403,26 +3340,8 @@ namespace osync
         /// </summary>
         private async Task CreateLocalModelFromBlobs(string modelName, Dictionary<string, string> files, string? template, string? system, Dictionary<string, object>? parameters)
         {
-            // Create model using ollama create API - use local Ollama URL
-            string localOllamaUrl = System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // Handle bind-all addresses (0.0.0.0 or ::0) - convert to localhost for client connections
-            if (localOllamaUrl.Contains("0.0.0.0") || localOllamaUrl.Contains("::0") || localOllamaUrl.Contains("[::]"))
-            {
-                localOllamaUrl = localOllamaUrl.Replace("0.0.0.0", "localhost").Replace("::0", "localhost").Replace("[::]", "localhost");
-            }
-
-            if (!localOllamaUrl.StartsWith("http"))
-            {
-                localOllamaUrl = "http://" + localOllamaUrl;
-            }
-
-            // Ensure port is present (default Ollama port is 11434)
-            if (!localOllamaUrl.Contains(":11434") && !localOllamaUrl.Contains(":80") && !System.Text.RegularExpressions.Regex.IsMatch(localOllamaUrl, @":\d{2,5}$"))
-            {
-                localOllamaUrl = localOllamaUrl.TrimEnd('/') + ":11434";
-            }
+            // Create model using the create API of the local server
+            string localOllamaUrl = OllamaServer.LocalUrl;
 
             // Build request using same format as RunCreateModel (model + files dictionary)
             var modelCreate = new Dictionary<string, object>
@@ -4780,7 +4699,8 @@ namespace osync
                 {
                     // Use ollama rm command to properly remove the model
                     var p = new Process();
-                    p.StartInfo.FileName = "ollama";
+                    p.StartInfo.FileName = OllamaServer.CliName;
+                    OllamaServer.ApplyCliEnvironment(p.StartInfo);
                     p.StartInfo.Arguments = $"rm {modelName}";
                     p.StartInfo.CreateNoWindow = true;
                     p.StartInfo.UseShellExecute = false;
@@ -4927,7 +4847,8 @@ namespace osync
 
             // Check if destination already exists
             var checkProcess = new Process();
-            checkProcess.StartInfo.FileName = "ollama";
+            checkProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(checkProcess.StartInfo);
             checkProcess.StartInfo.Arguments = "list";
             checkProcess.StartInfo.CreateNoWindow = true;
             checkProcess.StartInfo.UseShellExecute = false;
@@ -4957,7 +4878,8 @@ namespace osync
             // Step 1: Copy the model using ollama cp
             Console.WriteLine($"Step 1/3: Copying '{sourceModel}' to '{targetModel}'...");
             var copyProcess = new Process();
-            copyProcess.StartInfo.FileName = "ollama";
+            copyProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(copyProcess.StartInfo);
             copyProcess.StartInfo.Arguments = $"cp {sourceModel} {targetModel}";
             copyProcess.StartInfo.CreateNoWindow = true;
             copyProcess.StartInfo.UseShellExecute = false;
@@ -4987,7 +4909,8 @@ namespace osync
             // Step 2: Verify the new model exists
             Console.WriteLine($"Step 2/3: Verifying '{targetModel}' exists...");
             var listProcess = new Process();
-            listProcess.StartInfo.FileName = "ollama";
+            listProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(listProcess.StartInfo);
             listProcess.StartInfo.Arguments = "list";
             listProcess.StartInfo.CreateNoWindow = true;
             listProcess.StartInfo.UseShellExecute = false;
@@ -5021,7 +4944,8 @@ namespace osync
             // Step 3: Delete the original model
             Console.WriteLine($"Step 3/3: Deleting original '{sourceModel}'...");
             var deleteProcess = new Process();
-            deleteProcess.StartInfo.FileName = "ollama";
+            deleteProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(deleteProcess.StartInfo);
             deleteProcess.StartInfo.Arguments = $"rm {sourceModel}";
             deleteProcess.StartInfo.CreateNoWindow = true;
             deleteProcess.StartInfo.UseShellExecute = false;
@@ -5329,7 +5253,8 @@ namespace osync
             Console.WriteLine($"Pulling '{modelName}' locally...\n");
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = $"pull {modelName}";
             p.StartInfo.CreateNoWindow = false;
             p.StartInfo.UseShellExecute = false;
@@ -5522,7 +5447,8 @@ namespace osync
             if (verbose) args.Add("--verbose");
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = string.Join(" ", args);
             p.StartInfo.CreateNoWindow = false;
             p.StartInfo.UseShellExecute = false;
@@ -5716,7 +5642,8 @@ namespace osync
                 Console.WriteLine($"Updating '{modelName}'...");
 
                 var p = new Process();
-                p.StartInfo.FileName = "ollama";
+                p.StartInfo.FileName = OllamaServer.CliName;
+                OllamaServer.ApplyCliEnvironment(p.StartInfo);
                 p.StartInfo.Arguments = $"pull {modelName}";
                 p.StartInfo.CreateNoWindow = true;
                 p.StartInfo.UseShellExecute = false;
@@ -5947,18 +5874,11 @@ namespace osync
             // Clear any tab completion options from the screen
             LocalModelsTabCompletionSource.ClearPreviousOptions();
 
-            var env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS");
-            if (env_models != null && env_models.Length > 0)
+            // XOLLAMA_MODELS (xOllama) or OLLAMA_MODELS, process then user scope
+            var env_models = OllamaServer.ModelsDirFromEnvironment();
+            if (!string.IsNullOrEmpty(env_models))
             {
                 ollama_models = env_models;
-            }
-            if (env_models == null || env_models.Length < 1)
-            {
-                env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
-                if (env_models != null && env_models.Length > 0)
-                {
-                    ollama_models = env_models;
-                }
             }
             if (ollama_models.Length < 1)
             {
@@ -7545,7 +7465,8 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             string model_re = "^(?<modelname>\\S*).*";
             var Modelsbuild = new StringBuilder();
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = @" ls";
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;

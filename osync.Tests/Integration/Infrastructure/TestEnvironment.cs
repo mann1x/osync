@@ -14,6 +14,7 @@ namespace osync.Tests.Integration.Infrastructure;
 ///   OSYNC_TEST_REGISTRY     "1" enables tests that download from registry.ollama.ai / huggingface.co
 ///   OSYNC_TEST_EXCLUSIVE    "1" declares the remote servers dedicated to tests (enables e.g. "unload all")
 ///   OSYNC_TEST_OSYNC        osync executable or dll to test (default: osync.dll built next to the tests)
+/// The local server may be Ollama or xOllama; osync picks the matching CLI (ollama / xollama) itself.
 /// </summary>
 public static class TestEnvironment
 {
@@ -66,28 +67,56 @@ public static class TestEnvironment
 
     private static bool? _cliAvailable;
 
-    /// <summary>Whether the ollama CLI is on PATH (osync shells out to it for local operations).</summary>
+    /// <summary>Whether an ollama or xollama CLI is on PATH (osync shells out to it for local operations).</summary>
     public static bool OllamaCliAvailable
     {
         get
         {
-            if (_cliAvailable.HasValue) return _cliAvailable.Value;
+            _cliAvailable ??= CanRun(Env("OSYNC_OLLAMA_CLI") ?? "ollama") || CanRun("xollama");
+            return _cliAvailable.Value;
+        }
+    }
+
+    private static bool CanRun(string executable)
+    {
+        try
+        {
+            using var p = Process.Start(new ProcessStartInfo(executable, "--version")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            })!;
+            p.WaitForExit(10000);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static readonly Dictionary<string, bool> _isXOllama = new();
+
+    /// <summary>Whether the server at <paramref name="url"/> is xOllama (answers GET /api/xollama).</summary>
+    public static bool IsXOllama(string url)
+    {
+        lock (_isXOllama)
+        {
+            if (_isXOllama.TryGetValue(url, out var cached)) return cached;
+            bool result;
             try
             {
-                using var p = Process.Start(new ProcessStartInfo("ollama", "--version")
-                {
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false
-                })!;
-                p.WaitForExit(10000);
-                _cliAvailable = true;
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+                var response = http.GetAsync($"{url}/api/xollama").GetAwaiter().GetResult();
+                result = response.IsSuccessStatusCode &&
+                         response.Content.ReadAsStringAsync().GetAwaiter().GetResult().Contains("\"xollama\":true");
             }
             catch
             {
-                _cliAvailable = false;
+                result = false;
             }
-            return _cliAvailable.Value;
+            return _isXOllama[url] = result;
         }
     }
 

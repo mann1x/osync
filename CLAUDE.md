@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-osync is a CLI tool for managing Ollama models across local and remote servers. Written in C# targeting .NET 10 (`net10.0`, cross-platform: builds and runs on Windows, Linux and macOS). Windows-only APIs (WMI, NvAPI, D3DKMT) must stay behind `OperatingSystem.IsWindows()` guards.
+osync is a CLI tool for managing Ollama models across local and remote servers (Ollama and the xOllama fork, github.com/mann1x/xollama). Written in C# targeting .NET 10 (`net10.0`, cross-platform: builds and runs on Windows, Linux and macOS). Windows-only APIs (WMI, NvAPI, D3DKMT) must stay behind `OperatingSystem.IsWindows()` guards.
 
 ## Build Commands
 
@@ -138,9 +138,18 @@ Commands that support remote servers (copy, bench, qc) use flexible URL parsing 
 - `@openai/model-name` - Uses OPENAI_API_KEY env var
 - `@gemini/model-name` - Uses GEMINI_API_KEY env var
 - `@provider:explicit-token/model` - Explicit token in command
-- Local Ollama: `model-name` (no @ prefix) - Uses localhost:11434 regardless of `-d` setting
+- Local Ollama: `model-name` (no @ prefix) - Uses the local server (see below) regardless of `-d` setting
 
-**Important:** The `-d` destination flag only affects test models. Judge models always use localhost unless explicitly specified with a remote URL (e.g., `192.168.1.100:11434/model`) or cloud provider prefix (`@provider/model`).
+**Important:** The `-d` destination flag only affects test models. Judge models always use the local server unless explicitly specified with a remote URL (e.g., `192.168.1.100:11434/model`) or cloud provider prefix (`@provider/model`).
+
+### Local server resolution (Ollama and xOllama)
+
+Always use `OllamaServer` (OllamaServer.cs) — never hardcode `localhost:11434`, read `OLLAMA_HOST` directly, or spawn `ollama`:
+- `OllamaServer.ResolveHost(destination)` / `OllamaServer.LocalUrl`: `-d`, else `XOLLAMA_HOST`, `OLLAMA_HOST`, then probe localhost:11434 (Ollama) and localhost:22434 (xOllama)
+- `OllamaServer.GetFlavor(url)`: Ollama vs xOllama (xOllama answers `GET /api/xollama`)
+- `OllamaServer.CliName` + `OllamaServer.ApplyCliEnvironment(startInfo)` for CLI shell-outs (`ollama` or `xollama`, `OSYNC_OLLAMA_CLI` override)
+- `OllamaServer.ModelsDirFromEnvironment()`: `XOLLAMA_MODELS`, then `OLLAMA_MODELS`
+- xOllama-only API features (`/api/tokenize`, numeric/extended `think` budgets) must be gated on `GetFlavor(url) == ServerFlavor.XOllama`
 
 ### MCP Server Notes
 

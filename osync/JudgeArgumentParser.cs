@@ -93,7 +93,8 @@ namespace osync
                 }
             }
 
-            var baseUrl = serverPart ?? "http://localhost:11434";
+            // Judges without a server use the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost), never -d
+            var baseUrl = serverPart ?? OllamaServer.LocalUrl;
             if (!modelPart.Contains(':'))
             {
                 modelPart += ":latest";
