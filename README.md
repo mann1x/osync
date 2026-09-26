@@ -86,7 +86,34 @@ Commands without `-d` work on the local server, found in this order:
 
 osync detects whether a server is Ollama or xOllama (`osync ps` shows it) and, for local operations, runs the matching CLI: `xollama` when the local server is xOllama (or only `xollama` is installed), else `ollama`. Set `OSYNC_OLLAMA_CLI` to force a specific CLI. The models directory is taken from `XOLLAMA_MODELS`, then `OLLAMA_MODELS`, then the platform default.
 
-Remote servers given without a port default to `:11434`; for an xOllama server add its port, e.g. `osync ls -d myserver:22434`.
+Remote servers given without a port use `:11434`, or `:22434` when the host only answers there (xOllama).
+
+### Preferences file
+
+osync keeps user preferences in `settings.json` in the per-OS configuration folder (`osync -v --verbose` shows the path):
+
+| OS | Location |
+|---|---|
+| Windows | `%APPDATA%\osync\settings.json` |
+| macOS | `~/Library/Application Support/osync/settings.json` |
+| Linux | `$XDG_CONFIG_HOME/osync/settings.json` (default `~/.config/osync/settings.json`) |
+
+```json
+{
+  "server": { "flavor": "xollama", "host": "localhost", "port": 22434 },
+  "colorMode": "auto",
+  "manage": { "theme": "Dracula" }
+}
+```
+
+- `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port). `osync install` asks for these; `XOLLAMA_HOST` / `OLLAMA_HOST` override them.
+- `colorMode` - `auto` (detect), `truecolor`, `256`, `16` or `none`; `OSYNC_COLOR_MODE` and `NO_COLOR` override it.
+- `manage.theme` - the last theme used in `osync manage`.
+- `OSYNC_CONFIG_DIR` moves the settings folder.
+
+### Colors
+
+osync detects the terminal's color depth from `COLORTERM` (`truecolor`/`24bit`), `TERM` (`*-256color`, `*-direct`), `TERM_PROGRAM` and Windows Terminal, and uses true color, 256 or 16 colors accordingly (`osync -v --verbose` shows what was detected and why). SSH does not forward `COLORTERM` by default, so terminals that support true color are seen as 256-color over SSH/tmux: set `"colorMode": "truecolor"` in the settings file, or `OSYNC_COLOR_MODE=truecolor`, or forward `COLORTERM` (`SendEnv COLORTERM` / `AcceptEnv COLORTERM`). `NO_COLOR` disables colors.
 
 ## Usage
 
@@ -1403,6 +1430,9 @@ v1.3.1
 - **Fixed `rm` and `update` exiting with code 0** when no model matches, or when deleting/updating a model failed (`update` of all models on an empty server is still a success)
 - **Fixed server URLs without a port using port 80 when the model has a tag** (e.g. `osync cp http://server/qwen3:4b ...`): the `:` of the tag was taken for a port. A server given without a port now uses 11434, or 22434 when the host refuses 11434 but accepts 22434 (xOllama)
 - **Fixed `manage` showing `unknown` quantization (and no parameters/family)** when the local models directory and the resolved local server did not match (e.g. Ollama and xOllama both installed): local models are now listed through the local server's API, so the list and its details always come from the same server, and startup no longer makes one `/api/show` call per model. The top bar shows which server is used (`Ollama @ localhost:11434`); the models directory is only read when the server is unreachable, which the top bar says
+- **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), color mode, `manage` theme
+- **`osync install` asks for the local server** (Ollama or xOllama, host, port), with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
+- **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
 - **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
 - **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS
 - **Fixed bandwidth throttling (`-bt`)** not limiting short bursts, counting requested instead of read bytes, and misbehaving after ~25 days of uptime

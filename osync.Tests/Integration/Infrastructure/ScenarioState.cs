@@ -27,6 +27,14 @@ public sealed class ScenarioState
 
     public OsyncResult? LastResult { get; set; }
 
+    private string? _configDir;
+
+    /// <summary>
+    /// Settings directory (OSYNC_CONFIG_DIR) for every osync run of this scenario: empty unless the scenario
+    /// writes a settings file, so the developer's own preferences never influence the tests.
+    /// </summary>
+    public string ConfigDir => _configDir ??= Directory.CreateTempSubdirectory("osync-test-config-").FullName;
+
     /// <summary>Registry models (real names, outside the prefix) this scenario pulled and must remove again.</summary>
     public List<(string Server, string Model)> ExtraCleanup { get; } = new();
 

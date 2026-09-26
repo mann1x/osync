@@ -22,3 +22,15 @@ Feature: Server discovery (Ollama and xOllama)
     Then the command succeeds
     And the output names the server flavor of local
     And the output contains "{found}:latest"
+
+  # remote1 (e.g. :11435) is never found by probing the default ports, so this only passes if the
+  # server configured in settings.json is used.
+  @remote1
+  Scenario: The local server comes from the settings file when no host variable is set
+    Given a test model "configured" on remote1
+    And the model "{configured}" is loaded on remote1
+    And the settings file configures the remote1 server
+    When I run osync "ps" without host settings
+    Then the command succeeds
+    And the output names the server flavor of remote1
+    And the output contains "{configured}:latest"
