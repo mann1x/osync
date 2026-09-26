@@ -100,6 +100,8 @@ Publishing is automatic and gated on all CI jobs (build + unit on three OSes, in
 
 Assets: `osync.exe` (Windows x64), `osync` (Linux x64), `osync-macos-arm64`, `osync-macos-x64` (built on macOS so they are ad-hoc signed). Release notes are the `v<AppVersion>` section of the README changelog.
 
+Releases (not dev pre-releases) are announced on Discord through the webhook URL stored in the repository secret `TECH_CORNER_DISCOWH` (an embed with the release notes and a link to the release). A missing secret or a Discord error is reported as a warning and never fails the release.
+
 Release steps:
 1. On `dev`: all PRs for the release merged, CI green, a dev pre-release exists.
 2. Owner bumps `AppVersion` in `osync/Program.cs` and completes the `v<AppVersion>` changelog section in README.md (PR into `dev`).
