@@ -35,11 +35,18 @@ Feature: Remove models (rm, delete, del)
     And the model "{tagged}:v1" does not exist on local
     And the model "{tagged}:v2" exists on local
 
-  # rm prints "No models found matching pattern" and exits 0.
-  @local @knownbug
+  @local
   Scenario: Removing a missing model fails
     When I run osync "rm {missing}"
     Then the command fails
+    And the output contains "No models found matching pattern"
+
+  @remote1
+  Scenario: Removing a missing model on a remote server fails
+    Given a test model "bystander" on remote1
+    When I run osync "rm {missing} -d {remote1}"
+    Then the command fails
+    And the model "{bystander}" exists on remote1
 
   @remote1
   Scenario: Remove a model on a remote server

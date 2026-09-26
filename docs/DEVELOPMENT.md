@@ -114,5 +114,5 @@ Release steps:
 
 ## Roadmap items decided during the audit
 
-- **Push-relay copy** for remote→remote and remote→local: osync runs a temporary registry endpoint, the source server `/api/push`es to it, osync streams each blob into the destination's `/api/blobs`, and the destination pulls the manifest. Copies any model (including created/imported ones) with its complete manifest. The `@knownbug` copy scenarios become regular scenarios.
+- ~~Push-relay copy~~ — done: `RegistryRelay.cs` / `RelayCopy.cs`.
 - **xOllama features**: use `/api/tokenize` for exact token counts in bench/qc, numeric/extended thinking budgets in chat/bench/qc, engine info from `/api/engine` in ps/psmonitor (gated on server flavor).

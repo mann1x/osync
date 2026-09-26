@@ -11,7 +11,8 @@ public static class OsyncCli
 
     private static readonly string WorkDir = Directory.CreateTempSubdirectory("osync-tests-").FullName;
 
-    public static async Task<OsyncResult> RunAsync(string arguments, TimeSpan? timeout = null, bool withHostSettings = true)
+    public static async Task<OsyncResult> RunAsync(string arguments, TimeSpan? timeout = null, bool withHostSettings = true,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var osync = TestEnvironment.OsyncPath;
         var isDll = osync.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
@@ -49,6 +50,9 @@ public static class OsyncCli
             psi.Environment["XOLLAMA_MODELS"] = TestEnvironment.ModelsDir;
         }
         psi.Environment["NO_COLOR"] = "1";
+        if (environment != null)
+            foreach (var (name, value) in environment)
+                psi.Environment[name] = value;
 
         var stopwatch = Stopwatch.StartNew();
         using var process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start osync");

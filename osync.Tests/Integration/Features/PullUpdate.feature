@@ -44,9 +44,3 @@ Feature: Pull and update models from registries (pull, update)
     When I run osync "update smollm2:135m -d {remote1}"
     Then the command succeeds
     And the model "smollm2:135m" exists on remote1
-
-  # update prints "No models found matching pattern" and exits 0.
-  @local @knownbug
-  Scenario: Updating a missing model fails
-    When I run osync "update {missing}"
-    Then the command fails

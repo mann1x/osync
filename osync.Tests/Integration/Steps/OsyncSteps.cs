@@ -34,6 +34,15 @@ public sealed class OsyncSteps
         _output.WriteLine(result.ToString());
     }
 
+    [When("I run osync {string} with {word} set to {string}")]
+    public async Task WhenIRunOsyncWithEnvironment(string arguments, string variable, string value)
+    {
+        var result = await OsyncCli.RunAsync(_state.Resolve(arguments),
+            environment: new Dictionary<string, string> { [variable] = _state.Resolve(value) });
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
     [Then("the output names the server flavor of {word}")]
     public void ThenTheOutputNamesTheServerFlavorOf(string server)
     {

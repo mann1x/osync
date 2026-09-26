@@ -29,7 +29,7 @@ dotnet test                     # All tests (integration tests need a running Ol
 
 The application uses PowerArgs for CLI parsing. All commands are defined as action methods in `OsyncProgram` class (Program.cs) with corresponding `*Args` classes in CommandArguments.cs:
 
-- **Copy (cp)** - Model transfers with bandwidth throttling support, memory-buffered streaming for remote transfers
+- **Copy (cp)** - Model transfers with bandwidth throttling support. Local→remote uploads blobs from the local models dir; remote→remote and remote→local use the push relay (`RelayCopy.cs` + `RegistryRelay.cs`: the source server `/api/push`es to a temporary registry endpoint run by osync, which streams blobs into the destination's `/api/blobs`, then the destination `/api/pull`s the manifest); fallback to registry.ollama.ai downloads only when the source cannot reach the relay
 - **List (ls)** - Pattern matching with wildcards, multiple sort modes
 - **Remove (rm/delete/del)** - Pattern-based deletion
 - **Rename (mv/ren)** - Safe rename via copy → verify → delete workflow

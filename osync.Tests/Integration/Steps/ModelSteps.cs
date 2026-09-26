@@ -93,6 +93,15 @@ public sealed class ModelSteps
             "{0} should not exist on {1} after:\n{2}", name, server, _state.LastResult);
     }
 
+    /// <summary>The push relay uses temporary names like 10.0.0.5:45123/osync/relay-1a2b3c4d:latest.</summary>
+    [Then("no relay model exists on {word}")]
+    public async Task ThenNoRelayModelExistsOn(string server)
+    {
+        var models = await ScenarioState.Api(server).ListAsync();
+        models.Select(m => m.Name).Where(n => n.Contains("/osync/relay-", StringComparison.Ordinal))
+            .Should().BeEmpty("temporary relay models must be deleted after:\n{0}", _state.LastResult);
+    }
+
     [Then("no model starting with {string} exists on {word}")]
     public async Task ThenNoModelStartingWithExistsOn(string prefix, string server)
     {

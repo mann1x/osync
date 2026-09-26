@@ -59,22 +59,63 @@ Feature: Copy models (cp)
     Then the command succeeds
     And the model "{dst}" on remote1 is identical to "{src}" on local
 
-  # Remote copies download the blobs from registry.ollama.ai instead of the source server,
-  # so models that only exist on the source server (created, imported) cannot be copied.
-  # Fix planned: push-relay copy (see docs/DEVELOPMENT.md roadmap).
-  @remote1 @local @knownbug
+  # Remote-to-local and remote-to-remote copies go through osync's push relay: the source server pushes
+  # the model to a temporary registry endpoint run by osync, which streams every blob into the destination.
+  # This works for any model on the source, including created/imported ones that are not in any registry.
+  @remote1 @local
   Scenario: Download a model from a remote server to local
     Given a test model "src" on remote1
     When I run osync "cp {remote1}/{src} {dst}"
     Then the command succeeds
     And the model "{dst}" on local is identical to "{src}" on remote1
 
-  @remote1 @remote2 @knownbug
+  @remote1 @remote2
   Scenario: Copy a model between two remote servers
     Given a test model "src" on remote1
     When I run osync "cp {remote1}/{src} {remote2}/{dst}"
     Then the command succeeds
     And the model "{dst}" on remote2 is identical to "{src}" on remote1
+
+  @remote1 @remote2
+  Scenario: Copy between remote servers keeps the model name when none is given
+    Given a test model "src" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}"
+    Then the command succeeds
+    And the model "{src}" on remote2 is identical to "{src}" on remote1
+
+  @remote1 @remote2
+  Scenario: Copy between remote servers skips layers the destination already has
+    Given a test model "src" on remote1
+    And a test model "existing" on remote2
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}"
+    Then the command succeeds
+    And the output contains "already present on the destination"
+    And the model "{dst}" on remote2 is identical to "{src}" on remote1
+
+  # Fallback used when the destination cannot connect to the relay: the blobs are already on the
+  # destination and the model is recreated with /api/create (template, parameters, license from the source).
+  @remote1 @remote2
+  Scenario: Copy between remote servers recreates the model when the manifest cannot be installed
+    Given a test model "src" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    And the output contains "Recreating the model from its files"
+    And the model "{dst}" on remote2 is identical to "{src}" on remote1
+    And no relay model exists on remote2
+
+  @remote1 @remote2
+  Scenario: Copying a missing remote model fails and creates nothing
+    When I run osync "cp {remote1}/{missing} {remote2}/{dst}"
+    Then the command fails
+    And the model "{dst}" does not exist on remote2
+
+  @remote1 @remote2
+  Scenario: The relay leaves no temporary models behind
+    Given a test model "src" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}"
+    Then the command succeeds
+    And no relay model exists on remote1
+    And no relay model exists on remote2
 
   @remote1 @remote2 @registry
   Scenario: Copy a registry model between two remote servers

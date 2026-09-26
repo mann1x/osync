@@ -18,6 +18,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="osync.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Anthropic" Version="12.1.0" />
     <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
     <PackageReference Include="ByteSize" Version="2.1.2" />
