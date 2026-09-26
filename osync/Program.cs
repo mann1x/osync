@@ -2672,8 +2672,16 @@ namespace osync
 
                 if (!Directory.Exists(ollama_models))
                 {
-                    Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
+                    // The models directory is not readable from here (e.g. the server runs as the ollama service
+                    // user): copy through the local server with the push relay instead of reading blobs from disk
+                    var localServer = OllamaServer.LocalUrl;
+                    Console.WriteLine($"Local models directory not found at {ollama_models}: copying through the local server {localServer}.");
+                    Console.WriteLine($"Copying '{Source}' from {localServer} to '{destModel}' on {destServer}...");
+                    if (!CopyBetweenServers(localServer, Source, destServer, destModel, BufferSize))
+                    {
+                        ActionCopyRemoteToRemoteStreaming(localServer, Source, destServer, destModel, BufferSize).GetAwaiter().GetResult();
+                    }
+                    return;
                 }
 
                 if (!ValidateServerUrl(destServer))

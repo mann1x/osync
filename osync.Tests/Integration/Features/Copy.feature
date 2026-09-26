@@ -68,6 +68,16 @@ Feature: Copy models (cp)
     Then the command succeeds
     And the model "{dst}" on remote1 is identical to "{src}" on local
 
+  # When the local models directory cannot be read (e.g. the server runs as the ollama service user), the
+  # upload goes through the local server with the push relay instead of reading the blobs from disk.
+  @local @remote1
+  Scenario: Upload through the local server when the local models directory is not readable
+    Given a test model "src" on local
+    When I run osync "cp {src} {remote1}/{dst}" without access to the local models directory
+    Then the command succeeds
+    And the output contains "copying through the local server"
+    And the model "{dst}" on remote1 is identical to "{src}" on local
+
   # Remote-to-local and remote-to-remote copies go through osync's push relay: the source server pushes
   # the model to a temporary registry endpoint run by osync, which streams every blob into the destination.
   # This works for any model on the source, including created/imported ones that are not in any registry.

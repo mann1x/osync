@@ -44,6 +44,18 @@ public sealed class OsyncSteps
         _output.WriteLine(result.ToString());
     }
 
+    [When("I run osync {string} without access to the local models directory")]
+    public async Task WhenIRunOsyncWithoutModelsDirectory(string arguments)
+    {
+        var environment = Env();
+        var missing = Path.Combine(_state.ConfigDir, "no-such-models-dir");
+        environment["OLLAMA_MODELS"] = missing;
+        environment["XOLLAMA_MODELS"] = missing;
+        var result = await OsyncCli.RunAsync(_state.Resolve(arguments), environment: environment);
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
     private Dictionary<string, string> Env() => new() { ["OSYNC_CONFIG_DIR"] = _state.ConfigDir };
 
     /// <summary>Writes a settings.json whose server entry points at one of the test servers.</summary>

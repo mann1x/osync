@@ -1433,6 +1433,7 @@ v1.3.1
 - **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), color mode, `manage` theme
 - **`osync install` asks for the local server** (Ollama or xOllama, host, port), with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
 - **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
+- **Fixed copy to a remote server failing when the local models directory is not readable** (e.g. the server runs as the `ollama` service user): the upload now goes through the local server with the push relay
 - **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
 - **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS
 - **Fixed bandwidth throttling (`-bt`)** not limiting short bursts, counting requested instead of read bytes, and misbehaving after ~25 days of uptime
