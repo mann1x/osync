@@ -100,26 +100,22 @@ namespace osync
 
         public static string GetBuildVersion()
         {
-            // Get build timestamp from executable file
-            // Use AppContext.BaseDirectory for single-file apps (Assembly.Location returns empty string)
+            // Build timestamp (UTC) embedded at compile time (see OsyncBuildTimestamp in osync.csproj).
+            // It no longer depends on the executable's file name or modification time, which broke for
+            // renamed binaries (osync-macos-arm64) and showed the download time instead of the build time.
             try
             {
-                string exePath = Path.Combine(AppContext.BaseDirectory,
-                    OperatingSystem.IsWindows() ? "osync.exe" : "osync");
-                if (System.IO.File.Exists(exePath))
-                {
-                    var fileInfo = new FileInfo(exePath);
-                    var buildTime = fileInfo.LastWriteTime;
-                    return $"b{buildTime:yyyyMMdd-HHmm}";
-                }
-                // Fallback: try to get from any dll in the directory
-                var dllPath = Path.Combine(AppContext.BaseDirectory, "osync.dll");
-                if (System.IO.File.Exists(dllPath))
-                {
-                    var fileInfo = new FileInfo(dllPath);
-                    var buildTime = fileInfo.LastWriteTime;
-                    return $"b{buildTime:yyyyMMdd-HHmm}";
-                }
+                var stamp = typeof(OsyncProgram).Assembly
+                    .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                    .OfType<System.Reflection.AssemblyMetadataAttribute>()
+                    .FirstOrDefault(a => a.Key == "BuildTimestamp")?.Value;
+                if (!string.IsNullOrEmpty(stamp))
+                    return $"b{stamp}";
+
+                // Builds without the embedded stamp: modification time of the running executable
+                var exePath = System.Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+                    return $"b{new FileInfo(exePath).LastWriteTimeUtc:yyyyMMdd-HHmm}";
                 return "b00000000-0000";
             }
             catch
@@ -2101,23 +2097,23 @@ namespace osync
             {
                 var uri = new Uri(url);
 
-                // Add default port 11434 if no port is specified (port will be -1 or 80/443 for default)
-                if (uri.Port == -1 || uri.Port == 80 || uri.Port == 443)
-                {
-                    // Check if original URL explicitly had a port
-                    var hostPart = serverUrl;
-                    if (hostPart.Contains("://"))
-                        hostPart = hostPart.Substring(hostPart.IndexOf("://") + 3);
+                // Only the authority (before the first '/') can carry a port: a ':' in the path is a model tag
+                // (http://server/qwen3:4b), which must not be mistaken for an explicit port (that made Uri use 80).
+                var afterScheme = url.Substring(url.IndexOf("://", StringComparison.Ordinal) + 3);
+                var slash = afterScheme.IndexOf('/');
+                var authority = slash >= 0 ? afterScheme.Substring(0, slash) : afterScheme;
+                bool hasExplicitPort = authority.StartsWith("[")
+                    ? System.Text.RegularExpressions.Regex.IsMatch(authority, @"\]:\d+$")
+                    : System.Text.RegularExpressions.Regex.IsMatch(authority, @":\d+$");
 
-                    // If no explicit port in the original, add default
-                    if (!hostPart.Contains(":") || hostPart.EndsWith(":"))
+                if (!hasExplicitPort)
+                {
+                    // No port given: Ollama's 11434, or xOllama's 22434 when only that one answers
+                    var builder = new UriBuilder(uri)
                     {
-                        var builder = new UriBuilder(uri)
-                        {
-                            Port = 11434
-                        };
-                        url = builder.ToString().TrimEnd('/');
-                    }
+                        Port = OllamaServer.DefaultPortFor(uri.Host)
+                    };
+                    url = builder.ToString();
                 }
 
                 return url.TrimEnd('/');
@@ -7538,7 +7534,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 // This is especially important on Linux/macOS where Spectre.Console
                 // may leave the terminal in a colored state
                 // Only write raw ANSI on non-Windows - Windows CMD displays it as literal characters
-                if (!OperatingSystem.IsWindows())
+                if (!OperatingSystem.IsWindows() && !System.Console.IsOutputRedirected)
                 {
                     System.Console.Write("\x1b[0m");
                 }

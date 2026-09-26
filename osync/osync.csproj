@@ -21,6 +21,15 @@
     <InternalsVisibleTo Include="osync.Tests" />
   </ItemGroup>
 
+  <!-- Build timestamp (UTC) embedded in the assembly and shown as "osync vX.Y.Z (bYYYYMMDD-HHMM)".
+       Override with -p:OsyncBuildTimestamp=... for reproducible builds. -->
+  <PropertyGroup>
+    <OsyncBuildTimestamp Condition="'$(OsyncBuildTimestamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMdd-HHmm'))</OsyncBuildTimestamp>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="BuildTimestamp" Value="$(OsyncBuildTimestamp)" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Anthropic" Version="12.1.0" />
     <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />

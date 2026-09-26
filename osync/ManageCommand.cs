@@ -84,6 +84,7 @@ namespace osync
         private int _paramsColumnWidth = 6;
         private int _quantColumnWidth = 6;
         private int _familyColumnWidth = 10;
+        private string _serverLabel = "";
         private int _modifiedColumnWidth = 10;
         private int _idColumnWidth = 12;
 
@@ -444,19 +445,24 @@ namespace osync
         {
             try
             {
-                if (string.IsNullOrEmpty(_destination))
+                // List through the server's API, so the models and their details (quantization, family,
+                // parameter size) always come from the same server. Reading the local models directory is only
+                // a fallback when the local server is not reachable: the directory may belong to a different
+                // server than the one osync resolves (e.g. both Ollama and xOllama installed).
+                var serverUrl = string.IsNullOrEmpty(_destination) ? OllamaServer.LocalUrl : _destination;
+                try
+                {
+                    FetchServerModels(serverUrl);
+                    _serverLabel = $"{OllamaServer.DisplayName(OllamaServer.GetFlavor(serverUrl))} @ {new Uri(serverUrl).Authority}";
+                }
+                catch when (string.IsNullOrEmpty(_destination))
                 {
                     FetchLocalModels();
-                }
-                else
-                {
-                    FetchRemoteModels();
-                }
-
-                // Fetch extended info for all models to get family and parameter size
-                foreach (var model in _allModels)
-                {
-                    FetchExtendedInfo(model);
+                    _serverLabel = $"{serverUrl} unreachable - local files";
+                    foreach (var model in _allModels)
+                    {
+                        FetchExtendedInfo(model);
+                    }
                 }
 
                 // Fetch running status to mark loaded models
@@ -467,6 +473,9 @@ namespace osync
 
                 _filteredModels = _allModels;
                 ApplySortOrder();
+
+                // The top bar shows which server the list comes from
+                if (_topBar != null) UpdateTopBar();
             }
             catch (Exception ex)
             {
@@ -625,20 +634,15 @@ namespace osync
         }
 
         // Fetch models from remote server
-        private void FetchRemoteModels()
+        private void FetchServerModels(string serverUrl)
         {
             _allModels = new List<ManageModelInfo>();
-
-            if (string.IsNullOrEmpty(_destination))
-            {
-                throw new Exception("Destination server not specified");
-            }
 
             try
             {
                 using var httpClient = new HttpClient
                 {
-                    BaseAddress = new Uri(_destination),
+                    BaseAddress = new Uri(serverUrl),
                     Timeout = TimeSpan.FromSeconds(30)
                 };
 
@@ -679,8 +683,9 @@ namespace osync
                             SizeFormatted = sizeFormatted,
                             ModifiedAt = model.modified_at,
                             ModifiedFormatted = GetTimeAgo(model.modified_at),
-                            Quantization = "",
-                            Family = "",
+                            Quantization = model.details?.quantization_level ?? "",
+                            Family = model.details?.family ?? "",
+                            ParameterSize = model.details?.parameter_size ?? "",
                             IsSelected = false,
                             IsLoaded = false,
                             ExtendedInfoLoaded = false
@@ -693,7 +698,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                throw new Exception($"Failed to fetch remote models: {ex.Message}", ex);
+                throw new Exception($"Failed to fetch models from {serverUrl}: {ex.Message}", ex);
             }
         }
 
@@ -956,7 +961,9 @@ namespace osync
                 leftSide += $" Filter: {_filterText}";
             }
 
-            var version = $"osync manage v{OsyncProgram.AppVersion}";
+            var version = string.IsNullOrEmpty(_serverLabel)
+                ? $"osync manage v{OsyncProgram.AppVersion}"
+                : $"{_serverLabel}  osync manage v{OsyncProgram.AppVersion}";
             var termWidth = Application.Driver?.Cols ?? 80;
             var spacing = Math.Max(1, termWidth - leftSide.Length - version.Length);
 
