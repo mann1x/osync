@@ -317,6 +317,13 @@ namespace osync
                 int fixedColumnsWidth = idWidth + sizeWidth + vramWidth + contextWidth + untilWidth + spacing;
                 int nameWidth = Math.Max(20, consoleWidth - fixedColumnsWidth - 1);
 
+                // When output is redirected (pipes, scripts) there is no console width to fit: never truncate names
+                if (System.Console.IsOutputRedirected)
+                {
+                    nameWidth = Math.Max(20, status.Models.Max(m => m.Name?.Length ?? 0));
+                    consoleWidth = nameWidth + fixedColumnsWidth + 1;
+                }
+
                 Console.WriteLine("");
                 Console.WriteLine("Loaded Models:");
                 Console.WriteLine(new string('-', consoleWidth - 1));
@@ -7435,6 +7442,9 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             {
                 // Configure terminal/console capabilities early, before any Spectre.Console output
                 ConfigureTerminalCapabilities();
+
+                // PowerArgs help/usage rendering hangs when the console width is 0 (redirected output on Linux/macOS)
+                SafeConsoleProvider.Install();
 
                 // Skip startup banner for version command to avoid duplicate output
                 bool isVersionCommand = args.Length > 0 &&
