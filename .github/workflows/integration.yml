@@ -1,21 +1,33 @@
 name: Integration tests
 
-# Runs the Reqnroll integration suite against real Ollama servers on one Linux runner:
-#   local   :11434  ollama CLI on PATH, models dir known to osync (OLLAMA_MODELS)
-#   remote1 :11435  separate server with its own model store
-#   remote2 :11436  separate server with its own model store
-# Called by ci.yml (version from .github/ollama-version) and by ollama-compat.yml (new releases).
+# Runs the Reqnroll integration suite against three real servers on one Linux runner:
+#   local    ollama/xollama CLI on PATH, models dir known to osync
+#   remote1  separate server with its own model store
+#   remote2  separate server with its own model store
+# server=ollama : Ollama  on :11434/:11435/:11436, version from .github/ollama-version
+# server=xollama: xOllama on :22434/:22435/:22436 (its default port), version from .github/xollama-version;
+#                 only the xollama CLI is installed, so osync must discover the server and CLI itself.
+# Called by ci.yml and server-compat.yml.
 on:
   workflow_call:
     inputs:
-      ollama-version:
-        description: "Ollama release tag (e.g. v0.34.4); empty = .github/ollama-version"
+      server:
+        description: "ollama or xollama"
+        type: string
+        default: ollama
+      version:
+        description: "Release tag; empty = .github/<server>-version"
         type: string
         default: ""
   workflow_dispatch:
     inputs:
-      ollama-version:
-        description: "Ollama release tag (e.g. v0.34.4); empty = .github/ollama-version"
+      server:
+        description: "ollama or xollama"
+        type: choice
+        options: [ollama, xollama]
+        default: ollama
+      version:
+        description: "Release tag; empty = .github/<server>-version"
         type: string
         default: ""
 
@@ -28,7 +40,7 @@ env:
 
 jobs:
   integration:
-    name: Integration (Ollama ${{ inputs.ollama-version || 'pinned' }})
+    name: Integration (${{ inputs.server }} ${{ inputs.version || 'pinned' }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -38,40 +50,71 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Resolve Ollama version
+      - name: Resolve server version
         id: ver
         run: |
-          v="${{ inputs.ollama-version }}"
-          [ -n "$v" ] || v="$(tr -d '[:space:]' < .github/ollama-version)"
+          server="${{ inputs.server }}"
+          case "$server" in
+            ollama)  port=11434; hostvar=OLLAMA_HOST ;;
+            xollama) port=22434; hostvar=XOLLAMA_HOST ;;
+            *) echo "::error::unknown server '$server'"; exit 1 ;;
+          esac
+          v="${{ inputs.version }}"
+          [ -n "$v" ] || v="$(tr -d '[:space:]' < .github/$server-version)"
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Ollama $v" >> "$GITHUB_STEP_SUMMARY"
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+          echo "hostvar=$hostvar" >> "$GITHUB_OUTPUT"
+          echo "$server $v" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Cache Ollama binaries
-        id: ollama-cache
+      - name: Cache server binaries
+        id: server-cache
         uses: actions/cache@v6
         with:
-          path: ~/ollama
-          key: ollama-cpu-${{ steps.ver.outputs.version }}
+          path: ~/srv
+          key: ${{ inputs.server }}-cpu-${{ steps.ver.outputs.version }}
 
       - name: Install Ollama ${{ steps.ver.outputs.version }} (CPU)
-        if: steps.ollama-cache.outputs.cache-hit != 'true'
+        if: inputs.server == 'ollama' && steps.server-cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/ollama
+          mkdir -p ~/srv
           curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/${{ steps.ver.outputs.version }}/ollama-linux-amd64.tar.zst" \
-            | zstd -dc | tar -x -C ~/ollama --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
+            | zstd -dc | tar -x -C ~/srv --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
 
-      - name: Start Ollama servers
+      # xOllama ships a bare Linux binary; its llama.cpp runtime is upstream Ollama's of the base version
+      # (the fork's release process pins them to the same llama.cpp).
+      - name: Install xOllama ${{ steps.ver.outputs.version }} (CPU)
+        if: inputs.server == 'xollama' && steps.server-cache.outputs.cache-hit != 'true'
         run: |
-          echo "$HOME/ollama/bin" >> "$GITHUB_PATH"
-          for s in "local 11434" "remote1 11435" "remote2 11436"; do
+          v="${{ steps.ver.outputs.version }}"; base="${v%-xollama.*}"
+          mkdir -p ~/srv/bin
+          cd ~/srv
+          curl -fsSL --retry 5 -o bin/xollama "https://github.com/mann1x/xollama/releases/download/$v/xollama-linux-amd64"
+          curl -fsSL --retry 5 -o sha256sum.txt "https://github.com/mann1x/xollama/releases/download/$v/sha256sum.txt"
+          expected="$(grep ' xollama-linux-amd64$' sha256sum.txt | cut -d' ' -f1)"
+          echo "$expected  bin/xollama" | sha256sum -c -
+          chmod +x bin/xollama
+          curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/$base/ollama-linux-amd64.tar.zst" \
+            | zstd -dc | tar -x -C ~/srv --wildcards 'lib/*' --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
+
+      - name: Start servers
+        run: |
+          echo "$HOME/srv/bin" >> "$GITHUB_PATH"
+          p=${{ steps.ver.outputs.port }}
+          for s in "local $p" "remote1 $((p + 1))" "remote2 $((p + 2))"; do
             set -- $s
             mkdir -p "$RUNNER_TEMP/$1/models"
-            OLLAMA_HOST=127.0.0.1:$2 OLLAMA_MODELS="$RUNNER_TEMP/$1/models" \
-              nohup "$HOME/ollama/bin/ollama" serve > "$RUNNER_TEMP/ollama-$1.log" 2>&1 &
+            env ${{ steps.ver.outputs.hostvar }}=127.0.0.1:$2 OLLAMA_MODELS="$RUNNER_TEMP/$1/models" \
+              nohup "$HOME/srv/bin/${{ inputs.server }}" serve > "$RUNNER_TEMP/server-$1.log" 2>&1 &
           done
-          for p in 11434 11435 11436; do
-            timeout 60 bash -c "until curl -fs localhost:$p/api/version; do sleep 1; done"; echo
+          for port in $p $((p + 1)) $((p + 2)); do
+            timeout 60 bash -c "until curl -fs localhost:$port/api/version; do sleep 1; done"; echo
           done
+          echo "OSYNC_TEST_LOCAL=http://localhost:$p" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE1=http://localhost:$((p + 1))" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE2=http://localhost:$((p + 2))" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_MODELS_DIR=$RUNNER_TEMP/local/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REGISTRY=1" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_EXCLUSIVE=1" >> "$GITHUB_ENV"
 
       - name: Cache test model
         id: model-cache
@@ -88,17 +131,10 @@ jobs:
         run: dotnet build osync.sln -c Release
 
       - name: Integration tests
-        env:
-          OSYNC_TEST_LOCAL: http://localhost:11434
-          OSYNC_TEST_REMOTE1: http://localhost:11435
-          OSYNC_TEST_REMOTE2: http://localhost:11436
-          OSYNC_TEST_MODELS_DIR: ${{ runner.temp }}/local/models
-          OSYNC_TEST_REGISTRY: "1"
-          OSYNC_TEST_EXCLUSIVE: "1"
         run: >
           dotnet test osync.Tests -c Release --no-build
           --filter "FullyQualifiedName~osync.Tests.Integration&Category!=knownbug"
-          --logger "trx;LogFileName=integration.trx"
+          --logger "trx;LogFileName=integration-${{ inputs.server }}.trx"
           --results-directory TestResults
 
       # Known bugs are expected to fail; this step reports them without failing the job.
@@ -106,20 +142,13 @@ jobs:
       - name: Known-bug scenarios (report only)
         if: always()
         continue-on-error: true
-        env:
-          OSYNC_TEST_LOCAL: http://localhost:11434
-          OSYNC_TEST_REMOTE1: http://localhost:11435
-          OSYNC_TEST_REMOTE2: http://localhost:11436
-          OSYNC_TEST_MODELS_DIR: ${{ runner.temp }}/local/models
-          OSYNC_TEST_REGISTRY: "1"
-          OSYNC_TEST_EXCLUSIVE: "1"
         run: |
           set +e
           dotnet test osync.Tests -c Release --no-build \
             --filter "FullyQualifiedName~osync.Tests.Integration&Category=knownbug" \
-            --logger "trx;LogFileName=knownbug.trx" --results-directory TestResults > knownbug.log 2>&1
+            --logger "trx;LogFileName=knownbug-${{ inputs.server }}.trx" --results-directory TestResults > knownbug.log 2>&1
           {
-            echo "### Known-bug scenarios"
+            echo "### Known-bug scenarios (${{ inputs.server }})"
             echo '```'
             grep -E "^\s+(Passed|Failed|Skipped) |Total tests|Passed:|Failed:" knownbug.log | head -60
             echo '```'
@@ -131,8 +160,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: integration-${{ steps.ver.outputs.version }}
+          name: integration-${{ inputs.server }}-${{ steps.ver.outputs.version }}
           path: |
             TestResults/*.trx
-            ${{ runner.temp }}/ollama-*.log
+            ${{ runner.temp }}/server-*.log
           if-no-files-found: ignore

@@ -10,7 +10,7 @@
 | `hotfix/*` | Urgent fix for the released version, branched from `master` | The author |
 
 Recommended GitHub settings (Settings → Branches → rules), set by the repository owner:
-- `master` and `dev`: require a pull request, require the **CI** checks (`Build + unit tests (*)`, `Integration`) to pass, no force-push, no deletion.
+- `master` and `dev`: require a pull request, require the **CI** checks (`Build + unit tests (*)`, `Integration (Ollama)`, `Integration (xOllama)`) to pass, no force-push, no deletion.
 - Merge style: *squash* for topic → `dev`, *merge commit* for `dev` → `master`.
 
 ## Development cycle
@@ -45,9 +45,10 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 
 | Tag | Requirement |
 |---|---|
-| `@local` | local Ollama reachable (`OSYNC_TEST_LOCAL`, else `OLLAMA_HOST`, else `http://localhost:11434`), `ollama` CLI on PATH, test model |
+| `@local` | local server reachable (`OSYNC_TEST_LOCAL`, else `OLLAMA_HOST`, else `http://localhost:11434`), `ollama` or `xollama` CLI on PATH, test model |
 | `@remote1`, `@remote2` | `OSYNC_TEST_REMOTE1` / `OSYNC_TEST_REMOTE2` set and reachable |
 | `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
+| `@defaultport` | the local server is on `localhost:11434` (Ollama) or `localhost:22434` (xOllama, with nothing on 11434) — tests osync's own server discovery |
 | `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
 | `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
 
@@ -83,13 +84,13 @@ Cloud sessions can build and run the unit and CLI tiers. The environment's netwo
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | every push; PRs into `master`/`dev` | build + unit/CLI tests on Ubuntu, Windows, macOS; integration suite; on `dev`/`master` pushes also packaging and publishing (see *Releases*) |
-| `integration.yml` | called by `ci.yml` and `ollama-compat.yml`; manual | one Linux runner with three Ollama servers of the version in `.github/ollama-version` (local :11434 with CLI, remote1 :11435, remote2 :11436); required step excludes `@knownbug`, a second step reports the known bugs without failing |
-| `ollama-compat.yml` | daily check (seconds) + manual | compares the latest **stable** Ollama release with `.github/ollama-version`; only when they differ (and no bump PR / failure issue is open) it runs the integration suite against the new release: pass → PR into `dev` bumping `.github/ollama-version`, fail → issue |
+| `integration.yml` | called by `ci.yml` and `server-compat.yml`; manual | one Linux runner with three servers (local with CLI, remote1, remote2) — `server: ollama` on :11434-11436 (version in `.github/ollama-version`) or `server: xollama` on :22434-22436 with only the `xollama` CLI (version in `.github/xollama-version`); required step excludes `@knownbug`, a second step reports the known bugs without failing. CI runs both servers. |
+| `compat.yml` → `server-compat.yml` | daily check (seconds) + manual | for Ollama and xOllama: compares the latest **stable** release (pre-releases ignored) with `.github/<server>-version`; only when they differ (and no bump PR / failure issue is open) it runs the integration suite against the new release: pass → PR into `dev` bumping the version file, fail → issue |
 | `test-assets.yml` | changes to `osync.Tests/Assets/test-model.json` | publishes/verifies the test model asset on the `test-assets` pre-release |
 
 ## Releases
 
-Publishing is automatic and gated on all CI jobs (build + unit on three OSes, integration):
+Publishing is automatic and gated on all CI jobs (build + unit on three OSes, integration on Ollama and xOllama):
 
 | Push to | Publishes | Tag |
 |---|---|---|
@@ -113,4 +114,4 @@ Release steps:
 ## Roadmap items decided during the audit
 
 - **Push-relay copy** for remote→remote and remote→local: osync runs a temporary registry endpoint, the source server `/api/push`es to it, osync streams each blob into the destination's `/api/blobs`, and the destination pulls the manifest. Copies any model (including created/imported ones) with its complete manifest. The `@knownbug` copy scenarios become regular scenarios.
-- **xOllama** (mann1x/xollama) support.
+- **xOllama features**: use `/api/tokenize` for exact token counts in bench/qc, numeric/extended thinking budgets in chat/bench/qc, engine info from `/api/engine` in ps/psmonitor (gated on server flavor).

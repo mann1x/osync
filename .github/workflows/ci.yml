@@ -1,6 +1,6 @@
 name: CI
 
-# Every push and PR: build + unit tests on Windows/Linux/macOS, integration tests against real Ollama servers.
+# Every push and PR: build + unit tests on Windows/Linux/macOS, integration tests against real Ollama and xOllama servers.
 # Pushes to dev publish a pre-release, pushes to master publish a release (only when every test job passed).
 on:
   push:
@@ -66,8 +66,16 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    name: Integration
+    name: Integration (Ollama)
     uses: ./.github/workflows/integration.yml
+    with:
+      server: ollama
+
+  integration-xollama:
+    name: Integration (xOllama)
+    uses: ./.github/workflows/integration.yml
+    with:
+      server: xollama
 
   # ---------------------------------------------------------------------------------------------
   # Releases: dev -> pre-release v<next>-dev.<run>, master -> release v<AppVersion> (once per version)
@@ -75,7 +83,7 @@ jobs:
   release-plan:
     name: Release plan
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev')
-    needs: [build-unit, integration]
+    needs: [build-unit, integration, integration-xollama]
     runs-on: ubuntu-latest
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
