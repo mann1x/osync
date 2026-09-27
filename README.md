@@ -47,7 +47,7 @@
 - 💾 **Offline Deployment** - Perfect for air-gapped servers and isolated networks
 - 🎯 **Wildcard Patterns** - Use `*` wildcards for batch operations
 - ⚡ **Bandwidth Control** - Throttle upload speeds and configure memory buffer size
-- 🎨 **Theme Support** - Choose from 7 built-in color themes
+- 🎨 **Theme Support** - 14 true-color themes for `manage` (Dracula, Nord, Tokyo Night, Catppuccin, Gruvbox, Solarized, ...), adapted to 256 and 16-color terminals
 - 💬 **Interactive Chat** - Chat with models directly from the CLI
 - 🧠 **Memory Management** - Load/unload models from VRAM with process status monitoring
 - 📊 **Quantization Comparison** - Compare quality and performance across model quantizations with detailed scoring
@@ -108,12 +108,14 @@ osync keeps user preferences in `settings.json` in the per-OS configuration fold
 
 - `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port). `osync install` asks for these; `XOLLAMA_HOST` / `OLLAMA_HOST` override them.
 - `colorMode` - `auto` (detect), `truecolor`, `256`, `16` or `none`; `OSYNC_COLOR_MODE` and `NO_COLOR` override it.
-- `manage.theme` - the last theme used in `osync manage`.
+- `manage.theme` - the theme chosen in `osync manage` (Ctrl+T).
 - `OSYNC_CONFIG_DIR` moves the settings folder.
 
 ### Colors
 
 osync detects the terminal's color depth from `COLORTERM` (`truecolor`/`24bit`), `TERM` (`*-256color`, `*-direct`), `TERM_PROGRAM` and Windows Terminal, and uses true color, 256 or 16 colors accordingly (`osync -v --verbose` shows what was detected and why). SSH does not forward `COLORTERM` by default, so terminals that support true color are seen as 256-color over SSH/tmux: set `"colorMode": "truecolor"` in the settings file, or `OSYNC_COLOR_MODE=truecolor`, or forward `COLORTERM` (`SendEnv COLORTERM` / `AcceptEnv COLORTERM`). `NO_COLOR` disables colors.
+
+`osync manage` draws with 24-bit colors; at 256 colors every theme color is snapped to the xterm-256 palette (tmux and most 256-color terminals then show exactly that color), at 16 colors the themes switch to the 16 standard colors with contrast checks. macOS Terminal.app gets 16 colors unless `colorMode` says `truecolor` (it misreads 24-bit colors on older macOS). If `manage` does not start or draw correctly on an old Windows console, `OSYNC_TUI_DRIVER=windows` selects the Windows console driver (`ansi` and `dotnet` are the others).
 
 ## Usage
 
@@ -1202,31 +1204,35 @@ osync manage myserver/                    # trailing slash
 ```
 
 **Features:**
-- Full-screen terminal user interface
-- Real-time model listing with dynamic column widths
-- Multi-selection support for batch operations
-- Filtering with live search
-- Multiple sort modes (name, size, created date - ascending/descending)
-- Theme switching (7 built-in themes)
-- Visual status indicators for sorting and filtering
+- Full-screen terminal user interface (Terminal.Gui 2), lists the models through the server's API
+- Column colors (name, size, parameters, quantization, family, age, ID), `●` marks models loaded in memory
+- Multi-selection for batch copy, delete and update
+- Filter by typing, multiple sort modes
+- 14 themes with live preview; the chosen theme is saved in the [preferences file](#preferences-file)
+- Settings dialog: local server (Ollama / xOllama, host, port) and color mode, saved in the preferences file
+- Copy, run, update and pull run on the plain console and return to the list, with the cursor on the model
 
-**Keyboard Shortcuts:**
-- **Ctrl+C** - Copy model(s) (local or to remote server, supports batch selection)
-- **Ctrl+M** - Rename model
+**Keys:**
+- **Up/Down, PgUp/PgDn, Home/End** - Move
+- **Space** - Select / unselect the model (and move down)
+- **Enter** or **Right** - Model details
+- **Letters, digits, `: - _ . /`** - Filter by name (`*` matches any text); **Backspace** removes a character
+- **Esc** - Clear the filter, or exit (with confirmation)
+- **F1** - Help
+- **F2** - Rename model (also Ctrl+M where the terminal tells it apart from Enter)
+- **Ctrl+C** - Copy model(s) (on the same server, or to a remote server; batch with selected models)
 - **Ctrl+R** - Run/chat with model
-- **Ctrl+S** - Show model information
-- **Ctrl+D** - Delete model(s) (supports batch selection with Space to select multiple)
-- **Ctrl+U** - Update model(s) (supports batch selection)
-- **Ctrl+P** - Pull model from registry
-- **Ctrl+L** - Load model into memory
+- **Ctrl+S** - Show license, Modelfile, parameters, system prompt or template
+- **Ctrl+D** - Delete model(s) (Enter in the confirmation cancels)
+- **Ctrl+U** - Update model(s)
+- **Ctrl+P** - Pull model from a registry (Ollama library names are checked before leaving the list)
+- **Ctrl+L** - Load model into memory (in the background)
 - **Ctrl+K** - Unload model from memory
-- **Ctrl+X** - Show process status (loaded models)
+- **Ctrl+X** - Loaded models (ps)
 - **Ctrl+O** - Cycle sort order
-- **Ctrl+T** - Cycle theme
-- **Ctrl+Q** or **Esc** - Quit (with confirmation)
-- **Space** - Toggle model selection
-- **/** - Start filtering (type to filter, Esc to clear)
-- **Enter** - Execute action in dialogs
+- **Ctrl+T** - Choose the theme (live preview, saved)
+- **Ctrl+E** - Settings: local server and color mode (saved)
+- **Ctrl+Q** - Quit
 
 **Sort Modes:**
 - Name+ (ascending), Name- (descending)
@@ -1234,7 +1240,7 @@ osync manage myserver/                    # trailing slash
 - Created+ (oldest first), Created- (newest first)
 
 **Themes:**
-- Default, Dark, Blue, Solarized, Gruvbox, Nord, Dracula
+- Default, Dracula, Nord, Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Monokai, Solarized Dark, Ocean, Matrix, Solarized Light, Light, High Contrast, Classic
 
 #### Version (`showversion`, `-v`)
 
@@ -1433,6 +1439,7 @@ v1.3.1
 - **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), color mode, `manage` theme
 - **`osync install` asks for the local server** (Ollama or xOllama, host, port), with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
 - **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
+- **`manage` rewritten on Terminal.Gui 2** - true color with 14 multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
 - **Fixed copy to a remote server failing when the local models directory is not readable** (e.g. the server runs as the `ollama` service user): the upload now goes through the local server with the push relay
 - **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
 - **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS

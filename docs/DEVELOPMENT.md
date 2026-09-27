@@ -50,6 +50,7 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 | `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
 | `@defaultport` | the local server is on `localhost:11434` (Ollama) or `localhost:22434` (xOllama, with nothing on 11434) — tests osync's own server discovery |
 | `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
+| `@tty` | Runs osync in a pseudo terminal (`script(1)`, Linux only) and types keys once the screen shows the ready text: interactive commands such as `manage` (`Manage.feature`) |
 | `@xollamabug` | Documents a bug of the xOllama server itself (not osync); the scenario is skipped when the local server is xOllama. Remove the tag once the pinned xOllama release fixes it. |
 | `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
 
@@ -107,7 +108,7 @@ Release steps:
 2. Owner bumps `AppVersion` in `osync/Program.cs` and completes the `v<AppVersion>` changelog section in README.md (PR into `dev`).
 3. **Manual interactive checklist** with the latest dev pre-release, on Windows (Windows Terminal) and one Linux/macOS terminal:
    - `osync run <model>`: chat, multi-line input, `/set`, `/save`, `/load`, thinking output, Ctrl+C
-   - `osync manage`: navigation, themes, copy/rename/delete dialogs, resize
+   - `osync manage`: navigation, filter, theme picker (Ctrl+T) and settings (Ctrl+E), copy/rename/delete dialogs, copy returns to the list, resize, exit restores the terminal; once with true color and once with `OSYNC_COLOR_MODE=16`
    - `osync psmonitor`: graphs render, resize, exit restores the terminal (colors, cursor)
    - `osync qc` / `osync bench` progress displays; `qcview` / `benchview` PDF/HTML output opens correctly
    - `osync cp` local→remote progress bar and throttling (`-bt`)
