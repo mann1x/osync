@@ -21,6 +21,10 @@ on:
         description: "Release tag; empty = .github/<server>-version"
         type: string
         default: ""
+    secrets:
+      HF_TOKEN:
+        description: "HuggingFace token for osync's huggingface.co API calls (rate limits); optional"
+        required: false
   workflow_dispatch:
     inputs:
       server:
@@ -39,6 +43,8 @@ permissions:
 env:
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  # osync sends it on its own huggingface.co requests (tag lookups); empty when the secret is not set
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   integration:

@@ -56,7 +56,7 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 | `@xollamabug` | Documents a bug of the xOllama server itself (not osync); the scenario is skipped when the local server is xOllama. Remove the tag once the pinned xOllama release fixes it. |
 | `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
 
-Other settings: `OSYNC_TEST_MODELS_DIR` (models dir of the local server, passed to osync as `OLLAMA_MODELS`), `OSYNC_TEST_MODEL_GGUF` (test model path), `OSYNC_TEST_OSYNC` (binary under test).
+Other settings: `HF_TOKEN` (sent by osync on its huggingface.co API requests; CI passes the repository secret of the same name), `OSYNC_TEST_MODELS_DIR` (models dir of the local server, passed to osync as `OLLAMA_MODELS`), `OSYNC_TEST_MODEL_GGUF` (test model path), `OSYNC_TEST_OSYNC` (binary under test).
 
 Rules for integration scenarios:
 - **Atomic**: every model a scenario uses is created by the scenario under a unique name (`{alias}` in feature text becomes `osync-t-<run>-<n>-alias`), and everything under that prefix is deleted after the scenario, even on failure. Leftovers of interrupted runs (`osync-t-*`) are removed at the start of a run.

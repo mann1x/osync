@@ -70,12 +70,16 @@ jobs:
     uses: ./.github/workflows/integration.yml
     with:
       server: ollama
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   integration-xollama:
     name: Integration (xOllama)
     uses: ./.github/workflows/integration.yml
     with:
       server: xollama
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   # ---------------------------------------------------------------------------------------------
   # Releases: dev -> pre-release v<next>-dev.<run>, master -> release v<AppVersion> (once per version)
