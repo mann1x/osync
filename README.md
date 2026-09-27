@@ -1491,10 +1491,12 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
-v1.4.1
+v1.4.2
 
 **New**
 - **`manage` tweaks xOllama model settings** - on an xOllama server, Ctrl+W runs `xollama tweak model` for the model under the cursor, or for each selected model, against the server manage shows. You can walk every setting, one group (KV cache, dynamic slots, DCA, session pooling, council, GPU/devices, engine), or remove the settings, and add flags such as `--kv-k=q8_0` that are set without questions. The model details list the xOllama settings. Needs the `xollama` CLI on PATH, or `OSYNC_XOLLAMA_CLI`
+
+v1.4.1
 
 **Fixes**
 - **Copies between servers are byte-for-byte again when the destination cannot pull from the relay** (for example a Windows destination: the relay's `host:port` is not a valid folder name there). The model used to be recreated from `/api/show`, which dropped the renderer, parser, `requires` and xOllama's model settings (a council became a plain model), merged several licenses and changed the parameters, yet osync reported success. It is now recreated from the source's manifest with the config and settings layers verbatim, so every layer and the config have the source's digests
