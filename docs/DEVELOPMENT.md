@@ -47,6 +47,8 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 |---|---|
 | `@local` | local server reachable (`OSYNC_TEST_LOCAL`, else `OLLAMA_HOST`, else `http://localhost:11434`), `ollama` or `xollama` CLI on PATH, test model |
 | `@remote1`, `@remote2` | `OSYNC_TEST_REMOTE1` / `OSYNC_TEST_REMOTE2` set and reachable |
+| `@peer` | `OSYNC_TEST_PEER` set and reachable: a server of the other flavor (xOllama when the others are Ollama, and the reverse), for interoperability scenarios |
+| `@stores` | the models directory of every server the scenario uses is known (`OSYNC_TEST_MODELS_DIR`, `OSYNC_TEST_REMOTE1_MODELS_DIR`, `OSYNC_TEST_REMOTE2_MODELS_DIR`, `OSYNC_TEST_PEER_MODELS_DIR`): the scenario compares manifests, so a copy is checked byte for byte (same config and layer digests) |
 | `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
 | `@defaultport` | the local server is on `localhost:11434` (Ollama) or `localhost:22434` (xOllama, with nothing on 11434) — tests osync's own server discovery |
 | `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
@@ -86,7 +88,7 @@ Cloud sessions can build and run the unit and CLI tiers. The environment's netwo
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | every push; PRs into `master`/`dev` | build + unit/CLI tests on Ubuntu, Windows, macOS; integration suite; on `dev`/`master` pushes also packaging and publishing (see *Releases*) |
-| `integration.yml` | called by `ci.yml` and `server-compat.yml`; manual | one Linux runner with three servers (local with CLI, remote1, remote2) — `server: ollama` on :11434-11436 (version in `.github/ollama-version`) or `server: xollama` on :22434-22436 with only the `xollama` CLI (version in `.github/xollama-version`); required step excludes `@knownbug`, a second step reports the known bugs without failing. CI runs both servers. |
+| `integration.yml` | called by `ci.yml` and `server-compat.yml`; manual | one Linux runner with three servers (local with CLI, remote1, remote2) plus a peer of the other flavor on :22437 (xOllama) or :11437 (Ollama), not on PATH — `server: ollama` on :11434-11436 (version in `.github/ollama-version`) or `server: xollama` on :22434-22436 with only the `xollama` CLI (version in `.github/xollama-version`); required step excludes `@knownbug`, a second step reports the known bugs without failing. CI runs both servers. |
 | `compat.yml` → `server-compat.yml` | daily check (seconds) + manual | for Ollama and xOllama: compares the latest **stable** release (pre-releases ignored) with `.github/<server>-version`; only when they differ (and no bump PR / failure issue is open) it runs the integration suite against the new release: pass → PR into `dev` bumping the version file, fail → issue |
 | `test-assets.yml` | changes to `osync.Tests/Assets/test-model.json` | publishes/verifies the test model asset on the `test-assets` pre-release |
 

@@ -1485,6 +1485,13 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.4.1
+
+**Fixes**
+- **Copies between servers are byte-for-byte again when the destination cannot pull from the relay** (for example a Windows destination: the relay's `host:port` is not a valid folder name there). The model used to be recreated from `/api/show`, which dropped the renderer, parser, `requires` and xOllama's model settings (a council became a plain model), merged several licenses and changed the parameters, yet osync reported success. It is now recreated from the source's manifest with the config and settings layers verbatim, so every layer and the config have the source's digests
+- **Uploads of a local model to a remote server** keep every part of the model the same way (they parsed `ollama show --modelfile` and lost the same parts)
+- **Every copy between servers is verified**: osync compares the copy's modelfile with the source's and fails, instead of printing "Successfully copied", when a part differs; the final line says how the model was installed (`through the relay`, `recreated from its manifest`)
+
 v1.4.0
 
 **New**

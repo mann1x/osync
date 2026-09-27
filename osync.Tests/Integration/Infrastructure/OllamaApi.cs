@@ -83,17 +83,29 @@ public sealed class OllamaApi
     }
 
     /// <summary>Creates <paramref name="model"/> from the test base model (GGUF + Modelfile template/parameters).</summary>
-    public async Task CreateFromTestModelAsync(string model, TestModelAsset asset)
+    /// <param name="renderer">
+    /// When set, the model has this renderer and parser (the server formats the prompt, as for recent model
+    /// families) instead of the asset's template.
+    /// </param>
+    public async Task CreateFromTestModelAsync(string model, TestModelAsset asset, string? renderer = null)
     {
         await EnsureBlobAsync(asset.GgufPath, asset.Digest);
         var body = new Dictionary<string, object>
         {
             ["model"] = WithTag(model),
             ["files"] = new Dictionary<string, string> { [asset.FileName] = asset.Digest },
-            ["template"] = asset.Template,
             ["parameters"] = asset.Parameters,
             ["stream"] = false
         };
+        if (renderer == null)
+        {
+            body["template"] = asset.Template;
+        }
+        else
+        {
+            body["renderer"] = renderer;
+            body["parser"] = renderer;
+        }
         using var resp = await Http.PostAsJsonAsync($"{BaseUrl}/api/create", body);
         var text = await resp.Content.ReadAsStringAsync();
         if (!resp.IsSuccessStatusCode || text.Contains("\"error\""))

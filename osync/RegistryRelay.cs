@@ -49,6 +49,20 @@ namespace osync
         public ConcurrentBag<string> Transferred { get; } = new();
         public ConcurrentBag<string> Skipped { get; } = new();
 
+        /// <summary>
+        /// Contents of the small blobs that went through the relay (config, template, parameters, xOllama settings, ...),
+        /// by digest: a model recreated from its manifest takes these parts verbatim.
+        /// </summary>
+        public ConcurrentDictionary<string, byte[]> SmallBlobs { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public const int SmallBlobLimit = 1024 * 1024;
+
+        /// <summary>
+        /// Digests the relay asks the source to upload even when the destination already has them, so that their
+        /// contents reach <see cref="SmallBlobs"/> (set before a second push).
+        /// </summary>
+        public ConcurrentDictionary<string, bool> ForceUpload { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>First error that happened while forwarding a blob, if any.</summary>
         public string? ForwardError { get; private set; }
 
@@ -236,7 +250,7 @@ namespace osync
                 exists = response.IsSuccessStatusCode;
             }
 
-            if (exists)
+            if (exists && !ForceUpload.ContainsKey(digest))
             {
                 Skipped.Add(digest);
                 await WriteResponseAsync(stream, 200, "OK", new() { ["Docker-Content-Digest"] = digest });
@@ -410,6 +424,7 @@ namespace osync
             private Stream? _writer;
             private Task<HttpResponseMessage>? _destination;
             private FileStream? _spool; // used only when the digest is not known before the data arrives
+            private MemoryStream? _copy = new(); // the data of a small blob, dropped past SmallBlobLimit
 
             public UploadSession(string? digest) => Digest = digest;
 
@@ -436,6 +451,8 @@ namespace osync
                     }
                     await TargetFor(relay).WriteAsync(chunk, relay._cts.Token);
                     Received += chunk.Length;
+                    if (_copy != null && Received <= SmallBlobLimit) _copy.Write(chunk.Span);
+                    else _copy = null;
                 }, relay._cts.Token);
             }
 
@@ -486,6 +503,13 @@ namespace osync
                 {
                     var text = await response.Content.ReadAsStringAsync();
                     throw new InvalidOperationException($"destination rejected blob {Digest}: {(int)response.StatusCode} {text}".Trim());
+                }
+
+                if (_copy != null)
+                {
+                    var data = _copy.ToArray();
+                    if (string.Equals(Digest, "sha256:" + Convert.ToHexString(SHA256.HashData(data)), StringComparison.OrdinalIgnoreCase))
+                        relay.SmallBlobs[Digest!] = data;
                 }
             }
 
