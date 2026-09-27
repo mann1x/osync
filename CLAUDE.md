@@ -49,7 +49,10 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `CommandArguments.cs` - All argument classes for commands
 - `ChatSession.cs` - Interactive chat session management
 - `ManageCommand.cs` - TUI implementation (Terminal.Gui 2)
-- `ManageThemes.cs` - `manage` themes (24-bit palettes) and their adaptation to 256/16 colors
+- `Themes.cs` - the 34 themes (24-bit palettes) of `manage` and of the shell output, adapted to 256/16 colors
+- `ShellOutput.cs` - `Out`: colored command output (errors, warnings, results, tables) in the shell theme
+- `SetupCommand.cs` - `osync setup` (server, alias, manage, shell); `ServerSetup.cs` - server questions of install/setup
+- `ServerAliases.cs` - server aliases from the settings file (`gpu` → `http://…:11434`)
 - `ColorSupport.cs` - terminal color depth detection; `OsyncSettings.cs` - preferences file
 - `QcCommand.cs` - Quantization comparison implementation
 - `QcViewCommand.cs` - QC results viewer with PDF/HTML/Markdown output generation
@@ -153,11 +156,22 @@ Always use `OllamaServer` (OllamaServer.cs) — never hardcode `localhost:11434`
 - `OllamaServer.ModelsDirFromEnvironment()`: `XOLLAMA_MODELS`, then `OLLAMA_MODELS`
 - xOllama-only API features (`/api/tokenize`, numeric/extended `think` budgets) must be gated on `GetFlavor(url) == ServerFlavor.XOllama`
 
+### Colored shell output
+
+- Write messages through `Out` (ShellOutput.cs): `Out.Error("...")` prints "Error: ...", `Out.Warning`, `Out.Success` ("✓ ..."), `Out.Failure` ("✗ ..."), `Out.StatusLine` (highlights 'model' names and URLs); `Out.Paint(text, p => p.Size)` for table columns
+- Pad table columns before painting (escape codes have no width); colors never change the text, so redirected output (tests, pipes) is identical
+- Never hardcode colors: roles come from the shell theme (`ShellPalette`), which is null (plain output) when redirected, with NO_COLOR or the `plain` theme
+- New themes go in `Themes.All`; `ThemesTests` checks WCAG contrast for every theme at every color depth
+
+### Server aliases
+
+- Any argument that can be a server must go through `NormalizeServerUrl` / `LooksLikeRemoteServer` / `ParseRemoteSource` or `ServerAliases.IsServerReference`, so aliases (`gpu`, `gpu/model`) work everywhere
+
 ### Terminal.Gui 2 (manage)
 
 - Instance API only: `Application.Create().Init()` per TUI session, never the obsolete static `Application.*`
 - Console operations (copy, run, update, pull) never run inside the TUI: set a pending action, `RequestStop`, dispose the app, run on the console, then start a new session (`ManageUI.Run` loop)
-- Colors come from the theme (`ManageThemes`), registered as the `Base`/`Dialog`/`Error` schemes on every session (so a `~/.tui/config.json` cannot change them); `Driver.Force16Colors` follows `ColorSupport` (no 256-color output in Terminal.Gui)
+- Colors come from the theme (`Themes`), registered as the `Base`/`Dialog`/`Error` schemes on every session (so a `~/.tui/config.json` cannot change them); `Driver.Force16Colors` follows `ColorSupport` (no 256-color output in Terminal.Gui)
 - Set `HotKeySpecifier = (Rune)0xFFFF` on views showing model names (`_` is a hotkey marker), `KeystrokeNavigator = null` on lists fed by typing, handle `Esc` (app quit key) yourself
 - Dialogs: the last `AddButton` is the default (Enter); put the safe choice last for destructive confirmations; validate in `FormDialog.Validate`
 - Interactive behavior is covered by `@tty` scenarios (`Manage.feature`, pseudo terminal via `script`)

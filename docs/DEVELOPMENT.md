@@ -109,6 +109,7 @@ Release steps:
 3. **Manual interactive checklist** with the latest dev pre-release, on Windows (Windows Terminal) and one Linux/macOS terminal:
    - `osync run <model>`: chat, multi-line input, `/set`, `/save`, `/load`, thinking output, Ctrl+C
    - `osync manage`: navigation, filter, theme picker (Ctrl+T) and settings (Ctrl+E), copy/rename/delete dialogs, copy returns to the list, resize, exit restores the terminal; once with true color and once with `OSYNC_COLOR_MODE=16`
+   - `osync setup` (menu), `osync setup shell themes` / `manage themes` previews, and colored `ls` / `ps` / errors in a dark and a light terminal
    - `osync psmonitor`: graphs render, resize, exit restores the terminal (colors, cursor)
    - `osync qc` / `osync bench` progress displays; `qcview` / `benchview` PDF/HTML output opens correctly
    - `osync cp` local→remote progress bar and throttling (`-bt`)
