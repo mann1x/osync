@@ -96,6 +96,18 @@ public static class TestEnvironment
         }
     }
 
+    private static bool? _xollamaCliAvailable;
+
+    /// <summary>Whether the xollama CLI is on PATH (xOllama-only commands such as tweak).</summary>
+    public static bool XOllamaCliAvailable
+    {
+        get
+        {
+            _xollamaCliAvailable ??= CanRun("xollama");
+            return _xollamaCliAvailable.Value;
+        }
+    }
+
     private static bool CanRun(string executable)
     {
         try

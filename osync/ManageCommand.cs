@@ -44,6 +44,9 @@ namespace osync
         public int? RepeatLastN { get; set; }
         public double? FrequencyPenalty { get; set; }
 
+        // xOllama settings (the "xollama" field of /api/show); null on Ollama or when the model states none
+        public List<(string Path, string Value)>? XOllamaSettings { get; set; }
+
         // State
         public bool IsSelected { get; set; }
         public bool IsLoaded { get; set; }
@@ -889,6 +892,10 @@ namespace osync
                         }
                     }
 
+                    model.XOllamaSettings = root.TryGetProperty("xollama", out var xollama)
+                        ? XOllamaTweak.Flatten(xollama)
+                        : null;
+
                     model.ExtendedInfoLoaded = true;
                 }
             }
@@ -1062,6 +1069,7 @@ namespace osync
             "  L  load into memory                             K  unload from memory\n" +
             "  X  loaded models (ps)                           O  sort order\n" +
             "  T  theme (saved in the settings file)           E  settings: server, colors\n" +
+            "  W  tweak: xOllama settings of the model (xOllama servers, needs the xollama CLI)\n" +
             "  Q  quit\n" +
             "\n" +
             "In the list: [X] = selected, " + LoadedMarker + " = loaded in memory.";
@@ -1083,10 +1091,17 @@ namespace osync
                 left.Add(new("=server  ", C(t.BarText)));
             }
             left.Add(new("Ctrl+", C(t.BarText)));
+            // Tweak (xOllama's model settings) only where it applies, early enough to fit on narrow terminals
+            var xollama = IsXOllamaServer;
             foreach (var (key, label) in Shortcuts)
             {
                 left.Add(new(" " + key, C(t.BarAccent), true));
                 left.Add(new("=" + label, C(t.BarText)));
+                if (key == "s" && xollama)
+                {
+                    left.Add(new(" w", C(t.BarAccent), true));
+                    left.Add(new("=tweak", C(t.BarText)));
+                }
             }
             _bottomBar.Set(left, Array.Empty<SegmentBar.Segment>(), C(t.BarBackground));
         }
@@ -1259,6 +1274,7 @@ namespace osync
                 case KeyCode.O: CycleSortOrder(); break;
                 case KeyCode.T: ExecuteThemePicker(); break;
                 case KeyCode.E: ExecuteSettings(); break;
+                case KeyCode.W: ExecuteTweak(); break;
                 case KeyCode.Q: _app?.RequestStop(); break;
             }
         }
@@ -2084,6 +2100,12 @@ namespace osync
                     lines.Add($"Top K: {model.TopK.Value}");
                 if (!string.IsNullOrEmpty(model.Stop))
                     lines.Add($"Stop: {model.Stop}");
+                if (model.XOllamaSettings is { Count: > 0 } xollama)
+                {
+                    lines.Add("");
+                    lines.Add("--- xOllama settings (Ctrl+W to change) ---");
+                    lines.AddRange(XOllamaTweak.Describe(xollama));
+                }
             }
             else
             {
@@ -2091,6 +2113,101 @@ namespace osync
             }
 
             ShowText($"Model Info - {model.Name}", string.Join("\n", lines), 76);
+        }
+
+        private bool IsXOllamaServer => OllamaServer.GetFlavor(ServerUrl) == ServerFlavor.XOllama;
+
+        // Action: xOllama settings of the model(s), with `xollama tweak model` on the console
+        private void ExecuteTweak()
+        {
+            var models = TargetModels(out bool isBatch);
+            if (models.Count == 0 || _app == null) return;
+
+            var url = ServerUrl;
+            if (!IsXOllamaServer)
+            {
+                ShowInfo("Tweak", $"Tweak changes xOllama's own model settings,\nand {new Uri(url).Authority} is not an xOllama server.");
+                return;
+            }
+            var cli = OllamaServer.XOllamaCli;
+            if (cli == null)
+            {
+                ShowError("Tweak runs the xollama CLI (xollama tweak model), which is not on PATH.\n" +
+                          "Install xOllama on this machine, or set OSYNC_XOLLAMA_CLI to its path.");
+                return;
+            }
+
+            var dialog = NewDialog(isBatch ? $"Tweak - {models.Count} models" : $"Tweak - {models[0].Name}", 78);
+            int y = 0;
+            if (!isBatch)
+            {
+                FetchExtendedInfo(models[0]);
+                var current = models[0].XOllamaSettings is { Count: > 0 } rows
+                    ? XOllamaTweak.Describe(rows, 40).ToList()
+                    : new List<string> { "none: the server's environment decides" };
+                const int shown = 6;
+                dialog.Add(NewLabel("xOllama settings now:", 0, y++));
+                foreach (var line in current.Take(shown))
+                    dialog.Add(NewLabel("  " + line, 0, y++));
+                if (current.Count > shown)
+                    dialog.Add(NewLabel($"  ... and {current.Count - shown} more (model details show them all)", 0, y++));
+                y++;
+            }
+
+            dialog.Add(NewLabel("Settings to change:", 0, y++));
+            var selector = new OptionSelector
+            {
+                X = 1,
+                Y = y,
+                TabBehavior = TabBehavior.NoStop,
+                HotKeySpecifier = NoHotKey,
+                Labels = XOllamaTweak.Scopes.Select(s => s.Label).ToArray(),
+                Value = 0
+            };
+            dialog.Add(selector);
+            y += XOllamaTweak.Scopes.Length + 1;
+            dialog.Add(NewLabel("Flags (optional; a flag with a value, --kv-v=q8_0, is set without asking):", 0, y++));
+            var flagsField = NewField("", 0, y);
+            dialog.Add(flagsField);
+            dialog.Validate = () =>
+            {
+                if (selector.Value == XOllamaTweak.ClearScope && !string.IsNullOrWhiteSpace(flagsField.Text))
+                {
+                    ShowError("Removing the settings cannot be combined with flags that set one.");
+                    return false;
+                }
+                return true;
+            };
+            dialog.AddButton(NewButton("Cancel"));
+            dialog.AddButton(NewButton("Tweak"));
+            selector.SetFocus();
+            FocusSelected(selector);
+
+            if (RunDialog(dialog) != 1 || selector.Value is not int scope) return;
+            var extra = flagsField.Text.Trim();
+
+            if (scope == XOllamaTweak.ClearScope)
+            {
+                var what = isBatch ? $"{models.Count} models" : $"'{models[0].Name}'";
+                // Enter presses the last button: keep Cancel there
+                if (MessageBox.ErrorQuery(_app, "Remove xOllama settings",
+                        $"Remove the xOllama settings of {what}?\nThe server's environment then decides every setting.",
+                        "Remove", "Cancel") != 0)
+                    return;
+            }
+
+            RequestConsoleAction(token =>
+            {
+                foreach (var model in models)
+                {
+                    if (token.IsCancellationRequested) break;
+                    Out.StatusLine($"\nxollama tweak model '{model.Name}' on {url}");
+                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(model.Name, XOllamaTweak.Scopes[scope].Flags, extra));
+                    if (code != 0)
+                        Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
+                }
+                return models[0].Name;
+            });
         }
 
         // Action: choose the theme (live preview; the choice is saved in the settings file)

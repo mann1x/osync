@@ -152,10 +152,20 @@ public static class OsyncCli
                 if (process.HasExited) break;
                 await Task.Delay(200, cts.Token);
             }
+            var sentAt = Screen().Length;
             foreach (var key in keys)
             {
                 if (process.HasExited) break;
+                if (key.StartsWith(TerminalKeys.WaitMarker, StringComparison.Ordinal))
+                {
+                    var text = key[TerminalKeys.WaitMarker.Length..];
+                    while (!process.HasExited && Screen().IndexOf(text, Math.Min(sentAt, Screen().Length), StringComparison.Ordinal) < 0)
+                        await Task.Delay(200, cts.Token);
+                    sentAt = Screen().Length;
+                    continue;
+                }
                 await Task.Delay(TimeSpan.FromMilliseconds(500), cts.Token);
+                sentAt = Screen().Length;
                 await process.StandardInput.WriteAsync(key);
                 await process.StandardInput.FlushAsync();
             }
@@ -204,10 +214,15 @@ public sealed record OsyncResult(string Arguments, int ExitCode, string Output, 
 /// <summary>
 /// Keys for <see cref="OsyncCli.RunInTerminalAsync"/>, written as space-separated names: Ctrl+A..Ctrl+Z, Tab,
 /// Shift+Tab, Enter, Esc, Space, Backspace, Up, Down, Left, Right, Ctrl+Left, Ctrl+Right, Home, End, F1, F2, or
-/// text:abc for typed text; KEY*N repeats a key N times.
+/// text:abc for typed text; KEY*N repeats a key N times. wait:abc sends nothing: it waits until abc appears on the
+/// screen after the previous key (for keys that must reach a program that is not ready yet, e.g. manage coming
+/// back after a console action; keys typed before are lost, and Ctrl+Q in a line-mode terminal is flow control).
 /// </summary>
 public static class TerminalKeys
 {
+    /// <summary>Prefix of a <c>wait:</c> step in a parsed key list.</summary>
+    public const string WaitMarker = "\0wait:";
+
     /// <summary>Space-separated keys; "Down*5" repeats a key.</summary>
     public static List<string> Parse(string spec) => spec.Split(' ', StringSplitOptions.RemoveEmptyEntries)
         .SelectMany(token =>
@@ -222,6 +237,7 @@ public static class TerminalKeys
     private static string Key(string name)
     {
         if (name.StartsWith("text:", StringComparison.Ordinal)) return name["text:".Length..];
+        if (name.StartsWith("wait:", StringComparison.Ordinal)) return WaitMarker + name["wait:".Length..];
         if (name.StartsWith("Ctrl+", StringComparison.OrdinalIgnoreCase) && name.Length == 6 && char.IsAsciiLetter(name[5]))
             return ((char)(char.ToUpperInvariant(name[5]) - 'A' + 1)).ToString();
         return name switch
