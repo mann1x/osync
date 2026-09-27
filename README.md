@@ -81,7 +81,7 @@
 
 Commands without `-d` work on the local server, found in this order:
 
-1. `XOLLAMA_HOST` (xOllama), then `OLLAMA_HOST` (Ollama); bind addresses such as `0.0.0.0` are mapped to `localhost`
+1. `XOLLAMA_HOST` (xOllama), then `OLLAMA_HOST` (Ollama); bind addresses such as `0.0.0.0` are mapped to `localhost`. With `"ignoreEnvironment": true` (`osync setup server env ignore`, or the question `osync setup server` asks when one of them is set) the configured server comes first
 2. The server in the [preferences file](#preferences-file) (`osync setup server`)
 3. Otherwise the first server answering on `localhost:11434` (Ollama default) or `localhost:22434` (xOllama default)
 
@@ -110,15 +110,16 @@ osync keeps user preferences in `settings.json` in the per-OS configuration fold
     "gpu": "http://192.168.1.10:11434"
   },
   "colorMode": "auto",
-  "manage": { "theme": "Dracula", "sort": "size-" },
+  "manage": { "theme": "Dracula", "sort": "size-", "servers": [ "gpu" ] },
   "shell": { "theme": "Tokyo Night" }
 }
 ```
 
-- `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port); `both` when Ollama and xOllama run side by side (`flavor` is then the default one). `XOLLAMA_HOST` / `OLLAMA_HOST` override it.
+- `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port); `both` when Ollama and xOllama run side by side (`flavor` is then the default one). `XOLLAMA_HOST` / `OLLAMA_HOST` override it, unless `ignoreEnvironment` is `true`.
 - `aliases` - [server aliases](#server-aliases).
 - `colorMode` - `auto` (detect), `truecolor`, `256`, `16` or `none`; `OSYNC_COLOR_MODE` and `NO_COLOR` override it.
 - `manage.theme`, `manage.sort` - theme (also chosen with Ctrl+T in `manage`) and initial sort order (`name+`, `name-`, `size-`, `size+`, `created-`, `created+`) of `osync manage`.
+- `manage.servers` - aliases `manage` switches to with Ctrl+Left / Ctrl+Right, after the local server (with Ollama and xOllama side by side the other one is always included).
 - `shell.theme` - colors of the command output (any theme name, or `plain` for no colors).
 - `OSYNC_CONFIG_DIR` moves the settings folder.
 
@@ -1248,6 +1249,7 @@ osync manage myserver/                    # trailing slash
 - **Esc** - Clear the filter, or exit (with confirmation)
 - **F1** - Help
 - **F2** - Rename model (also Ctrl+M where the terminal tells it apart from Enter)
+- **Ctrl+Left / Ctrl+Right** - Previous / next server: the local one, the other of Ollama/xOllama side by side, and the aliases chosen with `osync setup manage servers` (also asked by `osync setup server`)
 - **Ctrl+C** - Copy model(s) (on the same server, or to a remote server; batch with selected models)
 - **Ctrl+R** - Run/chat with model
 - **Ctrl+S** - Show license, Modelfile, parameters, system prompt or template
@@ -1284,6 +1286,7 @@ osync setup server xollama 192.168.1.5        # one server (port: the flavor's d
 osync setup server ollama nas:11500
 osync setup server both [host] [xollama]      # both side by side (default ports; optional default server)
 osync setup server auto                       # back to auto-detection
+osync setup server env ignore                 # the settings win over XOLLAMA_HOST / OLLAMA_HOST (env use: they win)
 
 osync setup alias                             # list (and add/remove interactively)
 osync setup alias add gpu 192.168.1.10        # port 11434, or 22434 when only xOllama answers
@@ -1292,6 +1295,7 @@ osync setup alias remove gpu
 osync setup manage                            # theme and default sort order
 osync setup manage theme "Tokyo Night"        # name, loose spelling (tokyo-night) or number
 osync setup manage sort size-                 # name+ name- size- size+ created- created+
+osync setup manage servers gpu,nas            # aliases for Ctrl+Left/Right in manage (all, none)
 osync setup manage themes                     # all themes with a preview
 
 osync setup shell                             # theme, color mode, tab completion
@@ -1501,6 +1505,9 @@ v1.3.1
 - **`manage` rewritten on Terminal.Gui 2** - true color with multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
 - **`osync setup`** - one command for the preferences: `server` (Ollama, xOllama or both), `alias` (server aliases), `manage` (theme, default sort order), `shell` (colors, theme, tab completion), `show`; interactive or with arguments for scripts
 - **Server aliases** - `osync setup alias add gpu 192.168.1.10`, then `-d gpu`, `osync cp model gpu/`, `osync cp gpu/model copy`, `osync manage gpu`
+- **`manage` switches servers with Ctrl+Left / Ctrl+Right** - the local server, the other one of Ollama/xOllama side by side, and the aliases chosen with `osync setup manage servers` (`osync setup server` offers them); the top bar shows which one (`[2/3] gpu: Ollama @ ...`)
+- **The settings can win over `XOLLAMA_HOST` / `OLLAMA_HOST`** - `osync setup server` asks when one is set, `osync setup server env ignore|use`, and a check box in the manage settings (Ctrl+E)
+- **Fixed the theme list of `manage` not scrolling** when the terminal is shorter than the list
 - **Ollama and xOllama side by side** - server type "Both": one is the default local server, each gets an alias (`ollama`, `xollama`)
 - **`osync install` asks for the server only when needed** - a single server found on this machine is used without questions; it asks when none or both are found
 - **Colored command output again** - `ls`, `ps`, `show`, `-v`, copy/pull/update progress, errors, warnings and results use the shell theme (removed in 1.0.1 because of garbled output on Linux); plain when redirected, with `NO_COLOR` or the `plain` theme

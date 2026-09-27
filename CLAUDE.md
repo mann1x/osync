@@ -150,7 +150,7 @@ Commands that support remote servers (copy, bench, qc) use flexible URL parsing 
 ### Local server resolution (Ollama and xOllama)
 
 Always use `OllamaServer` (OllamaServer.cs) — never hardcode `localhost:11434`, read `OLLAMA_HOST` directly, or spawn `ollama`:
-- `OllamaServer.ResolveHost(destination)` / `OllamaServer.LocalUrl`: `-d`, else `XOLLAMA_HOST`, `OLLAMA_HOST`, then probe localhost:11434 (Ollama) and localhost:22434 (xOllama)
+- `OllamaServer.ResolveHost(destination)` / `OllamaServer.LocalUrl`: `-d`, else `XOLLAMA_HOST`, `OLLAMA_HOST`, the settings file (first when `server.ignoreEnvironment`), then probe localhost:11434 (Ollama) and localhost:22434 (xOllama); the logic is `OllamaServer.ResolveLocalUrl` (pure, unit-tested)
 - `OllamaServer.GetFlavor(url)`: Ollama vs xOllama (xOllama answers `GET /api/xollama`)
 - `OllamaServer.CliName` + `OllamaServer.ApplyCliEnvironment(startInfo)` for CLI shell-outs (`ollama` or `xollama`, `OSYNC_OLLAMA_CLI` override)
 - `OllamaServer.ModelsDirFromEnvironment()`: `XOLLAMA_MODELS`, then `OLLAMA_MODELS`

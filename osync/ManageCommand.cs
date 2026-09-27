@@ -61,6 +61,40 @@ namespace osync
         CreatedDesc
     }
 
+    /// <summary>The servers manage switches between with Ctrl+Left / Ctrl+Right.</summary>
+    internal static class ManageServers
+    {
+        /// <summary>
+        /// The local server first (Url null), then, with Ollama and xOllama side by side, the other one, then the
+        /// aliases chosen for manage (manage.servers). Unknown aliases, duplicates and aliases pointing at
+        /// <paramref name="localUrl"/> (when given) are left out.
+        /// </summary>
+        public static List<(string Name, string? Url)> Targets(OsyncSettings settings, string? localUrl)
+        {
+            var targets = new List<(string Name, string? Url)> { ("local", null) };
+            var names = new List<string>();
+            if (settings.Server.Both == true)
+                names.Add(settings.ConfiguredFlavor == ServerFlavor.XOllama ? ServerSetup.OllamaAlias : ServerSetup.XOllamaAlias);
+            if (settings.Manage.Servers != null)
+                names.AddRange(settings.Manage.Servers);
+
+            foreach (var name in names)
+            {
+                var key = settings.Aliases.Keys.FirstOrDefault(k => string.Equals(k, name, StringComparison.OrdinalIgnoreCase));
+                if (key == null || targets.Any(t => string.Equals(t.Name, key, StringComparison.OrdinalIgnoreCase))) continue;
+                var url = settings.Aliases[key].TrimEnd('/');
+                if (localUrl != null && SameServer(url, localUrl)) continue;
+                if (targets.Any(t => t.Url != null && SameServer(t.Url, url))) continue;
+                targets.Add((key, url));
+            }
+            return targets;
+        }
+
+        public static bool SameServer(string a, string b) =>
+            Uri.TryCreate(a, UriKind.Absolute, out var ua) && Uri.TryCreate(b, UriKind.Absolute, out var ub) &&
+            string.Equals(ua.Authority, ub.Authority, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Names of the manage sort orders, as stored in the settings file (manage.sort).</summary>
     internal static class ManageSortOrders
     {
@@ -99,7 +133,11 @@ namespace osync
         private const string LoadedMarker = "●";
 
         private readonly OsyncProgram _program;
-        private readonly string? _destination;
+        private string? _destination;
+
+        // Servers of Ctrl+Left / Ctrl+Right: the local server (Url null), then the aliases chosen for manage
+        private List<(string Name, string? Url)> _targets = new() { ("local", null) };
+        private int _targetIndex;
         private List<ManageModelInfo> _allModels = new();
         private List<ManageModelInfo> _filteredModels = new();
         private string _filterText = "";
@@ -153,6 +191,43 @@ namespace osync
 
         private string ServerUrl => string.IsNullOrEmpty(_destination) ? OllamaServer.LocalUrl : _destination;
 
+        /// <summary>Servers of Ctrl+Left / Ctrl+Right; a -d server that is not among them is added.</summary>
+        private void BuildTargets()
+        {
+            _targets = ManageServers.Targets(OsyncSettings.Current, OllamaServer.LocalUrl);
+            _targetIndex = 0;
+            if (string.IsNullOrEmpty(_destination)) return;
+            if (ManageServers.SameServer(_destination, OllamaServer.LocalUrl))
+            {
+                _destination = null;
+                return;
+            }
+            var index = _targets.FindIndex(t => t.Url != null && ManageServers.SameServer(t.Url, _destination));
+            if (index < 0)
+            {
+                _targets.Add((new Uri(_destination).Authority, _destination));
+                index = _targets.Count - 1;
+            }
+            _targetIndex = index;
+        }
+
+        /// <summary>Ctrl+Left / Ctrl+Right: shows the previous / next server.</summary>
+        private void SwitchServer(int step)
+        {
+            if (_targets.Count < 2)
+            {
+                SetStatus("One server only: choose more with 'osync setup manage servers'");
+                return;
+            }
+            _targetIndex = (_targetIndex + step + _targets.Count) % _targets.Count;
+            _destination = _targets[_targetIndex].Url;
+            _selectedModelName = null;
+            foreach (var model in _allModels) model.IsSelected = false;
+            LoadModels();
+            UpdateModelList();
+            SetStatus($"Server: {_targets[_targetIndex].Name}");
+        }
+
         // ------------------------------------------------------------------------------------------------
         // Session loop
         // ------------------------------------------------------------------------------------------------
@@ -161,6 +236,7 @@ namespace osync
         {
             _theme = Themes.Find(OsyncSettings.Current.Manage.Theme);
             _currentSortOrder = ManageSortOrders.Parse(OsyncSettings.Current.Manage.Sort) ?? SortOrder.AlphabeticalAsc;
+            BuildTargets();
 
             while (true)
             {
@@ -934,6 +1010,8 @@ namespace osync
             }
 
             var right = new List<SegmentBar.Segment>();
+            if (_targets.Count > 1)
+                right.Add(new($"[{_targetIndex + 1}/{_targets.Count}] {_targets[_targetIndex].Name}: ", C(t.BarText)));
             if (!string.IsNullOrEmpty(_serverLabel))
                 right.Add(new(_serverLabel + "  ", C(t.BarAccent)));
             right.Add(new($"osync manage v{OsyncProgram.AppVersion}", C(t.BarText)));
@@ -975,6 +1053,7 @@ namespace osync
             "  Esc                          clear the filter, or exit\n" +
             "  F1                           this help\n" +
             "  F2 (Ctrl+M)                  rename\n" +
+            "  Ctrl+Left / Ctrl+Right       previous / next server (osync setup manage servers)\n" +
             "\n" +
             "Ctrl+ actions\n" +
             "  C  copy (same server, or to a remote server)   R  run / chat\n" +
@@ -996,8 +1075,14 @@ namespace osync
                 new("F1", C(t.BarAccent), true),
                 new("=help ", C(t.BarText)),
                 new("F2", C(t.BarAccent), true),
-                new("=ren  Ctrl+", C(t.BarText))
+                new("=ren  ", C(t.BarText))
             };
+            if (_targets.Count > 1)
+            {
+                left.Add(new("^←/→", C(t.BarAccent), true));
+                left.Add(new("=server  ", C(t.BarText)));
+            }
+            left.Add(new("Ctrl+", C(t.BarText)));
             foreach (var (key, label) in Shortcuts)
             {
                 left.Add(new(" " + key, C(t.BarAccent), true));
@@ -1070,6 +1155,13 @@ namespace osync
                     _filterText = _filterText[..^1];
                     FilterModels();
                 }
+                return;
+            }
+
+            // Ctrl+Left / Ctrl+Right: previous / next server
+            if (key == Key.CursorRight.WithCtrl || key == Key.CursorLeft.WithCtrl)
+            {
+                SwitchServer(key == Key.CursorRight.WithCtrl ? 1 : -1);
                 return;
             }
 
@@ -2008,16 +2100,23 @@ namespace osync
             var names = new ObservableCollection<string>(Themes.All.Select(t => t.Name));
             var dialog = NewDialog("Theme", 40);
 
+            // The list scrolls when the terminal is not tall enough for every theme (dialog border, button bar
+            // and the optional depth note take the rest)
+            var screenHeight = _app?.Screen.Height ?? 24;
+            var noteRows = _depth != ColorDepth.TrueColor ? 2 : 0;
+            var listHeight = Math.Clamp(screenHeight - 8 - noteRows, 3, names.Count);
             var list = new ListView
             {
                 X = 0,
                 Y = 0,
                 Width = Dim.Fill(),
-                Height = names.Count,
+                Height = listHeight,
                 KeystrokeNavigator = null
             };
             list.SetSource(names);
             list.SelectedItem = Themes.IndexOf(_theme);
+            // Bring the current theme into view once the list has its size
+            list.FrameChanged += (_, _) => list.EnsureSelectedItemVisible();
             list.ValueChanged += (_, e) =>
             {
                 if (e.NewValue is int i && i >= 0 && i < Themes.All.Count)
@@ -2030,7 +2129,7 @@ namespace osync
 
             if (_depth != ColorDepth.TrueColor)
             {
-                dialog.Add(NewLabel($"Drawn with {ColorSupport.DisplayName(_depth)}", 0, names.Count + 1));
+                dialog.Add(NewLabel($"Drawn with {ColorSupport.DisplayName(_depth)}", 0, listHeight + 1));
             }
 
             dialog.AddButton(NewButton("Cancel"));
@@ -2097,11 +2196,19 @@ namespace osync
             dialog.Add(testButton, testResult);
             y += 2;
 
-            var overriddenBy = new[] { "XOLLAMA_HOST", "OLLAMA_HOST" }
-                .FirstOrDefault(v => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(v)));
-            if (overriddenBy != null)
+            var environmentVariable = OllamaServer.EnvironmentServerVariable(Environment.GetEnvironmentVariable);
+            CheckBox? ignoreEnvironmentCheck = null;
+            if (environmentVariable != null)
             {
-                dialog.Add(NewLabel($"Note: {overriddenBy} is set and takes precedence over these settings.", 1, y++));
+                ignoreEnvironmentCheck = new CheckBox
+                {
+                    Text = $"Use this server even though {environmentVariable} is set",
+                    X = 1,
+                    Y = y++,
+                    HotKeySpecifier = NoHotKey,
+                    Value = settings.Server.IgnoreEnvironment == true ? CheckState.Checked : CheckState.UnChecked
+                };
+                dialog.Add(ignoreEnvironmentCheck);
                 y++;
             }
             if (settings.Server.Both == true)
@@ -2201,6 +2308,8 @@ namespace osync
             settings.Server.Host = host.Length == 0 ? null : host;
             settings.Server.Port = port == effectiveFlavorPort ? null : port;
             settings.ColorMode = colorValues[colorSelector.Value ?? 0];
+            if (ignoreEnvironmentCheck != null)
+                settings.Server.IgnoreEnvironment = ignoreEnvironmentCheck.Value == CheckState.Checked && flavor != null ? true : null;
 
             try
             {
@@ -2214,6 +2323,10 @@ namespace osync
 
             OllamaServer.ResetLocal();
             ColorSupport.Reset();
+            var shownName = _targets[_targetIndex].Name;
+            BuildTargets();
+            _targetIndex = Math.Max(0, _targets.FindIndex(t => t.Name == shownName));
+            _destination = _targets[_targetIndex].Url;
 
             if (!string.Equals(previousColorMode, settings.ColorMode, StringComparison.OrdinalIgnoreCase))
             {

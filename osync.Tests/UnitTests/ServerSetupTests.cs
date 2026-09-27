@@ -6,11 +6,12 @@ public class ServerSetupTests
 {
     private static ServerSetup.Probe Down(string _) => new(false, ServerFlavor.Unknown, null);
 
-    private static (bool Ok, OsyncSettings Settings, string Output) Run(string answers, Func<string, ServerSetup.Probe>? probe = null, OsyncSettings? settings = null)
+    private static (bool Ok, OsyncSettings Settings, string Output) Run(string answers, Func<string, ServerSetup.Probe>? probe = null, OsyncSettings? settings = null,
+        Func<string, string?>? env = null)
     {
         settings ??= new OsyncSettings();
         var output = new StringWriter();
-        var ok = ServerSetup.Configure(settings, new StringReader(answers), output, probe ?? Down);
+        var ok = ServerSetup.Configure(settings, new StringReader(answers), output, probe ?? Down, env ?? (_ => null));
         return (ok, settings, output.ToString());
     }
 
@@ -238,5 +239,22 @@ public class ServerSetupTests
 
         changed.Should().BeFalse();
         output.Should().Contain("OLLAMA_HOST=10.0.0.2:11434");
+    }
+
+    // ---- environment variables vs settings ------------------------------------------------------------------
+
+    [Fact]
+    public void EnvironmentVariable_AsksWhichServerWins()
+    {
+        var env = (Func<string, string?>)(n => n == "XOLLAMA_HOST" ? "127.0.0.1:22434" : null);
+
+        var (ok, settings, output) = Run("1\nnas\n\n\n", env: env);
+
+        ok.Should().BeTrue();
+        settings.Server.IgnoreEnvironment.Should().BeTrue("Enter keeps the server configured here");
+        output.Should().Contain("XOLLAMA_HOST=127.0.0.1:22434 is set");
+
+        var (_, again, _) = Run("1\nnas\n\n2\n", env: env, settings: settings);
+        again.Server.IgnoreEnvironment.Should().BeNull("the environment variable was chosen");
     }
 }

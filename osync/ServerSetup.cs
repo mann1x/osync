@@ -23,10 +23,11 @@ namespace osync
         public static bool AutoConfigure(OsyncSettings settings, TextReader input, TextWriter output, Func<string, Probe> probe,
             Func<string, string?> env, bool interactive)
         {
-            var overriding = new[] { "XOLLAMA_HOST", "OLLAMA_HOST" }.FirstOrDefault(v => !string.IsNullOrWhiteSpace(env(v)));
+            var overriding = OllamaServer.OverridingEnvironmentVariable(env, settings);
             if (overriding != null)
             {
-                output.WriteLine($"Local server: {overriding}={env(overriding)} (it takes precedence over the settings)");
+                output.WriteLine($"Local server: {overriding}={env(overriding)} (it takes precedence over the settings; " +
+                                 "osync setup server lets the settings win)");
                 return false;
             }
 
@@ -57,18 +58,19 @@ namespace osync
                     : "No Ollama or xOllama server answers on this machine: run 'osync setup server' once it runs elsewhere.");
                 return false;
             }
-            return Configure(settings, input, output, probe, ollama, xollama);
+            return Configure(settings, input, output, probe, ollama, xollama, env);
         }
 
         /// <summary>
         /// Asks for the server type (Ollama, xOllama or both), host and ports, tests the connection and stores the
         /// answers in <paramref name="settings"/>. Returns false when the input ended before all answers were given.
         /// </summary>
-        public static bool Configure(OsyncSettings settings, TextReader input, TextWriter output, Func<string, Probe> probe) =>
-            Configure(settings, input, output, probe, null, null);
+        public static bool Configure(OsyncSettings settings, TextReader input, TextWriter output, Func<string, Probe> probe,
+            Func<string, string?>? env = null) =>
+            Configure(settings, input, output, probe, null, null, env ?? Environment.GetEnvironmentVariable);
 
         private static bool Configure(OsyncSettings settings, TextReader input, TextWriter output, Func<string, Probe> probe,
-            Probe? ollama, Probe? xollama)
+            Probe? ollama, Probe? xollama, Func<string, string?> env)
         {
             output.WriteLine(Out.Heading("Local server"));
 
@@ -123,7 +125,7 @@ namespace osync
                     output.WriteLine($"Removed the aliases {string.Join(", ", removed)} (only one server now).");
 
                 Report(output, probe, flavor, host, port.Value);
-                return true;
+                return AskEnvironmentPrecedence(settings, input, output, env);
             }
 
             var ollamaPort = AskPort(input, output, "Ollama port", AliasPort(settings, OllamaAlias) ?? OllamaServer.OllamaDefaultPort);
@@ -149,6 +151,25 @@ namespace osync
 
             Report(output, probe, ServerFlavor.Ollama, host, ollamaPort.Value);
             Report(output, probe, ServerFlavor.XOllama, host, xollamaPort.Value);
+            return AskEnvironmentPrecedence(settings, input, output, env);
+        }
+
+        /// <summary>
+        /// When XOLLAMA_HOST / OLLAMA_HOST is set, asks whether it or the configured server decides the local
+        /// server (<see cref="OsyncSettings.ServerSettings.IgnoreEnvironment"/>). Returns false at the end of input.
+        /// </summary>
+        private static bool AskEnvironmentPrecedence(OsyncSettings settings, TextReader input, TextWriter output, Func<string, string?> env)
+        {
+            var variable = OllamaServer.EnvironmentServerVariable(env);
+            if (variable == null) return true;
+
+            output.WriteLine($"{variable}={env(variable)} is set in the environment.");
+            var answer = Ask(input, output, $"Local server: 1) the one configured here  2) {variable} [1]: ", a => a is "1" or "2");
+            if (answer == null) return false;
+            settings.Server.IgnoreEnvironment = answer is "" or "1" ? true : null;
+            output.WriteLine(settings.Server.IgnoreEnvironment == true
+                ? $"The settings take precedence over {variable}."
+                : $"{variable} takes precedence over the settings.");
             return true;
         }
 

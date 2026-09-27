@@ -108,6 +108,33 @@ Feature: Setup (preferences in the settings file)
     When I run osync "setup nonsense"
     Then the command fails
 
+  @cli
+  Scenario: Choose the servers manage switches between
+    Given the alias "box1" for the local server
+    When I run osync "setup manage servers box1"
+    Then the command succeeds
+    And the settings file has "manage.servers" set to '["box1"]'
+    When I run osync "setup alias remove box1"
+    Then the command succeeds
+    And the settings file has "manage.servers" set to '[]'
+
+  @cli
+  Scenario: Unknown aliases cannot be servers of manage
+    When I run osync "setup manage servers nothere"
+    Then the command fails
+
+  @cli
+  Scenario: The settings can take precedence over XOLLAMA_HOST / OLLAMA_HOST
+    When I run osync "setup server env ignore"
+    Then the command fails
+    When I run osync "setup server ollama 127.0.0.1:1"
+    And I run osync "setup server env ignore"
+    Then the command succeeds
+    And the settings file has "server.ignoreEnvironment" set to "true"
+    When I run osync "setup server env use"
+    Then the command succeeds
+    And the settings file has no "server.ignoreEnvironment"
+
   # Aliases in real commands: "r1" stands for the remote1 server
   @local @remote1
   Scenario: Upload to a server alias
