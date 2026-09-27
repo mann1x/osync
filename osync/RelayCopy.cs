@@ -78,7 +78,7 @@ namespace osync
             {
                 // The blobs are already on the destination; only the manifest could not be fetched from the relay
                 // (e.g. the destination cannot connect to this machine). Recreate the model from its files instead.
-                Console.WriteLine($"Warning: the destination could not install the manifest from the relay ({ex.Message}).");
+                Out.Warning($"the destination could not install the manifest from the relay ({ex.Message}).");
                 Console.WriteLine("Recreating the model from its files on the destination...");
                 await CreateFromManifestAsync(destServer, destModel, manifest, sourceShow.RootElement);
             }

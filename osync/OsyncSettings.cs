@@ -38,6 +38,14 @@ namespace osync
 
         public ManageSettings Manage { get; set; } = new();
 
+        public ShellSettings Shell { get; set; } = new();
+
+        /// <summary>
+        /// Server aliases: name → server URL (e.g. "gpu" → "http://192.168.1.10:11434"). An alias can be used wherever
+        /// a server is expected: <c>-d gpu</c>, <c>osync cp model gpu/</c>, <c>osync cp gpu/model local-copy</c>.
+        /// </summary>
+        public Dictionary<string, string> Aliases { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
         public sealed class ServerSettings
         {
             /// <summary>auto (detect), ollama or xollama.</summary>
@@ -48,11 +56,26 @@ namespace osync
 
             /// <summary>Port; null = the flavor's default (11434 Ollama, 22434 xOllama).</summary>
             public int? Port { get; set; }
+
+            /// <summary>
+            /// Ollama and xOllama run side by side on the host: <see cref="Flavor"/> is the default one (the local
+            /// server of every command), the other is reached through its alias ("ollama" / "xollama").
+            /// </summary>
+            public bool? Both { get; set; }
         }
 
         public sealed class ManageSettings
         {
             /// <summary>Name of the last used manage theme.</summary>
+            public string? Theme { get; set; }
+
+            /// <summary>Initial sort order: name+, name-, size+, size-, created+, created- (default name+).</summary>
+            public string? Sort { get; set; }
+        }
+
+        public sealed class ShellSettings
+        {
+            /// <summary>Theme of the command output in the shell (same names as manage, or "plain"); null = default.</summary>
             public string? Theme { get; set; }
         }
 
@@ -103,6 +126,8 @@ namespace osync
                 var settings = JsonSerializer.Deserialize<OsyncSettings>(File.ReadAllText(path), JsonOptions) ?? new OsyncSettings();
                 settings.Server ??= new ServerSettings();
                 settings.Manage ??= new ManageSettings();
+                settings.Shell ??= new ShellSettings();
+                settings.Aliases = new Dictionary<string, string>(settings.Aliases ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
                 settings.ColorMode ??= "auto";
                 return settings;
             }

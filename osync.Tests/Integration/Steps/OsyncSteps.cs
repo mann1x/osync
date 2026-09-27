@@ -81,7 +81,41 @@ public sealed class OsyncSteps
         {
             element.TryGetProperty(name, out element).Should().BeTrue($"settings.json should contain {path}");
         }
-        element.ToString().Should().Be(_state.Resolve(expected));
+        var actual = element.ValueKind == System.Text.Json.JsonValueKind.String ? element.GetString() : element.GetRawText();
+        actual.Should().Be(_state.Resolve(expected));
+    }
+
+    [Then("the settings file has no {string}")]
+    public void ThenTheSettingsFileHasNo(string path)
+    {
+        var file = Path.Combine(_state.ConfigDir, "settings.json");
+        File.Exists(file).Should().BeTrue($"{file} should have been written");
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(file));
+        var element = doc.RootElement;
+        var parts = path.Split('.');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (!element.TryGetProperty(parts[i], out element) || element.ValueKind == System.Text.Json.JsonValueKind.Null)
+                return; // missing (or null) = not set
+        }
+        throw new Xunit.Sdk.XunitException($"settings.json should not contain {path}, but it is {element}");
+    }
+
+    /// <summary>Adds a server alias to settings.json (keeping what is already there) for one of the test servers.</summary>
+    [Given("the alias {string} for the {word} server")]
+    public void GivenTheAliasForTheServer(string alias, string server)
+    {
+        var file = Path.Combine(_state.ConfigDir, "settings.json");
+        var root = File.Exists(file)
+            ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!.AsObject()
+            : new System.Text.Json.Nodes.JsonObject();
+        if (root["aliases"] is not System.Text.Json.Nodes.JsonObject aliases)
+        {
+            aliases = new System.Text.Json.Nodes.JsonObject();
+            root["aliases"] = aliases;
+        }
+        aliases[_state.Resolve(alias)] = TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured");
+        File.WriteAllText(file, root.ToJsonString());
     }
 
     [Then("the settings file does not exist")]

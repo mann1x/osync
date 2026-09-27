@@ -103,7 +103,7 @@ namespace osync
                 }
                 catch (Exception ex)
                 {
-                    System.Console.WriteLine($"\nError: {ex.Message}");
+                    Out.Error($"\n{ex.Message}");
                 }
             }
 
@@ -531,7 +531,7 @@ namespace osync
 
                 if (loadedState == null)
                 {
-                    System.Console.WriteLine("Error: Failed to parse session file");
+                    Out.Error("Failed to parse session file");
                     return;
                 }
 
@@ -1069,7 +1069,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                System.Console.WriteLine($"\nError: {ex.Message}");
+                Out.Error($"\n{ex.Message}");
             }
             finally
             {

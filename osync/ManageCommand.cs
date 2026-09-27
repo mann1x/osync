@@ -61,6 +61,34 @@ namespace osync
         CreatedDesc
     }
 
+    /// <summary>Names of the manage sort orders, as stored in the settings file (manage.sort).</summary>
+    internal static class ManageSortOrders
+    {
+        public static readonly (SortOrder Order, string Name, string Description)[] All =
+        {
+            (SortOrder.AlphabeticalAsc, "name+", "name, A to Z"),
+            (SortOrder.AlphabeticalDesc, "name-", "name, Z to A"),
+            (SortOrder.SizeDesc, "size-", "size, largest first"),
+            (SortOrder.SizeAsc, "size+", "size, smallest first"),
+            (SortOrder.CreatedDesc, "created-", "newest first"),
+            (SortOrder.CreatedAsc, "created+", "oldest first")
+        };
+
+        /// <summary>Sort order from a name (name+, size-, created-, ... also name, size, newest, oldest); null if unknown.</summary>
+        public static SortOrder? Parse(string? value) => value?.Trim().ToLowerInvariant() switch
+        {
+            "name+" or "name" or "name-asc" => SortOrder.AlphabeticalAsc,
+            "name-" or "name-desc" => SortOrder.AlphabeticalDesc,
+            "size-" or "size" or "size-desc" or "largest" => SortOrder.SizeDesc,
+            "size+" or "size-asc" or "smallest" => SortOrder.SizeAsc,
+            "created-" or "created" or "newest" or "created-desc" => SortOrder.CreatedDesc,
+            "created+" or "oldest" or "created-asc" => SortOrder.CreatedAsc,
+            _ => null
+        };
+
+        public static string Name(SortOrder order) => All.First(o => o.Order == order).Name;
+    }
+
     /// <summary>
     /// Full-screen model manager (Terminal.Gui 2). Operations that print to the console (copy, run, update,
     /// pull) close the TUI, run on the plain console and then reopen it: <see cref="Run"/> loops over
@@ -78,8 +106,8 @@ namespace osync
         private SortOrder _currentSortOrder = SortOrder.AlphabeticalAsc;
 
         // Theme chosen by the user, and the same theme adapted to the terminal's color depth
-        private ManageTheme _theme = ManageThemes.Default;
-        private ManageTheme _drawTheme = ManageThemes.Default;
+        private OsyncTheme _theme = Themes.Default;
+        private OsyncTheme _drawTheme = Themes.Default;
         private ColorDepth _depth = ColorDepth.TrueColor;
 
         // Dynamic column widths
@@ -131,7 +159,8 @@ namespace osync
 
         public void Run()
         {
-            _theme = ManageThemes.Find(OsyncSettings.Current.Manage.Theme);
+            _theme = Themes.Find(OsyncSettings.Current.Manage.Theme);
+            _currentSortOrder = ManageSortOrders.Parse(OsyncSettings.Current.Manage.Sort) ?? SortOrder.AlphabeticalAsc;
 
             while (true)
             {
@@ -157,10 +186,10 @@ namespace osync
         {
             // Terminal.Gui writes 24-bit or 16 colors; draw the theme in the colors that actually reach the screen
             var depth = ColorSupport.Current;
-            var sixteen = ManageThemes.UseSixteenColors(depth, Environment.GetEnvironmentVariable("TERM_PROGRAM"));
+            var sixteen = Themes.UseSixteenColors(depth, Environment.GetEnvironmentVariable("TERM_PROGRAM"));
             Driver.Force16Colors = sixteen;
             _depth = sixteen && depth != ColorDepth.None ? ColorDepth.Standard16 : depth;
-            _drawTheme = ManageThemes.Adapt(_theme, _depth);
+            _drawTheme = Themes.Adapt(_theme, _depth);
             RegisterSchemes();
             ConfigureLook();
 
@@ -290,7 +319,7 @@ namespace osync
             catch (Exception ex)
             {
                 if (!IsCancellation(ex))
-                    Console.WriteLine($"\nError: {ex.Message}");
+                    Out.Error($"\n{ex.Message}");
             }
             finally
             {
@@ -417,10 +446,10 @@ namespace osync
             _modelListView?.SetNeedsDraw();
         }
 
-        private void SetTheme(ManageTheme theme)
+        private void SetTheme(OsyncTheme theme)
         {
             _theme = theme;
-            _drawTheme = ManageThemes.Adapt(theme, _depth);
+            _drawTheme = Themes.Adapt(theme, _depth);
             ApplyTheme();
         }
 
@@ -1387,7 +1416,7 @@ namespace osync
                             Console.WriteLine($"--- Copying {mdl.Name} ({successCount + failCount + 1}/{selectedModels.Count}) ---");
                             _program.ActionCopy(SourceOf(mdl), server.TrimEnd('/') + "/" + mdl.Name, null, token);
                             successCount++;
-                            Console.WriteLine($"✓ Successfully copied {mdl.Name}\n");
+                            Out.Success($"Successfully copied {mdl.Name}\n");
                         }
                         catch (Exception ex) when (IsCancellation(ex))
                         {
@@ -1397,7 +1426,7 @@ namespace osync
                         catch (Exception ex)
                         {
                             failCount++;
-                            Console.WriteLine($"✗ Failed to copy {mdl.Name}: {ex.Message}\n");
+                            Out.Failure($"Failed to copy {mdl.Name}: {ex.Message}\n");
                         }
                     }
                     Console.WriteLine($"\nBatch copy completed: {successCount} succeeded, {failCount} failed");
@@ -1699,7 +1728,7 @@ namespace osync
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"✗ Failed to update {model.Name}: {ex.Message}");
+                        Out.Failure($"Failed to update {model.Name}: {ex.Message}");
                     }
                 }
                 return selectedModels[0].Name;
@@ -1976,7 +2005,7 @@ namespace osync
         private void ExecuteThemePicker()
         {
             var original = _theme;
-            var names = new ObservableCollection<string>(ManageThemes.All.Select(t => t.Name));
+            var names = new ObservableCollection<string>(Themes.All.Select(t => t.Name));
             var dialog = NewDialog("Theme", 40);
 
             var list = new ListView
@@ -1988,12 +2017,12 @@ namespace osync
                 KeystrokeNavigator = null
             };
             list.SetSource(names);
-            list.SelectedItem = ManageThemes.IndexOf(_theme);
+            list.SelectedItem = Themes.IndexOf(_theme);
             list.ValueChanged += (_, e) =>
             {
-                if (e.NewValue is int i && i >= 0 && i < ManageThemes.All.Count)
+                if (e.NewValue is int i && i >= 0 && i < Themes.All.Count)
                 {
-                    SetTheme(ManageThemes.All[i]);
+                    SetTheme(Themes.All[i]);
                     dialog.SetNeedsDraw();
                 }
             };
@@ -2073,6 +2102,12 @@ namespace osync
             if (overriddenBy != null)
             {
                 dialog.Add(NewLabel($"Note: {overriddenBy} is set and takes precedence over these settings.", 1, y++));
+                y++;
+            }
+            if (settings.Server.Both == true)
+            {
+                dialog.Add(NewLabel("Ollama and xOllama run side by side: the type is the default server", 1, y++));
+                dialog.Add(NewLabel("(both servers and their aliases: osync setup server).", 1, y++));
                 y++;
             }
 
@@ -2161,6 +2196,8 @@ namespace osync
             var previousColorMode = settings.ColorMode;
             var effectiveFlavorPort = flavor == ServerFlavor.XOllama ? OllamaServer.XOllamaDefaultPort : OllamaServer.OllamaDefaultPort;
             settings.Server.Flavor = flavor switch { ServerFlavor.Ollama => "ollama", ServerFlavor.XOllama => "xollama", _ => "auto" };
+            // Both servers side by side: the type chooses the default one; "auto" ends the side-by-side setup
+            if (flavor == null) settings.Server.Both = null;
             settings.Server.Host = host.Length == 0 ? null : host;
             settings.Server.Port = port == effectiveFlavorPort ? null : port;
             settings.ColorMode = colorValues[colorSelector.Value ?? 0];

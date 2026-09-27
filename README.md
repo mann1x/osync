@@ -47,7 +47,7 @@
 - 💾 **Offline Deployment** - Perfect for air-gapped servers and isolated networks
 - 🎯 **Wildcard Patterns** - Use `*` wildcards for batch operations
 - ⚡ **Bandwidth Control** - Throttle upload speeds and configure memory buffer size
-- 🎨 **Theme Support** - 14 true-color themes for `manage` (Dracula, Nord, Tokyo Night, Catppuccin, Gruvbox, Solarized, ...), adapted to 256 and 16-color terminals
+- 🎨 **Theme Support** - 34 true-color themes (Dracula, Nord, Tokyo Night, Catppuccin, Gruvbox, Rose Pine, Kanagawa, Solarized, light themes, ...) for `manage` and the colored command output, adapted to 256 and 16-color terminals
 - 💬 **Interactive Chat** - Chat with models directly from the CLI
 - 🧠 **Memory Management** - Load/unload models from VRAM with process status monitoring
 - 📊 **Quantization Comparison** - Compare quality and performance across model quantizations with detailed scoring
@@ -82,7 +82,10 @@
 Commands without `-d` work on the local server, found in this order:
 
 1. `XOLLAMA_HOST` (xOllama), then `OLLAMA_HOST` (Ollama); bind addresses such as `0.0.0.0` are mapped to `localhost`
-2. Otherwise the first server answering on `localhost:11434` (Ollama default) or `localhost:22434` (xOllama default)
+2. The server in the [preferences file](#preferences-file) (`osync setup server`)
+3. Otherwise the first server answering on `localhost:11434` (Ollama default) or `localhost:22434` (xOllama default)
+
+`osync install` configures it: when exactly one server answers on this machine it is used without questions; when none or both answer, it asks for the server type (1 Ollama, 2 xOllama, 3 both side by side), host and ports. With both, one is the default local server and each gets an alias (`ollama`, `xollama`), so the other one is always at hand: `osync ls -d xollama`, `osync cp model xollama/`. Change it any time with `osync setup server`.
 
 osync detects whether a server is Ollama or xOllama (`osync ps` shows it) and, for local operations, runs the matching CLI: `xollama` when the local server is xOllama (or only `xollama` is installed), else `ollama`. Set `OSYNC_OLLAMA_CLI` to force a specific CLI. The models directory is taken from `XOLLAMA_MODELS`, then `OLLAMA_MODELS`, then the platform default.
 
@@ -100,20 +103,45 @@ osync keeps user preferences in `settings.json` in the per-OS configuration fold
 
 ```json
 {
-  "server": { "flavor": "xollama", "host": "localhost", "port": 22434 },
+  "server": { "flavor": "ollama", "host": "localhost", "both": true },
+  "aliases": {
+    "ollama": "http://localhost:11434",
+    "xollama": "http://localhost:22434",
+    "gpu": "http://192.168.1.10:11434"
+  },
   "colorMode": "auto",
-  "manage": { "theme": "Dracula" }
+  "manage": { "theme": "Dracula", "sort": "size-" },
+  "shell": { "theme": "Tokyo Night" }
 }
 ```
 
-- `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port). `osync install` asks for these; `XOLLAMA_HOST` / `OLLAMA_HOST` override them.
+- `server` - the local server: `flavor` (`auto`, `ollama`, `xollama`), `host` and `port` (default: the flavor's port); `both` when Ollama and xOllama run side by side (`flavor` is then the default one). `XOLLAMA_HOST` / `OLLAMA_HOST` override it.
+- `aliases` - [server aliases](#server-aliases).
 - `colorMode` - `auto` (detect), `truecolor`, `256`, `16` or `none`; `OSYNC_COLOR_MODE` and `NO_COLOR` override it.
-- `manage.theme` - the theme chosen in `osync manage` (Ctrl+T).
+- `manage.theme`, `manage.sort` - theme (also chosen with Ctrl+T in `manage`) and initial sort order (`name+`, `name-`, `size-`, `size+`, `created-`, `created+`) of `osync manage`.
+- `shell.theme` - colors of the command output (any theme name, or `plain` for no colors).
 - `OSYNC_CONFIG_DIR` moves the settings folder.
+
+Everything can be changed with [`osync setup`](#setup-setup) instead of editing the file.
+
+### Server aliases
+
+An alias is a short name for a server (`osync setup alias add gpu 192.168.1.10`), usable wherever osync expects a server:
+
+```bash
+osync ls -d gpu                 # list the models of the server
+osync cp qwen3:8b gpu/          # upload
+osync cp gpu/qwen3:8b qwen3-gpu # download
+osync manage gpu
+```
+
+An alias takes precedence over a model namespace with the same name (`gpu/model`). Names start with a letter and use letters, digits, `-` and `_`.
 
 ### Colors
 
 osync detects the terminal's color depth from `COLORTERM` (`truecolor`/`24bit`), `TERM` (`*-256color`, `*-direct`), `TERM_PROGRAM` and Windows Terminal, and uses true color, 256 or 16 colors accordingly (`osync -v --verbose` shows what was detected and why). SSH does not forward `COLORTERM` by default, so terminals that support true color are seen as 256-color over SSH/tmux: set `"colorMode": "truecolor"` in the settings file, or `OSYNC_COLOR_MODE=truecolor`, or forward `COLORTERM` (`SendEnv COLORTERM` / `AcceptEnv COLORTERM`). `NO_COLOR` disables colors.
+
+Command output is colored with the shell theme (`osync setup shell theme NAME`; `osync setup shell themes` shows every theme with a preview): the same 34 themes as `manage`, with light themes for light terminals (the default follows `COLORFGBG` when the terminal sets it), or `plain`. Output that goes to a pipe or a file is never colored.
 
 `osync manage` draws with 24-bit colors; at 256 colors every theme color is snapped to the xterm-256 palette (tmux and most 256-color terminals then show exactly that color), at 16 colors the themes switch to the 16 standard colors with contrast checks. macOS Terminal.app gets 16 colors unless `colorMode` says `truecolor` (it misreads 24-bit colors on older macOS). If `manage` does not start or draw correctly on an old Windows console, `OSYNC_TUI_DRIVER=windows` selects the Windows console driver (`ansi` and `dotnet` are the others).
 
@@ -1208,7 +1236,7 @@ osync manage myserver/                    # trailing slash
 - Column colors (name, size, parameters, quantization, family, age, ID), `●` marks models loaded in memory
 - Multi-selection for batch copy, delete and update
 - Filter by typing, multiple sort modes
-- 14 themes with live preview; the chosen theme is saved in the [preferences file](#preferences-file)
+- 34 themes with live preview; the chosen theme is saved in the [preferences file](#preferences-file)
 - Settings dialog: local server (Ollama / xOllama, host, port) and color mode, saved in the preferences file
 - Copy, run, update and pull run on the plain console and return to the list, with the cursor on the model
 
@@ -1239,8 +1267,39 @@ osync manage myserver/                    # trailing slash
 - Size+ (ascending), Size- (descending)
 - Created+ (oldest first), Created- (newest first)
 
-**Themes:**
-- Default, Dracula, Nord, Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Monokai, Solarized Dark, Ocean, Matrix, Solarized Light, Light, High Contrast, Classic
+**Themes** (`osync setup manage themes` shows them with a preview):
+- Dark: Default, Dracula, Nord, Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Monokai, Solarized Dark, Ocean, Matrix, High Contrast, Classic, One Dark, GitHub Dark, Everforest, Rose Pine, Kanagawa, Ayu Mirage, Night Owl, Material Ocean, Synthwave, Palenight, Iceberg, Zenburn, Cobalt, Horizon, Amber
+- Light: Solarized Light, Light, Catppuccin Latte, Gruvbox Light, One Light, Ayu Light, Rose Pine Dawn
+
+#### Setup (`setup`)
+
+Preferences in the [settings file](#preferences-file), by section. Without the last arguments a section asks interactively (numbered choices, Enter keeps the current value).
+
+```bash
+osync setup                                   # summary, then a menu
+osync setup show                              # summary only
+
+osync setup server                            # ask: Ollama, xOllama or both, host, ports
+osync setup server xollama 192.168.1.5        # one server (port: the flavor's default)
+osync setup server ollama nas:11500
+osync setup server both [host] [xollama]      # both side by side (default ports; optional default server)
+osync setup server auto                       # back to auto-detection
+
+osync setup alias                             # list (and add/remove interactively)
+osync setup alias add gpu 192.168.1.10        # port 11434, or 22434 when only xOllama answers
+osync setup alias remove gpu
+
+osync setup manage                            # theme and default sort order
+osync setup manage theme "Tokyo Night"        # name, loose spelling (tokyo-night) or number
+osync setup manage sort size-                 # name+ name- size- size+ created- created+
+osync setup manage themes                     # all themes with a preview
+
+osync setup shell                             # theme, color mode, tab completion
+osync setup shell theme gruvbox-light         # or: plain, default
+osync setup shell colors truecolor            # auto, truecolor, 256, 16, none
+osync setup shell completion                  # install tab completion (bash / PowerShell)
+osync setup shell themes
+```
 
 #### Version (`showversion`, `-v`)
 
@@ -1439,7 +1498,13 @@ v1.3.1
 - **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), color mode, `manage` theme
 - **`osync install` asks for the local server** (Ollama or xOllama, host, port), with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
 - **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
-- **`manage` rewritten on Terminal.Gui 2** - true color with 14 multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
+- **`manage` rewritten on Terminal.Gui 2** - true color with multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
+- **`osync setup`** - one command for the preferences: `server` (Ollama, xOllama or both), `alias` (server aliases), `manage` (theme, default sort order), `shell` (colors, theme, tab completion), `show`; interactive or with arguments for scripts
+- **Server aliases** - `osync setup alias add gpu 192.168.1.10`, then `-d gpu`, `osync cp model gpu/`, `osync cp gpu/model copy`, `osync manage gpu`
+- **Ollama and xOllama side by side** - server type "Both": one is the default local server, each gets an alias (`ollama`, `xollama`)
+- **`osync install` asks for the server only when needed** - a single server found on this machine is used without questions; it asks when none or both are found
+- **Colored command output again** - `ls`, `ps`, `show`, `-v`, copy/pull/update progress, errors, warnings and results use the shell theme (removed in 1.0.1 because of garbled output on Linux); plain when redirected, with `NO_COLOR` or the `plain` theme
+- **34 themes** for `manage` and the shell, 7 of them for light terminals, all checked for readable contrast at true color, 256 and 16 colors
 - **Fixed copy to a remote server failing when the local models directory is not readable** (e.g. the server runs as the `ollama` service user): the upload now goes through the local server with the push relay
 - **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
 - **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS
