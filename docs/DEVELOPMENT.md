@@ -52,7 +52,8 @@ Scenario tags declare requirements; a scenario whose requirements are missing is
 | `@registry` | `OSYNC_TEST_REGISTRY=1` (downloads from registry.ollama.ai / huggingface.co) |
 | `@defaultport` | the local server is on `localhost:11434` (Ollama) or `localhost:22434` (xOllama, with nothing on 11434) — tests osync's own server discovery |
 | `@exclusive` | `OSYNC_TEST_EXCLUSIVE=1`: the remote servers are dedicated to tests (e.g. "unload all") |
-| `@tty` | Runs osync in a pseudo terminal (`script(1)`, Linux only) and types keys once the screen shows the ready text: interactive commands such as `manage` (`Manage.feature`) |
+| `@tty` | Runs osync in a pseudo terminal (`script(1)`, Linux only) and types keys once the screen shows the ready text: interactive commands such as `manage` (`Manage.feature`). Keys go 500 ms apart; `wait:TEXT` waits for TEXT to appear after the previous key, for a key that must reach a program that is not ready yet (manage coming back after a console action) |
+| `@xollama` | The local server is xOllama and the `xollama` CLI is on PATH: xOllama-only features (manage's Ctrl+W tweak) |
 | `@xollamabug` | Documents a bug of the xOllama server itself (not osync); the scenario is skipped when the local server is xOllama. Remove the tag once the pinned xOllama release fixes it. |
 | `@knownbug` | Documents a confirmed, not yet fixed osync bug. Excluded from the required CI step and reported separately; remove the tag in the PR that fixes it. |
 

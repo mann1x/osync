@@ -93,6 +93,31 @@ public sealed class ModelSteps
             "{0} should exist on {1} after:\n{2}", name, server, _state.LastResult);
     }
 
+    /// <summary>A setting of the model's xOllama config ("xollama" in /api/show), by JSON path ("kv.v").</summary>
+    [Then("the model {string} on {word} has the xOllama setting {string} set to {string}")]
+    public async Task ThenTheModelHasTheXOllamaSetting(string model, string server, string path, string value)
+    {
+        var show = await ScenarioState.Api(server).ShowAsync(_state.Resolve(model));
+        System.Text.Json.Nodes.JsonNode? node = show["xollama"];
+        foreach (var part in path.Split('.'))
+            node = node?[part];
+        node.Should().NotBeNull("{0} should state {1}; its xOllama config is {2} after:\n{3}",
+            model, path, show["xollama"]?.ToJsonString() ?? "null", _state.LastResult);
+        node!.ToString().Should().Be(value, "the xOllama config after:\n{0}", _state.LastResult);
+    }
+
+    /// <summary>Gives the model an xOllama config (JSON), the way `xollama tweak` writes one.</summary>
+    [Given("the model {string} on {word} has the xOllama settings {string}")]
+    public async Task GivenTheModelHasTheXOllamaSettings(string model, string server, string json) =>
+        await ScenarioState.Api(server).SetXOllamaConfigAsync(_state.Resolve(AsPlaceholder(model)), json);
+
+    [Then("the model {string} on {word} has no xOllama settings")]
+    public async Task ThenTheModelHasNoXOllamaSettings(string model, string server)
+    {
+        var show = await ScenarioState.Api(server).ShowAsync(_state.Resolve(model));
+        show["xollama"].Should().BeNull("the xOllama config after:\n{0}", _state.LastResult);
+    }
+
     [Then("the model {string} does not exist on {word}")]
     public async Task ThenTheModelDoesNotExistOn(string model, string server)
     {

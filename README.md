@@ -1240,6 +1240,7 @@ osync manage myserver/                    # trailing slash
 - 34 themes with live preview; the chosen theme is saved in the [preferences file](#preferences-file)
 - Settings dialog: local server (Ollama / xOllama, host, port) and color mode, saved in the preferences file
 - Copy, run, update and pull run on the plain console and return to the list, with the cursor on the model
+- On an xOllama server: the model details list the model's xOllama settings, and Ctrl+W changes them with `xollama tweak`
 
 **Keys:**
 - **Up/Down, PgUp/PgDn, Home/End** - Move
@@ -1262,7 +1263,12 @@ osync manage myserver/                    # trailing slash
 - **Ctrl+O** - Cycle sort order
 - **Ctrl+T** - Choose the theme (live preview, saved)
 - **Ctrl+E** - Settings: local server and color mode (saved)
+- **Ctrl+W** - Tweak (xOllama servers): change the model's xOllama settings (see below)
 - **Ctrl+Q** - Quit
+
+**Tweak (xOllama):** xOllama keeps settings of its own in the model: engine, KV cache types, dynamic slots, DCA, session affinity and prefix pooling, council, GPU/devices, speculative decoding. They are listed in the model details (Enter), and on an xOllama server **Ctrl+W** changes them for the model under the cursor, or for each selected model. Pick what to change (every setting, or one group such as KV cache or council), or remove the settings. You can also type flags: a flag with a value is set without questions, e.g. `--kv-k=q8_0 --kv-v=q8_0` or `--council=on`.
+
+osync runs `xollama tweak model <model>` on the console against the server manage shows, including a remote one. The questions, the explanations and the consistency checks are xOllama's own, and so is the list of settings, so it always matches the xOllama version. This needs the `xollama` CLI on this machine: on PATH, or set `OSYNC_XOLLAMA_CLI` to its path. Only the xOllama settings layer changes: weights, template, system prompt and parameters stay as they are. See [xOllama's tweak documentation](https://github.com/mann1x/xollama/blob/main/docs/xollama/tweak.mdx).
 
 **Sort Modes:**
 - Name+ (ascending), Name- (descending)
@@ -1486,6 +1492,9 @@ osync mv qwen2 qwen2-7b:dev
 ## Changelog
 
 v1.4.1
+
+**New**
+- **`manage` tweaks xOllama model settings** - on an xOllama server, Ctrl+W runs `xollama tweak model` for the model under the cursor, or for each selected model, against the server manage shows. You can walk every setting, one group (KV cache, dynamic slots, DCA, session pooling, council, GPU/devices, engine), or remove the settings, and add flags such as `--kv-k=q8_0` that are set without questions. The model details list the xOllama settings. Needs the `xollama` CLI on PATH, or `OSYNC_XOLLAMA_CLI`
 
 **Fixes**
 - **Copies between servers are byte-for-byte again when the destination cannot pull from the relay** (for example a Windows destination: the relay's `host:port` is not a valid folder name there). The model used to be recreated from `/api/show`, which dropped the renderer, parser, `requires` and xOllama's model settings (a council became a plain model), merged several licenses and changed the parameters, yet osync reported success. It is now recreated from the source's manifest with the config and settings layers verbatim, so every layer and the config have the source's digests

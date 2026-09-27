@@ -236,6 +236,37 @@ namespace osync
         }
 
         /// <summary>
+        /// The xollama CLI, for the commands only xOllama has (tweak): OSYNC_XOLLAMA_CLI when set, else
+        /// OSYNC_OLLAMA_CLI when it names an xollama binary, else "xollama" when it is on PATH; null when none is found.
+        /// </summary>
+        public static string? XOllamaCli
+        {
+            get
+            {
+                var configured = Environment.GetEnvironmentVariable("OSYNC_XOLLAMA_CLI");
+                if (!string.IsNullOrWhiteSpace(configured))
+                    return configured.Trim();
+                var cli = Environment.GetEnvironmentVariable("OSYNC_OLLAMA_CLI");
+                if (!string.IsNullOrWhiteSpace(cli) &&
+                    Path.GetFileName(cli.Trim()).Contains("xollama", StringComparison.OrdinalIgnoreCase))
+                    return cli.Trim();
+                return IsOnPath("xollama") ? "xollama" : null;
+            }
+        }
+
+        /// <summary>
+        /// Points a CLI process at the server <paramref name="url"/> (local or remote): ollama reads OLLAMA_HOST,
+        /// xollama reads XOLLAMA_HOST.
+        /// </summary>
+        public static void ApplyCliEnvironment(ProcessStartInfo startInfo, string url)
+        {
+            var uri = new Uri(url);
+            var host = uri.Scheme == Uri.UriSchemeHttps ? $"{uri.Scheme}://{uri.Authority}" : uri.Authority;
+            startInfo.Environment["OLLAMA_HOST"] = host;
+            startInfo.Environment["XOLLAMA_HOST"] = host;
+        }
+
+        /// <summary>
         /// Creates a process for the local CLI (ollama / xollama) that talks to the local server osync resolved.
         /// </summary>
         public static Process CreateCliProcess(string arguments)
@@ -248,12 +279,7 @@ namespace osync
         }
 
         /// <summary>Points the ollama/xollama CLI at the resolved local server (each CLI reads its own variable).</summary>
-        public static void ApplyCliEnvironment(ProcessStartInfo startInfo)
-        {
-            var hostPort = new Uri(LocalUrl).Authority;
-            startInfo.Environment["OLLAMA_HOST"] = hostPort;
-            startInfo.Environment["XOLLAMA_HOST"] = hostPort;
-        }
+        public static void ApplyCliEnvironment(ProcessStartInfo startInfo) => ApplyCliEnvironment(startInfo, LocalUrl);
 
         /// <summary>Models directory from the environment: XOLLAMA_MODELS (xOllama's override) then OLLAMA_MODELS.</summary>
         public static string? ModelsDirFromEnvironment()

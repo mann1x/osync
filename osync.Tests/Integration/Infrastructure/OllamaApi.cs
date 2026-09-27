@@ -113,6 +113,25 @@ public sealed class OllamaApi
     }
 
     /// <summary>
+    /// Replaces the xOllama config of <paramref name="model"/> (xOllama only): a create from the model itself with
+    /// the "xollama" field, which is what `xollama tweak model` sends.
+    /// </summary>
+    public async Task SetXOllamaConfigAsync(string model, string json)
+    {
+        var body = new JsonObject
+        {
+            ["model"] = WithTag(model),
+            ["from"] = WithTag(model),
+            ["xollama"] = JsonNode.Parse(json),
+            ["stream"] = false
+        };
+        using var resp = await Http.PostAsJsonAsync($"{BaseUrl}/api/create", body);
+        var text = await resp.Content.ReadAsStringAsync();
+        if (!resp.IsSuccessStatusCode || text.Contains("\"error\""))
+            throw new InvalidOperationException($"Setting the xOllama config of {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
+    }
+
+    /// <summary>
     /// Pulls a model from the registry (used only by @registry tests). Server errors (the server could not reach
     /// the registry: connection reset, timeout) are retried, so a network hiccup does not fail the scenario's setup.
     /// </summary>
