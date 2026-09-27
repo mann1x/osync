@@ -49,6 +49,20 @@ namespace osync
         public ConcurrentBag<string> Transferred { get; } = new();
         public ConcurrentBag<string> Skipped { get; } = new();
 
+        /// <summary>
+        /// Contents of the small blobs that went through the relay (config, template, parameters, xOllama settings, ...),
+        /// by digest: a model recreated from its manifest takes these parts verbatim.
+        /// </summary>
+        public ConcurrentDictionary<string, byte[]> SmallBlobs { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public const int SmallBlobLimit = 1024 * 1024;
+
+        /// <summary>
+        /// Digests the relay asks the source to upload even when the destination already has them, so that their
+        /// contents reach <see cref="SmallBlobs"/> (set before a second push).
+        /// </summary>
+        public ConcurrentDictionary<string, bool> ForceUpload { get; } = new(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>First error that happened while forwarding a blob, if any.</summary>
         public string? ForwardError { get; private set; }
 
@@ -65,11 +79,11 @@ namespace osync
         /// <summary>
         /// Starts a relay reachable from <paramref name="sourceServer"/>. The advertised address is the local
         /// address used to route to the source - or to the destination when the source runs on this machine, so
-        /// both can connect - (override with OSYNC_RELAY_HOST, e.g. behind NAT). The port is
-        /// OSYNC_RELAY_PORT, else 80 when it can be bound (model names then carry no port, which also works for
-        /// Ollama servers on Windows, where ':' cannot appear in a path), else an ephemeral port.
+        /// both can connect - (override with OSYNC_RELAY_HOST, e.g. behind NAT). The port is <paramref name="port"/> when
+        /// given, else OSYNC_RELAY_PORT, else a free ephemeral port the OS assigns (above 1024; binding port 0 picks one
+        /// atomically, so no other program can take it between a check and the bind).
         /// </summary>
-        public static RegistryRelay Start(string sourceServer, string destServer, long bandwidthLimit, long bufferSize)
+        public static RegistryRelay Start(string sourceServer, string destServer, long bandwidthLimit, long bufferSize, int? port = null)
         {
             var overrideHost = Environment.GetEnvironmentVariable("OSYNC_RELAY_HOST");
             IPAddress advertised;
@@ -85,31 +99,25 @@ namespace osync
             }
 
             var bindAddress = IPAddress.IsLoopback(advertised) ? IPAddress.Loopback : IPAddress.Any;
-            var ports = int.TryParse(Environment.GetEnvironmentVariable("OSYNC_RELAY_PORT"), out var configured)
-                ? new[] { configured }
-                : new[] { 80, 0 };
+            var listenPort = port
+                ?? (int.TryParse(Environment.GetEnvironmentVariable("OSYNC_RELAY_PORT"), out var configured) ? configured : 0);
 
-            Exception? lastError = null;
-            foreach (var port in ports)
+            var listener = new TcpListener(bindAddress, listenPort);
+            try
             {
-                var listener = new TcpListener(bindAddress, port);
-                try
-                {
-                    listener.Start();
-                }
-                catch (SocketException ex)
-                {
-                    lastError = ex;
-                    continue;
-                }
-
-                var boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
-                var authority = boundPort == 80 ? advertised.ToString() : $"{advertised}:{boundPort}";
-                var relay = new RegistryRelay(listener, authority, destServer, bandwidthLimit, bufferSize);
-                relay._acceptLoop = Task.Run(relay.AcceptLoopAsync);
-                return relay;
+                listener.Start();
             }
-            throw new InvalidOperationException($"Could not open a relay port: {lastError?.Message}");
+            catch (SocketException ex)
+            {
+                throw new InvalidOperationException($"Could not open relay port {listenPort}: {ex.Message}");
+            }
+
+            // On port 80 the name carries no port (the registry client's default for http)
+            var boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var authority = boundPort == 80 ? advertised.ToString() : $"{advertised}:{boundPort}";
+            var relay = new RegistryRelay(listener, authority, destServer, bandwidthLimit, bufferSize);
+            relay._acceptLoop = Task.Run(relay.AcceptLoopAsync);
+            return relay;
         }
 
         /// <summary>Model reference for the relay, e.g. 192.168.1.5/osync/relay-1a2b3c4d:latest.</summary>
@@ -236,7 +244,7 @@ namespace osync
                 exists = response.IsSuccessStatusCode;
             }
 
-            if (exists)
+            if (exists && !ForceUpload.ContainsKey(digest))
             {
                 Skipped.Add(digest);
                 await WriteResponseAsync(stream, 200, "OK", new() { ["Docker-Content-Digest"] = digest });
@@ -410,6 +418,7 @@ namespace osync
             private Stream? _writer;
             private Task<HttpResponseMessage>? _destination;
             private FileStream? _spool; // used only when the digest is not known before the data arrives
+            private MemoryStream? _copy = new(); // the data of a small blob, dropped past SmallBlobLimit
 
             public UploadSession(string? digest) => Digest = digest;
 
@@ -436,6 +445,8 @@ namespace osync
                     }
                     await TargetFor(relay).WriteAsync(chunk, relay._cts.Token);
                     Received += chunk.Length;
+                    if (_copy != null && Received <= SmallBlobLimit) _copy.Write(chunk.Span);
+                    else _copy = null;
                 }, relay._cts.Token);
             }
 
@@ -486,6 +497,13 @@ namespace osync
                 {
                     var text = await response.Content.ReadAsStringAsync();
                     throw new InvalidOperationException($"destination rejected blob {Digest}: {(int)response.StatusCode} {text}".Trim());
+                }
+
+                if (_copy != null)
+                {
+                    var data = _copy.ToArray();
+                    if (string.Equals(Digest, "sha256:" + Convert.ToHexString(SHA256.HashData(data)), StringComparison.OrdinalIgnoreCase))
+                        relay.SmallBlobs[Digest!] = data;
                 }
             }
 

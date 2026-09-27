@@ -48,7 +48,17 @@ public static class OsyncCli
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
-            throw new TimeoutException($"osync {arguments} did not finish within {timeout ?? TimeSpan.FromMinutes(3)}");
+            // What osync printed so far shows where it hung (the pipes close once the process is gone)
+            var output = "";
+            try
+            {
+                await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(10));
+                output = AnsiEscape.Replace((await stdout + await stderr).Trim(), "");
+                if (output.Length > 4000) output = "..." + output[^4000..];
+            }
+            catch { /* output unavailable */ }
+            throw new TimeoutException($"osync {arguments} did not finish within {timeout ?? TimeSpan.FromMinutes(3)}" +
+                (output.Length > 0 ? $"; its output so far:\n{output}" : "; it printed nothing"));
         }
 
         return new OsyncResult(

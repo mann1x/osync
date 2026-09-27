@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FluentAssertions;
 using osync.Tests.Integration.Infrastructure;
 using Reqnroll;
@@ -5,7 +6,7 @@ using Reqnroll.UnitTestProvider;
 
 namespace osync.Tests.Integration.Steps;
 
-/// <summary>Arrange and verify model state through the Ollama API. Servers: local, remote1, remote2.</summary>
+/// <summary>Arrange and verify model state through the Ollama API. Servers: local, remote1, remote2, peer.</summary>
 [Binding]
 public sealed class ModelSteps
 {
@@ -24,6 +25,14 @@ public sealed class ModelSteps
         var asset = TestModelAsset.Instance ?? throw new InvalidOperationException(TestModelAsset.UnavailableReason);
         var name = _state.Resolve(AsPlaceholder(model));
         await ScenarioState.Api(server).CreateFromTestModelAsync(name, asset);
+    }
+
+    [Given("a test model {string} with renderer {string} on {word}")]
+    public async Task GivenATestModelWithRendererOn(string model, string renderer, string server)
+    {
+        var asset = TestModelAsset.Instance ?? throw new InvalidOperationException(TestModelAsset.UnavailableReason);
+        var name = _state.Resolve(AsPlaceholder(model));
+        await ScenarioState.Api(server).CreateFromTestModelAsync(name, asset, renderer);
     }
 
     /// <summary>"alpha" -> "{alpha}", "alpha:v1" -> "{alpha}:v1"; text that already has placeholders is kept.</summary>
@@ -134,9 +143,38 @@ public sealed class ModelSteps
 
         var copyShow = await copyApi.ShowAsync(copyName);
         var origShow = await origApi.ShowAsync(origName);
-        copyShow["template"]?.ToString().Should().Be(origShow["template"]?.ToString(), "the template should be preserved");
+        foreach (var field in new[] { "template", "system", "license", "renderer", "parser", "requires" })
+            copyShow[field]?.ToString().Should().Be(origShow[field]?.ToString(), "the {0} should be preserved", field);
         NormalizeParameters(copyShow["parameters"]?.ToString())
             .Should().Be(NormalizeParameters(origShow["parameters"]?.ToString()), "the parameters should be preserved");
+    }
+
+    /// <summary>
+    /// Byte-for-byte: the manifests (read from the servers' models directories, see @stores) list the same config
+    /// and layer digests. /api/show cannot tell, and the manifest digest itself may differ (it is re-serialized).
+    /// </summary>
+    [Then("the model {string} on {word} has the same layers as {string} on {word}")]
+    public void ThenTheModelHasTheSameLayersAs(string model, string server, string original, string originalServer)
+    {
+        var copy = ManifestDigests(server, _state.Resolve(model));
+        var orig = ManifestDigests(originalServer, _state.Resolve(original));
+        copy.Should().Equal(orig, "the copy should have the source's config and layers, byte for byte");
+    }
+
+    private static List<string> ManifestDigests(string server, string model)
+    {
+        var store = TestEnvironment.StoreDir(server) ?? throw new InvalidOperationException($"No models directory for {server}");
+        var colon = model.LastIndexOf(':');
+        var (name, tag) = colon > model.LastIndexOf('/') ? (model[..colon], model[(colon + 1)..]) : (model, "latest");
+        var path = name.Contains('/')
+            ? Path.Combine(store, "manifests", "registry.ollama.ai", name, tag)
+            : Path.Combine(store, "manifests", "registry.ollama.ai", "library", name, tag);
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        var root = doc.RootElement;
+        return root.GetProperty("layers").EnumerateArray()
+            .Select(l => $"{l.GetProperty("mediaType").GetString()} {l.GetProperty("digest").GetString()}")
+            .Prepend("config " + root.GetProperty("config").GetProperty("digest").GetString())
+            .ToList();
     }
 
     [Then("the model {string} is loaded on {word}")]

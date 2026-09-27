@@ -5302,7 +5302,8 @@ Which response is better? Provide bestanswer and reason.";
                 httpClient.DefaultRequestHeaders.Add("Accept", "application/vnd.docker.distribution.manifest.v2+json");
                 httpClient.Timeout = TimeSpan.FromSeconds(30);
 
-                var response = await httpClient.GetAsync(manifestUrl);
+                using var manifestRequest = HuggingFaceAuth.Get(manifestUrl);
+                var response = await httpClient.SendAsync(manifestRequest);
                 if (!response.IsSuccessStatusCode)
                     return null;
 
@@ -5493,7 +5494,8 @@ Which response is better? Provide bestanswer and reason.";
 
                 // First check if repo exists
                 var repoUrl = $"https://huggingface.co/api/models/{namespacePart}/{repo}";
-                var repoResponse = await hfClient.GetAsync(repoUrl, _cts.Token);
+                using var repoRequest = HuggingFaceAuth.Get(repoUrl);
+                var repoResponse = await hfClient.SendAsync(repoRequest, _cts.Token);
 
                 if (!repoResponse.IsSuccessStatusCode)
                     return false;
@@ -5501,7 +5503,8 @@ Which response is better? Provide bestanswer and reason.";
                 // Check if the specific GGUF file exists for the tag
                 // Common patterns: {repo}-{tag}.gguf, {repo}.{tag}.gguf, {tag}.gguf
                 var filesUrl = $"https://huggingface.co/api/models/{namespacePart}/{repo}/tree/main";
-                var filesResponse = await hfClient.GetAsync(filesUrl, _cts.Token);
+                using var filesRequest = HuggingFaceAuth.Get(filesUrl);
+                var filesResponse = await hfClient.SendAsync(filesRequest, _cts.Token);
 
                 if (!filesResponse.IsSuccessStatusCode)
                     return true; // Repository exists, assume file is accessible

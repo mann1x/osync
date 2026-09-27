@@ -78,7 +78,10 @@ public partial class ModelTagResolver
             }
 
             var url = $"https://huggingface.co/api/models/{path}";
-            var modelInfo = await _httpClient.GetFromJsonAsync<HfModelInfo>(url, cancellationToken);
+            using var request = HuggingFaceAuth.Get(url);
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            var modelInfo = await response.Content.ReadFromJsonAsync<HfModelInfo>(cancellationToken);
 
             if (modelInfo?.Siblings == null)
                 return result;

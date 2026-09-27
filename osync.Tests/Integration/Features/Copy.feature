@@ -112,15 +112,68 @@ Feature: Copy models (cp)
     And the model "{dst}" on remote2 is identical to "{src}" on remote1
 
   # Fallback used when the destination cannot connect to the relay: the blobs are already on the
-  # destination and the model is recreated with /api/create (template, parameters, license from the source).
+  # destination and the model is recreated with /api/create from the manifest the source pushed.
   @remote1 @remote2
   Scenario: Copy between remote servers recreates the model when the manifest cannot be installed
     Given a test model "src" on remote1
     When I run osync "cp {remote1}/{src} {remote2}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
     Then the command succeeds
-    And the output contains "Recreating the model from its files"
+    And the output contains "Recreating the model from its manifest"
     And the model "{dst}" on remote2 is identical to "{src}" on remote1
     And no relay model exists on remote2
+
+  # Regression: the recreate dropped the renderer and parser (and xOllama's settings), yet reported success.
+  @remote1 @remote2
+  Scenario: Recreating a model keeps its renderer and parser
+    Given a test model "src" with renderer "qwen3-coder" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    And the output contains "recreated from its manifest, verified"
+    And the model "{dst}" on remote2 is identical to "{src}" on remote1
+
+  # Byte for byte: the recreate sends the source's config and settings layers verbatim, so /api/create writes the
+  # same blobs. The second copy finds every blob already on the destination; the relay then asks the source again
+  # for the small ones.
+  @remote1 @remote2 @stores
+  Scenario: A recreated model has the source's layers byte for byte
+    Given a test model "src" with renderer "qwen3-coder" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{first}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    And the model "{first}" on remote2 has the same layers as "{src}" on remote1
+    And the model "{dst}" on remote2 has the same layers as "{src}" on remote1
+
+  @local @remote1 @stores
+  Scenario: Uploading a local model keeps its layers byte for byte
+    Given a test model "src" with renderer "qwen3-coder" on local
+    When I run osync "cp {src} {remote1}/{dst}"
+    Then the command succeeds
+    And the output contains "recreated from its manifest, verified"
+    And the model "{dst}" on remote1 has the same layers as "{src}" on local
+
+  # Interoperability: remote1/remote2 run one flavor (Ollama or xOllama), peer the other.
+  @remote1 @peer @stores
+  Scenario: Copy to a server of the other flavor keeps every layer
+    Given a test model "src" with renderer "qwen3-coder" on remote1
+    When I run osync "cp {remote1}/{src} {peer}/{dst}"
+    Then the command succeeds
+    And the model "{dst}" on peer has the same layers as "{src}" on remote1
+
+  @peer @remote2 @stores
+  Scenario: Copy from a server of the other flavor keeps every layer
+    Given a test model "src" with renderer "qwen3-coder" on peer
+    When I run osync "cp {peer}/{src} {remote2}/{dst}"
+    Then the command succeeds
+    And the model "{dst}" on remote2 has the same layers as "{src}" on peer
+
+  @remote1 @peer @stores
+  Scenario: Recreating on a server of the other flavor keeps every layer
+    Given a test model "src" with renderer "qwen3-coder" on remote1
+    When I run osync "cp {remote1}/{src} {peer}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    And the output contains "recreated from its manifest, verified"
+    And the model "{dst}" on peer has the same layers as "{src}" on remote1
 
   @remote1 @remote2
   Scenario: Copying a missing remote model fails and creates nothing

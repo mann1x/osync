@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.4.0";
+        public static string AppVersion = "1.4.1";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -2450,56 +2450,12 @@ namespace osync
             }
         }
 
-        static async Task RunCreateModel(string Modelname, Dictionary<string, string> files, string? template = null, string? system = null, List<string>? parameters = null, string? serverUrl = null, bool throwOnError = false)
+        static async Task RunCreateModel(Dictionary<string, object> modelCreate, string? serverUrl = null, bool throwOnError = false)
         {
             int exitcode = 0;
+            var Modelname = modelCreate["model"].ToString();
             try
             {
-                var modelCreate = new Dictionary<string, object>
-                {
-                    { "model", Modelname },
-                    { "files", files }
-                };
-
-                if (!string.IsNullOrEmpty(template))
-                    modelCreate["template"] = template;
-                if (!string.IsNullOrEmpty(system))
-                    modelCreate["system"] = system;
-                if (parameters != null && parameters.Count > 0)
-                {
-                    var paramDict = new Dictionary<string, object>();
-                    foreach (var param in parameters)
-                    {
-                        var parts = param.Split(new[] { ' ' }, 2);
-                        if (parts.Length == 2)
-                        {
-                            var key = parts[0];
-                            var value = parts[1];
-
-                            // "stop" parameter must be an array
-                            if (key == "stop")
-                            {
-                                // Check if there's an existing stop array to add to
-                                if (paramDict.ContainsKey("stop") && paramDict["stop"] is List<string> existingStops)
-                                {
-                                    existingStops.Add(value);
-                                }
-                                else
-                                {
-                                    paramDict["stop"] = new List<string> { value };
-                                }
-                            }
-                            else
-                            {
-                                // Convert to proper type based on parameter name
-                                paramDict[key] = ConvertParameterValue(key, value);
-                            }
-                        }
-                    }
-                    if (paramDict.Count > 0)
-                        modelCreate["parameters"] = paramDict;
-                }
-
                 string data = System.Text.Json.JsonSerializer.Serialize(modelCreate);
 
                 SetCursorVisible(false);
@@ -2527,6 +2483,10 @@ namespace osync
                                 {
                                     laststatus = status.status;
                                     Console.WriteLine(status.status);
+                                }
+                                else if (statusline.Contains("\"error\""))
+                                {
+                                    Out.Error($"could not create '{Modelname}' on the remote server: {statusline}");
                                 }
                             }
                         }
@@ -2557,7 +2517,7 @@ namespace osync
             {
                 SetCursorVisible(true);
                 // Only exit if not in manage mode (throwOnError=false means we should exit on error)
-                if (!throwOnError)
+                if (!throwOnError && exitcode != 0)
                 {
                     System.Environment.Exit(exitcode);
                 }
@@ -2747,8 +2707,8 @@ namespace osync
             long bufferSize = string.IsNullOrEmpty(bufferSizeStr) ? 512L * 1024 * 1024 : ParseSize(bufferSizeStr);
             try
             {
-                RelayCopy.CopyAsync(sourceServer, sourceModel, destServer, destModel, btvalue, bufferSize).GetAwaiter().GetResult();
-                Out.StatusLine($"Successfully copied '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}");
+                var method = RelayCopy.CopyAsync(sourceServer, sourceModel, destServer, destModel, btvalue, bufferSize).GetAwaiter().GetResult();
+                Out.StatusLine($"Successfully copied '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer} ({method})");
                 return true;
             }
             catch (RelayUnreachableException ex)
@@ -2972,103 +2932,9 @@ namespace osync
 
             Out.StatusLine($"Copying model '{Source}' to '{destModel}' on {destServer}...");
 
-            // Parse modelfile to extract template, system, and parameters
-            var templateBuilder = new StringBuilder();
-            var parameters = new List<string>();
-            string? system = null;
-            bool inTemplate = false;
-
-            var p = new Process();
-            p.StartInfo.FileName = OllamaServer.CliName;
-            OllamaServer.ApplyCliEnvironment(p.StartInfo);
-            p.StartInfo.Arguments = @" show " + Source + " --modelfile";
-            p.StartInfo.CreateNoWindow = true;
-            p.StartInfo.UseShellExecute = false;
-            p.StartInfo.WindowStyle = ProcessWindowStyle.Hidden;
-            p.StartInfo.RedirectStandardError = false;
-            p.StartInfo.RedirectStandardOutput = true;
-            p.StartInfo.RedirectStandardInput = false;
-
-            var modelfileLines = new List<string>();
-            p.OutputDataReceived += (a, b) => {
-                if (b != null && b.Data != null)
-                {
-                    if (!b.Data.StartsWith("failed to get console mode"))
-                    {
-                        modelfileLines.Add(b.Data);
-                    }
-                }
-            };
-
-            var stdOutput = new StringBuilder();
-            p.OutputDataReceived += (sender, args) => stdOutput.AppendLine(args.Data);
-
-            try
-            {
-                p.Start();
-                p.BeginOutputReadLine();
-                p.WaitForExit();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"Exception: get Modelfile from ollama show failed: {e.Message}");
-                System.Environment.Exit(1);
-            }
-
-            if (p.ExitCode != 0)
-            {
-                Out.Error($"get Modelfile from ollama show failed: {stdOutput.ToString()}");
-                System.Environment.Exit(1);
-            }
-
-            stdOutput.Clear();
-            stdOutput = null;
-
-            // Parse the modelfile lines
-            for (int i = 0; i < modelfileLines.Count; i++)
-            {
-                string line = modelfileLines[i];
-
-                if (line.StartsWith("#"))
-                    continue;
-
-                if (line.StartsWith("TEMPLATE "))
-                {
-                    inTemplate = true;
-                    string templateStart = line.Substring(9).TrimStart('"');
-                    templateBuilder.AppendLine(templateStart);
-                    continue;
-                }
-
-                if (inTemplate)
-                {
-                    if (line.EndsWith("\""))
-                    {
-                        templateBuilder.Append(line.TrimEnd('"'));
-                        inTemplate = false;
-                    }
-                    else
-                    {
-                        templateBuilder.AppendLine(line);
-                    }
-                    continue;
-                }
-
-                if (line.StartsWith("SYSTEM "))
-                {
-                    system = line.Substring(7).Trim().Trim('"');
-                    continue;
-                }
-
-                if (line.StartsWith("PARAMETER "))
-                {
-                    parameters.Add(line.Substring(10));
-                    continue;
-                }
-            }
-
-            string? template = templateBuilder.Length > 0 ? templateBuilder.ToString() : null;
-
+            // The manifest and every blob are in the local models directory: the model is recreated on the destination
+            // from them verbatim (weights by digest; template, parameters, renderer, xOllama settings, ... inline)
+            byte[] manifestBytes = System.IO.File.ReadAllBytes(modelDir);
             RootManifest? manifest = ManifestReader.Read<RootManifest>(modelDir);
             if (manifest?.layers == null)
             {
@@ -3077,52 +2943,47 @@ namespace osync
                 return;
             }
 
-            // Build files dictionary and upload blobs
-            var files = new Dictionary<string, string>();
-            int modelIndex = 0;
-            int adapterIndex = 0;
-            int projectorIndex = 0;
+            string BlobPath(string digest) => $"{blobDir}{separator}sha256-{digest.Substring(7)}";
+            using var localShow = RelayCopy.ShowAsync(OllamaServer.LocalUrl, Source).GetAwaiter().GetResult();
+
+            Dictionary<string, object> createRequest;
+            try
+            {
+                createRequest = ModelRecreate.BuildCreateRequest(destModel, manifestBytes,
+                    digest => System.IO.File.Exists(BlobPath(digest)) ? System.IO.File.ReadAllBytes(BlobPath(digest)) : null,
+                    localShow?.RootElement);
+            }
+            catch (Exception e) when (e is NotSupportedException or InvalidOperationException)
+            {
+                Out.Error($"cannot copy '{Source}' to {destServer}: {e.Message}");
+                System.Environment.Exit(1);
+                return;
+            }
 
             foreach (Layer layer in manifest.layers)
             {
-                if (layer.mediaType.StartsWith("application/vnd.ollama.image.model"))
-                {
-                    var digest = layer.digest;
-                    var hash = digest.Substring(7);
-                    var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
-
-                    string filename = modelIndex == 0 ? "model.gguf" : $"model_{modelIndex}.gguf";
-                    files[filename] = digest;
-                    modelIndex++;
-                }
-                else if (layer.mediaType.StartsWith("application/vnd.ollama.image.projector"))
-                {
-                    var digest = layer.digest;
-                    var hash = digest.Substring(7);
-                    var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
-
-                    string filename = projectorIndex == 0 ? "projector.gguf" : $"projector_{projectorIndex}.gguf";
-                    files[filename] = digest;
-                    projectorIndex++;
-                }
-                else if (layer.mediaType.StartsWith("application/vnd.ollama.image.adapter"))
-                {
-                    var digest = layer.digest;
-                    var hash = digest.Substring(7);
-                    var blobfile = $"{blobDir}{separator}sha256-{hash}";
-                    RunBlobUpload(digest, blobfile, btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
-
-                    string filename = adapterIndex == 0 ? "adapter.gguf" : $"adapter_{adapterIndex}.gguf";
-                    files[filename] = digest;
-                    adapterIndex++;
-                }
+                if (ModelRecreate.IsFileLayer(layer.mediaType))
+                    RunBlobUpload(layer.digest, BlobPath(layer.digest), btvalue, cancellationToken, ThrowOnError, destServer).GetAwaiter().GetResult();
             }
 
-            Debug.WriteLine($"Creating model with files: {string.Join(", ", files.Keys)}");
+            RunCreateModel(createRequest, destServer, ThrowOnError).GetAwaiter().GetResult();
 
-            RunCreateModel(destModel, files, template, system, parameters, destServer, ThrowOnError).GetAwaiter().GetResult();
+            if (localShow == null)
+            {
+                Out.Warning($"the local server did not answer for '{Source}': the copy on {destServer} was not verified.");
+                return;
+            }
+            try
+            {
+                RelayCopy.VerifyAsync(localShow.RootElement, destServer, destModel).GetAwaiter().GetResult();
+            }
+            catch (InvalidOperationException e)
+            {
+                Out.Error(e.Message);
+                if (ThrowOnError) throw;
+                System.Environment.Exit(1);
+            }
+            Out.StatusLine($"Successfully copied '{Source}' to '{destModel}' on {destServer} (recreated from its manifest, verified)");
         }
 
         private async Task ActionCopyRemoteToRemoteStreaming(string sourceServer, string sourceModel, string destServer, string destModel, string? bufferSizeStr)

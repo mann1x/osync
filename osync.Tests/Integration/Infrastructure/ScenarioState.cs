@@ -40,7 +40,7 @@ public sealed class ScenarioState
 
     /// <summary>
     /// Resolves placeholders in feature text:
-    ///   {local} {remote1} {remote2}      server URL, e.g. http://localhost:11435
+    ///   {local} {remote1} {remote2} {peer}  server URL, e.g. http://localhost:11435
     ///   {remote1.hostport}               server without scheme, e.g. localhost:11435
     ///   {remote1.host} {remote1.port}    its host and port
     ///   {prefix}                         this scenario's model-name prefix
@@ -54,6 +54,7 @@ public sealed class ScenarioState
             case "local":
             case "remote1":
             case "remote2":
+            case "peer":
                 return TestEnvironment.ServerUrl(key) ?? throw new InvalidOperationException($"Server '{key}' is not configured");
             case "prefix":
                 return Prefix;
