@@ -440,4 +440,20 @@ namespace osync
         [ArgDescription("Show detailed version and environment information"), ArgShortcut("--verbose")]
         public bool Verbose { get; set; }
     }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
+    public class SetupArgs
+    {
+        [ArgPosition(1), ArgDescription("Section: server, alias, manage, shell or show (none: summary and menu)")]
+        public string Section { get; set; } = string.Empty;
+
+        [ArgPosition(2), ArgDescription("server: ollama|xollama|both|auto; alias: list|add|remove; manage: theme|sort|themes; shell: theme|colors|completion|themes")]
+        public string Item { get; set; } = string.Empty;
+
+        [ArgPosition(3), ArgDescription("Value: host[:port], alias name, theme name, sort order or color mode")]
+        public string Name { get; set; } = string.Empty;
+
+        [ArgPosition(4), ArgDescription("Second value: the alias address, or the default server of 'server both'")]
+        public string Value { get; set; } = string.Empty;
+    }
 }

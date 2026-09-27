@@ -77,5 +77,17 @@ namespace osync
         public DateTime modified_at { get; set; }
         public long size { get; set; }
         public string digest { get; set; } = string.Empty;
+        public OllamaModelDetails? details { get; set; }
+    }
+
+    /// <summary>
+    /// Model details in /api/tags and /api/show responses
+    /// </summary>
+    public class OllamaModelDetails
+    {
+        public string? format { get; set; }
+        public string? family { get; set; }
+        public string? parameter_size { get; set; }
+        public string? quantization_level { get; set; }
     }
 }

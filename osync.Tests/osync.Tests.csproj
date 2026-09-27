@@ -1,39 +1,27 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <!-- xUnit v3 test projects are executables -->
+    <OutputType>Exe</OutputType>
+    <RootNamespace>osync.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Test Framework -->
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
-    <PackageReference Include="Microsoft.NETCore.App" Version="2.2.8" />
-    <PackageReference Include="Microsoft.NETCore.Jit" Version="2.0.8" />
-    <PackageReference Include="System.Net.NameResolution" Version="4.3.0" />
-    <PackageReference Include="xunit" Version="2.9.3" />
+    <!-- Test framework: xUnit v3 (unit tests) + Reqnroll (Gherkin integration tests) -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Reqnroll.xunit.v3" Version="3.3.4" />
 
-    <!-- SpecFlow for BDD -->
-    <PackageReference Include="SpecFlow" Version="3.9.74" />
-    <PackageReference Include="SpecFlow.xUnit" Version="3.9.74" />
-    <PackageReference Include="SpecFlow.Tools.MsBuild.Generation" Version="3.9.74" />
-
-    <!-- Assertions -->
-    <PackageReference Include="FluentAssertions" Version="8.8.0" />
-
-    <!-- Configuration -->
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="10.0.1" />
+    <!-- Assertions. Pinned to 7.x: v8+ requires a commercial license for non-open-source use -->
+    <PackageReference Include="FluentAssertions" Version="7.2.2" />
 
     <!-- Code Coverage -->
     <PackageReference Include="coverlet.collector" Version="6.0.4">
@@ -51,8 +39,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="test-config.json">
+    <None Update="reqnroll.json;xunit.runner.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Assets\Modelfile;Assets\test-model.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Assets\%(Filename)%(Extension)</Link>
     </None>
   </ItemGroup>
 

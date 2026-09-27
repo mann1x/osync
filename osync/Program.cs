@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.3.0";
+        public static string AppVersion = "1.4.0";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -100,26 +100,22 @@ namespace osync
 
         public static string GetBuildVersion()
         {
-            // Get build timestamp from executable file
-            // Use AppContext.BaseDirectory for single-file apps (Assembly.Location returns empty string)
+            // Build timestamp (UTC) embedded at compile time (see OsyncBuildTimestamp in osync.csproj).
+            // It no longer depends on the executable's file name or modification time, which broke for
+            // renamed binaries (osync-macos-arm64) and showed the download time instead of the build time.
             try
             {
-                string exePath = Path.Combine(AppContext.BaseDirectory,
-                    OperatingSystem.IsWindows() ? "osync.exe" : "osync");
-                if (System.IO.File.Exists(exePath))
-                {
-                    var fileInfo = new FileInfo(exePath);
-                    var buildTime = fileInfo.LastWriteTime;
-                    return $"b{buildTime:yyyyMMdd-HHmm}";
-                }
-                // Fallback: try to get from any dll in the directory
-                var dllPath = Path.Combine(AppContext.BaseDirectory, "osync.dll");
-                if (System.IO.File.Exists(dllPath))
-                {
-                    var fileInfo = new FileInfo(dllPath);
-                    var buildTime = fileInfo.LastWriteTime;
-                    return $"b{buildTime:yyyyMMdd-HHmm}";
-                }
+                var stamp = typeof(OsyncProgram).Assembly
+                    .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                    .OfType<System.Reflection.AssemblyMetadataAttribute>()
+                    .FirstOrDefault(a => a.Key == "BuildTimestamp")?.Value;
+                if (!string.IsNullOrEmpty(stamp))
+                    return $"b{stamp}";
+
+                // Builds without the embedded stamp: modification time of the running executable
+                var exePath = System.Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(exePath) && System.IO.File.Exists(exePath))
+                    return $"b{new FileInfo(exePath).LastWriteTimeUtc:yyyyMMdd-HHmm}";
                 return "b00000000-0000";
             }
             catch
@@ -127,6 +123,9 @@ namespace osync
                 return "b00000000-0000";
             }
         }
+
+        /// <summary>"osync v1.2.3 (b20260101-1200)", colored in the shell theme.</summary>
+        public static string VersionBanner() => $"{Out.Heading("osync")} {Out.Paint(GetFullVersion(), p => p.Size)}";
 
         public static string GetFullVersion()
         {
@@ -159,11 +158,12 @@ namespace osync
         {
             if (string.IsNullOrWhiteSpace(args.Pattern))
             {
-                Console.WriteLine("Error: Model pattern is required");
+                Out.Error("Model pattern is required");
                 Console.WriteLine("Usage: osync rm <model-pattern> [-d <server-url>]");
                 System.Environment.Exit(1);
             }
-            ActionRemove(args.Pattern, args.Destination);
+            if (!ActionRemove(args.Pattern, args.Destination))
+                System.Environment.Exit(1);
         }
 
         [ArgActionMethod, ArgDescription("Rename a model by copying to new name and deleting original (aliases: mv, ren)"), ArgShortcut("mv"), ArgShortcut("ren")]
@@ -175,7 +175,8 @@ namespace osync
         [ArgActionMethod, ArgDescription("Update models to their latest versions locally or on remote server")]
         public void Update(UpdateArgs args)
         {
-            ActionUpdate(args.Pattern, args.Destination);
+            if (!ActionUpdate(args.Pattern, args.Destination))
+                System.Environment.Exit(1);
         }
 
         [ArgActionMethod, ArgDescription("Pull (download) a model from the registry locally or to a remote server")]
@@ -183,7 +184,7 @@ namespace osync
         {
             if (string.IsNullOrWhiteSpace(args.ModelName))
             {
-                Console.WriteLine("Error: Model name is required");
+                Out.Error("Model name is required");
                 Console.WriteLine("Usage: osync pull <model-name> [-d <server-url>]");
                 System.Environment.Exit(1);
             }
@@ -195,7 +196,7 @@ namespace osync
         {
             if (string.IsNullOrWhiteSpace(args.ModelName))
             {
-                Console.WriteLine("Error: Model name is required");
+                Out.Error("Model name is required");
                 Console.WriteLine("Usage: osync show <model-name> [-d <server-url>] [options]");
                 System.Environment.Exit(1);
             }
@@ -207,24 +208,13 @@ namespace osync
         {
             if (string.IsNullOrWhiteSpace(args.ModelName))
             {
-                Console.WriteLine("Error: Model name is required");
+                Out.Error("Model name is required");
                 Console.WriteLine("Usage: osync run <model-name> [-d <server-url>] [options]");
                 System.Environment.Exit(1);
             }
 
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-
-            // Normalize URL to add protocol and default port
-            ollamaHost = NormalizeServerUrl(ollamaHost);
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Ensure model has a tag
             var modelName = args.ModelName;
@@ -240,7 +230,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Out.Error($"{ex.Message}");
                 if (ex.InnerException != null)
                 {
                     Console.WriteLine($"Inner error: {ex.InnerException.Message}");
@@ -252,19 +242,8 @@ namespace osync
         [ArgActionMethod, ArgDescription("Show running models and their status")]
         public async Task Ps(PsArgs args)
         {
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-
-            // Normalize URL to add protocol and default port
-            ollamaHost = NormalizeServerUrl(ollamaHost);
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             bool isLocalHost = string.IsNullOrEmpty(args.Destination) ||
                               ollamaHost.Contains("localhost") ||
@@ -290,6 +269,8 @@ namespace osync
 
                 var json = await response.Content.ReadAsStringAsync();
                 var status = JsonSerializer.Deserialize<ProcessStatusResponse>(json);
+
+                System.Console.WriteLine($"{Out.Heading("Server:")} {OllamaServer.DisplayName(OllamaServer.GetFlavor(ollamaHost))} at {Out.Server(ollamaHost)}");
 
                 if (status?.Models == null || status.Models.Count == 0)
                 {
@@ -317,11 +298,18 @@ namespace osync
                 int fixedColumnsWidth = idWidth + sizeWidth + vramWidth + contextWidth + untilWidth + spacing;
                 int nameWidth = Math.Max(20, consoleWidth - fixedColumnsWidth - 1);
 
+                // When output is redirected (pipes, scripts) there is no console width to fit: never truncate names
+                if (System.Console.IsOutputRedirected)
+                {
+                    nameWidth = Math.Max(20, status.Models.Max(m => m.Name?.Length ?? 0));
+                    consoleWidth = nameWidth + fixedColumnsWidth + 1;
+                }
+
                 Console.WriteLine("");
-                Console.WriteLine("Loaded Models:");
-                Console.WriteLine(new string('-', consoleWidth - 1));
-                Console.WriteLine($"{"NAME".PadRight(nameWidth)} {"ID".PadRight(idWidth)} {"SIZE".PadRight(sizeWidth)} {"VRAM USAGE".PadRight(vramWidth)} {"CONTEXT".PadRight(contextWidth)} {"UNTIL".PadRight(untilWidth)}");
-                Console.WriteLine(new string('-', consoleWidth - 1));
+                System.Console.WriteLine(Out.Heading("Loaded Models:"));
+                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
+                System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)} {"ID".PadRight(idWidth)} {"SIZE".PadRight(sizeWidth)} {"VRAM USAGE".PadRight(vramWidth)} {"CONTEXT".PadRight(contextWidth)} {"UNTIL".PadRight(untilWidth)}"));
+                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
 
                 foreach (var model in status.Models)
                 {
@@ -344,21 +332,29 @@ namespace osync
                     var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
                     var until = FormatUntil(model.ExpiresAt);
 
-                    Console.WriteLine($"{name.PadRight(nameWidth)} {id.PadRight(idWidth)} {size.PadRight(sizeWidth)} {vramUsage.PadRight(vramWidth)} {context.PadRight(contextWidth)} {until.PadRight(untilWidth)}");
+                    // Partly offloaded to the CPU: warning color; fully in VRAM: success color
+                    bool fullyInVram = !(model.SizeVram < model.Size && model.Size > 0);
+                    System.Console.WriteLine(
+                        Out.Paint(name.PadRight(nameWidth), p => p.Text) + " " +
+                        Out.Paint(id.PadRight(idWidth), p => p.Id) + " " +
+                        Out.Paint(size.PadRight(sizeWidth), p => p.Size) + " " +
+                        Out.Paint(vramUsage.PadRight(vramWidth), p => fullyInVram ? p.Success : p.Warning) + " " +
+                        Out.Paint(context.PadRight(contextWidth), p => p.Params) + " " +
+                        Out.Muted(until.PadRight(untilWidth)));
                 }
 
-                Console.WriteLine(new string('-', consoleWidth - 1));
+                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
                 Console.WriteLine("");
             }
             catch (HttpRequestException ex)
             {
-                Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                Out.Error($"Could not connect to Ollama server at {ollamaHost}");
                 Console.WriteLine($"Details: {ex.Message}");
                 System.Environment.Exit(1);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Out.Error($"{ex.Message}");
                 if (ex.InnerException != null)
                 {
                     Console.WriteLine($"Inner error: {ex.InnerException.Message}");
@@ -373,7 +369,7 @@ namespace osync
             // Check if running in redirected console
             if (System.Console.IsInputRedirected || System.Console.IsOutputRedirected)
             {
-                Console.WriteLine("Error: Monitor mode requires an interactive terminal.");
+                Out.Error("Monitor mode requires an interactive terminal.");
                 Console.WriteLine("Cannot run in piped/redirected mode.");
                 return;
             }
@@ -626,6 +622,11 @@ namespace osync
             try
             {
                 var processes = Process.GetProcessesByName("ollama");
+                if (processes.Length == 0)
+                {
+                    // xOllama's server binary
+                    processes = Process.GetProcessesByName("xollama");
+                }
                 if (processes.Length == 0)
                 {
                     // Try alternative names
@@ -1126,7 +1127,7 @@ namespace osync
         {
             if (string.IsNullOrWhiteSpace(args.ModelName))
             {
-                Console.WriteLine("Error: Model name is required");
+                Out.Error("Model name is required");
                 Console.WriteLine("Usage: osync load <model-name> [-d <server-url>]");
                 Console.WriteLine("   or: osync load <server-url>/<model-name>");
                 System.Environment.Exit(1);
@@ -1136,7 +1137,7 @@ namespace osync
             string ollamaHost;
 
             // Check if ModelName is a URL with embedded model name (e.g., http://host:port/modelname)
-            if (modelName.StartsWith("http://") || modelName.StartsWith("https://"))
+            if (ServerAliases.IsServerReference(modelName))
             {
                 var (serverUrl, parsedModel) = ParseRemoteSource(modelName);
                 ollamaHost = serverUrl;
@@ -1144,20 +1145,8 @@ namespace osync
             }
             else
             {
-                // Get Ollama host from -d argument, environment variable, or default
-                ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                    ? args.Destination
-                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-                {
-                    ollamaHost = "http://localhost:11434";
-                }
-
-                // Normalize URL to add protocol and default port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
+                // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+                ollamaHost = OllamaServer.ResolveHost(args.Destination);
             }
 
             // Ensure model has a tag
@@ -1168,7 +1157,7 @@ namespace osync
 
             try
             {
-                Console.WriteLine($"Loading model '{modelName}' into memory...");
+                Out.StatusLine($"Loading model '{modelName}' into memory...");
 
                 var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1239,33 +1228,33 @@ namespace osync
                 catch { /* Ignore verification errors */ }
 
                 if (verified)
-                    Console.WriteLine($"✓ Model '{modelName}' loaded successfully ({timeStr}){apiTimeStr}");
+                    Out.Success($"Model '{modelName}' loaded successfully ({timeStr}){apiTimeStr}");
                 else
-                    Console.WriteLine($"✓ Model '{modelName}' loaded ({timeStr}){apiTimeStr}");
+                    Out.Success($"Model '{modelName}' loaded ({timeStr}){apiTimeStr}");
             }
             catch (HttpRequestException ex)
             {
                 // Check if it's a 404 (model not found) vs connection error
                 if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    Console.WriteLine($"Error: Model '{modelName}' not found");
+                    Out.Error($"Model '{modelName}' not found");
                     Console.WriteLine($"Details: The model does not exist on the server. Check the model name and try again.");
                 }
                 else if (ex.StatusCode.HasValue)
                 {
-                    Console.WriteLine($"Error: Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
+                    Out.Error($"Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
                     Console.WriteLine($"Details: {ex.Message}");
                 }
                 else
                 {
-                    Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                    Out.Error($"Could not connect to Ollama server at {ollamaHost}");
                     Console.WriteLine($"Details: {ex.Message}");
                 }
                 System.Environment.Exit(1);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Out.Error($"{ex.Message}");
                 if (ex.InnerException != null)
                 {
                     Console.WriteLine($"Inner error: {ex.InnerException.Message}");
@@ -1281,7 +1270,7 @@ namespace osync
             string ollamaHost;
 
             // Check if ModelName is a URL with embedded model name (e.g., http://host:port/modelname)
-            if (!string.IsNullOrWhiteSpace(inputModelName) && (inputModelName.StartsWith("http://") || inputModelName.StartsWith("https://")))
+            if (ServerAliases.IsServerReference(inputModelName))
             {
                 var (serverUrl, parsedModel) = ParseRemoteSource(inputModelName);
                 ollamaHost = serverUrl;
@@ -1289,20 +1278,8 @@ namespace osync
             }
             else
             {
-                // Get Ollama host from -d argument, environment variable, or default
-                ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                    ? args.Destination
-                    : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-                // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-                if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-                {
-                    ollamaHost = "http://localhost:11434";
-                }
-
-                // Normalize URL to add protocol and default port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
+                // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+                ollamaHost = OllamaServer.ResolveHost(args.Destination);
             }
 
             try
@@ -1348,7 +1325,7 @@ namespace osync
                 int unloadedCount = 0;
                 foreach (var modelName in modelsToUnload)
                 {
-                    Console.WriteLine($"Unloading model '{modelName}'...");
+                    Out.StatusLine($"Unloading model '{modelName}'...");
 
                     var unloadRequest = new
                     {
@@ -1399,12 +1376,12 @@ namespace osync
 
                     if (verified)
                     {
-                        Console.WriteLine($"✓ Model '{modelName}' unloaded successfully");
+                        Out.Success($"Model '{modelName}' unloaded successfully");
                         unloadedCount++;
                     }
                     else
                     {
-                        Console.WriteLine($"✓ Model '{modelName}' unloaded");
+                        Out.Success($"Model '{modelName}' unloaded");
                         unloadedCount++;
                     }
                 }
@@ -1419,24 +1396,24 @@ namespace osync
                 // Check if it's a specific error vs connection error
                 if (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
                 {
-                    Console.WriteLine($"Error: Model not found on the server");
+                    Out.Error($"Model not found on the server");
                     Console.WriteLine($"Details: {ex.Message}");
                 }
                 else if (ex.StatusCode.HasValue)
                 {
-                    Console.WriteLine($"Error: Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
+                    Out.Error($"Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
                     Console.WriteLine($"Details: {ex.Message}");
                 }
                 else
                 {
-                    Console.WriteLine($"Error: Could not connect to Ollama server at {ollamaHost}");
+                    Out.Error($"Could not connect to Ollama server at {ollamaHost}");
                     Console.WriteLine($"Details: {ex.Message}");
                 }
                 System.Environment.Exit(1);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Out.Error($"{ex.Message}");
                 if (ex.InnerException != null)
                 {
                     Console.WriteLine($"Inner error: {ex.InnerException.Message}");
@@ -1450,21 +1427,8 @@ namespace osync
         {
             Init();
 
-            // Get Ollama host from environment variable or argument
-            var ollamaHost = args.Destination
-                ?? System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-            else
-            {
-                // Normalize URL with default protocol and port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
-            }
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Validate server URL if it's not localhost
             if (!ollamaHost.Contains("localhost") && !ollamaHost.Contains("127.0.0.1"))
@@ -1495,22 +1459,8 @@ namespace osync
         {
             Init();
 
-            // Get Ollama host from argument, environment variable, or default
-            var ollamaHost = !string.IsNullOrEmpty(args.Destination)
-                ? args.Destination
-                : System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                    ?? "http://localhost:11434";
-
-            // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-            if (ollamaHost == "0.0.0.0" || ollamaHost == "0.0.0.0:11434")
-            {
-                ollamaHost = "http://localhost:11434";
-            }
-            else
-            {
-                // Normalize URL with default protocol and port
-                ollamaHost = NormalizeServerUrl(ollamaHost);
-            }
+            // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
+            var ollamaHost = OllamaServer.ResolveHost(args.Destination);
 
             // Validate server URL if it's not localhost (skip for special flags)
             if (!args.HelpCloud && !args.ShowTools && !args.GenerateSuite)
@@ -1566,13 +1516,13 @@ namespace osync
         {
             if (!isInteractiveMode)
             {
-                Console.WriteLine("Error: The 'clear' command is only available in interactive mode.");
+                Out.Error("The 'clear' command is only available in interactive mode.");
                 Console.WriteLine("Start interactive mode by running 'osync' without arguments.");
                 System.Environment.Exit(1);
             }
 
             Console.Clear();
-            Console.WriteLine($"osync {GetFullVersion()}");
+            System.Console.WriteLine(VersionBanner());
             Console.WriteLine("");
         }
 
@@ -1590,10 +1540,18 @@ namespace osync
             ActionInstall();
         }
 
+        [ArgActionMethod, ArgDescription("Settings: local server, server aliases, manage and shell themes (osync setup [server|alias|manage|shell|show])")]
+        public void Setup(SetupArgs args)
+        {
+            var setup = new SetupCommand(this, System.Console.In, System.Console.Out, ServerSetup.ProbeServer);
+            var code = setup.Run(args.Section, args.Item, args.Name, args.Value);
+            if (code != 0) System.Environment.Exit(code);
+        }
+
         [ArgActionMethod, ArgDescription("Show osync version information"), ArgShortcut("-v")]
         public void ShowVersion(VersionArgs args)
         {
-            Console.WriteLine($"osync {GetFullVersion()}");
+            System.Console.WriteLine(VersionBanner());
 
             if (!args.Verbose)
                 return;
@@ -1602,7 +1560,9 @@ namespace osync
 
             // Get binary path and installation status
             string binaryPath = System.Environment.ProcessPath ?? "unknown";
-            Console.WriteLine($"Binary path: {binaryPath}");
+            Out.Field("Binary path", $"{binaryPath}");
+            Console.WriteLine($"Settings: {OsyncSettings.FilePath}{(System.IO.File.Exists(OsyncSettings.FilePath) ? "" : " (not created yet)")}");
+            Out.Field("Colors", $"{ColorSupport.DisplayName(ColorSupport.Current)} ({ColorSupport.Reason})");
 
             // Check installation status
             bool isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows);
@@ -1621,7 +1581,7 @@ namespace osync
 
             if (isRunningFromInstallDir)
             {
-                Console.WriteLine($"Installed: Yes ({installDir})");
+                Out.Field("Installed", $"Yes ({installDir})");
             }
             else if (installedBinaryExists)
             {
@@ -1638,40 +1598,40 @@ namespace osync
 
                     int comparison = CompareVersions(currentVersion, currentBuild, installedVersion, installedBuild);
                     if (comparison > 0)
-                        Console.WriteLine($"Installed: Yes ({installDir}) - installed {installedFullVersion} is older");
+                        Out.Field("Installed", $"Yes ({installDir}) - installed {installedFullVersion} is older");
                     else if (comparison < 0)
-                        Console.WriteLine($"Installed: Yes ({installDir}) - installed {installedFullVersion} is newer");
+                        Out.Field("Installed", $"Yes ({installDir}) - installed {installedFullVersion} is newer");
                     else
-                        Console.WriteLine($"Installed: Yes ({installDir}) - same version");
+                        Out.Field("Installed", $"Yes ({installDir}) - same version");
                 }
                 else
                 {
-                    Console.WriteLine($"Installed: Yes ({installDir}) - version unknown");
+                    Out.Field("Installed", $"Yes ({installDir}) - version unknown");
                 }
             }
             else
             {
-                Console.WriteLine($"Installed: No ({installDir})");
+                Out.Field("Installed", $"No ({installDir})");
             }
 
             // Detect shell type and version
             System.Console.WriteLine();
             var (shellType, shellVersion) = DetectShellInfo();
-            Console.WriteLine($"Shell: {shellType} {shellVersion}");
+            Out.Field("Shell", $"{shellType} {shellVersion}");
 
             // Check tab completion status
             var (completionInstalled, completionCanInstall, completionPath) = CheckTabCompletionStatus(shellType);
             if (completionInstalled)
             {
-                Console.WriteLine($"Tab completion: Installed ({completionPath})");
+                Out.Field("Tab completion", $"Installed ({completionPath})");
             }
             else if (completionCanInstall)
             {
-                Console.WriteLine($"Tab completion: Not installed (can be installed via 'osync install')");
+                Out.Field("Tab completion", $"Not installed (can be installed via 'osync install')");
             }
             else
             {
-                Console.WriteLine($"Tab completion: Not available for {shellType}");
+                Out.Field("Tab completion", $"Not available for {shellType}");
             }
         }
 
@@ -1990,14 +1950,14 @@ namespace osync
                         case 'g':
                             return numericValue * 1024 * 1024 * 1024;
                         default:
-                            Console.WriteLine($"Error: invalid bandwidth throttling format (unit={unit}).");
+                            Out.Error($"invalid bandwidth throttling format (unit={unit}).");
                             System.Environment.Exit(1);
                             return 0;
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"Error: invalid bandwidth throttling format.");
+                    Out.Error($"invalid bandwidth throttling format.");
                     System.Environment.Exit(1);
                     return 0;
                 }
@@ -2126,7 +2086,7 @@ namespace osync
             }
             catch (UriFormatException)
             {
-                Console.WriteLine("Error: remote server URL is not valid");
+                Out.Error("remote server URL is not valid");
                 return false;
             }
             catch (Exception ex)
@@ -2145,7 +2105,8 @@ namespace osync
             if (string.IsNullOrWhiteSpace(serverUrl))
                 return serverUrl;
 
-            var url = serverUrl.Trim();
+            // A server alias from the settings file ("gpu" or "gpu/model")
+            var url = ServerAliases.Expand(serverUrl.Trim());
 
             // Add default protocol if not specified
             if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
@@ -2158,23 +2119,23 @@ namespace osync
             {
                 var uri = new Uri(url);
 
-                // Add default port 11434 if no port is specified (port will be -1 or 80/443 for default)
-                if (uri.Port == -1 || uri.Port == 80 || uri.Port == 443)
-                {
-                    // Check if original URL explicitly had a port
-                    var hostPart = serverUrl;
-                    if (hostPart.Contains("://"))
-                        hostPart = hostPart.Substring(hostPart.IndexOf("://") + 3);
+                // Only the authority (before the first '/') can carry a port: a ':' in the path is a model tag
+                // (http://server/qwen3:4b), which must not be mistaken for an explicit port (that made Uri use 80).
+                var afterScheme = url.Substring(url.IndexOf("://", StringComparison.Ordinal) + 3);
+                var slash = afterScheme.IndexOf('/');
+                var authority = slash >= 0 ? afterScheme.Substring(0, slash) : afterScheme;
+                bool hasExplicitPort = authority.StartsWith("[")
+                    ? System.Text.RegularExpressions.Regex.IsMatch(authority, @"\]:\d+$")
+                    : System.Text.RegularExpressions.Regex.IsMatch(authority, @":\d+$");
 
-                    // If no explicit port in the original, add default
-                    if (!hostPart.Contains(":") || hostPart.EndsWith(":"))
+                if (!hasExplicitPort)
+                {
+                    // No port given: Ollama's 11434, or xOllama's 22434 when only that one answers
+                    var builder = new UriBuilder(uri)
                     {
-                        var builder = new UriBuilder(uri)
-                        {
-                            Port = 11434
-                        };
-                        url = builder.ToString().TrimEnd('/');
-                    }
+                        Port = OllamaServer.DefaultPortFor(uri.Host)
+                    };
+                    url = builder.ToString();
                 }
 
                 return url.TrimEnd('/');
@@ -2203,6 +2164,10 @@ namespace osync
                 return false;
 
             var trimmed = input.Trim();
+
+            // A server alias from the settings file ("gpu", "gpu/model")
+            if (ServerAliases.TryExpand(trimmed, out _))
+                return true;
 
             // Already has protocol
             if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
@@ -2266,13 +2231,13 @@ namespace osync
                     else if (statusCode >= 500 && statusCode <= 510)
                     {
                         if (!silent)
-                            Console.WriteLine($"Error: the server {serverUrl} has thrown an internal error. ollama instance is not available");
+                            Out.Error($"the server {serverUrl} has thrown an internal error. ollama instance is not available");
                         return false;
                     }
                     else
                     {
                         if (!silent)
-                            Console.WriteLine($"Error: the server {serverUrl} answered with HTTP status code: {statusCode}");
+                            Out.Error($"the server {serverUrl} answered with HTTP status code: {statusCode}");
                         return false;
                     }
                 }
@@ -2280,7 +2245,7 @@ namespace osync
             catch (UriFormatException)
             {
                 if (!silent)
-                    Console.WriteLine($"Error: server URL is not valid: {serverUrl}");
+                    Out.Error($"server URL is not valid: {serverUrl}");
                 return false;
             }
             catch (Exception ex)
@@ -2319,12 +2284,12 @@ namespace osync
                 }
                 else if (statusCode >= 500 && statusCode <= 510)
                 {
-                    Console.WriteLine("Error: the remote server has thrown an internal error. ollama instance is not available");
+                    Out.Error("the remote server has thrown an internal error. ollama instance is not available");
                     System.Environment.Exit(1);
                 }
                 else
                 {
-                    Console.WriteLine($"Error: the remote ollama server has answered with HTTP status code: {statusCode}");
+                    Out.Error($"the remote ollama server has answered with HTTP status code: {statusCode}");
                     System.Environment.Exit(1);
                 }
 
@@ -2453,7 +2418,7 @@ namespace osync
                         }
                         catch (Exception e)
                         {
-                            Console.WriteLine($"Error: {e.Message}");
+                            Out.Error($"{e.Message}");
                             SetCursorVisible(true);
                             if (throwOnError) throw;
                             System.Environment.Exit(1);
@@ -2569,7 +2534,7 @@ namespace osync
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        Console.WriteLine($"Error: could not create '{Modelname}' on the remote server (HTTP status {(int)response.StatusCode}): {response.ReasonPhrase}");
+                        Out.Error($"could not create '{Modelname}' on the remote server (HTTP status {(int)response.StatusCode}): {response.ReasonPhrase}");
                         exitcode = 1;
                     }
                     else if (laststatus != "success")
@@ -2660,7 +2625,7 @@ namespace osync
 
                 if (requireModelName && string.IsNullOrEmpty(modelName))
                 {
-                    Console.WriteLine("Error: model name must be specified in the URL (e.g., http://server:port/modelname:tag)");
+                    Out.Error("model name must be specified in the URL (e.g., http://server:port/modelname:tag)");
                     System.Environment.Exit(1);
                 }
 
@@ -2685,6 +2650,9 @@ namespace osync
 
             // Detect if source and destination are remote or local
             // Use LooksLikeRemoteServer to detect IP addresses and hostnames without protocol
+            // Server aliases from the settings file stand for their server URL
+            Source = ServerAliases.Expand(Source);
+            Destination = ServerAliases.Expand(Destination);
             bool isSourceRemote = Source.StartsWith("http://") || Source.StartsWith("https://");
             bool isDestinationRemote = LooksLikeRemoteServer(Destination);
 
@@ -2700,16 +2668,22 @@ namespace osync
                     destModel = sourceModel;
                 }
 
-                Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}...");
-                ActionCopyRemoteToRemoteStreaming(sourceServer, sourceModel, destServer, destModel, BufferSize).GetAwaiter().GetResult();
+                Out.StatusLine($"Copying '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}...");
+                if (!CopyBetweenServers(sourceServer, sourceModel, destServer, destModel, BufferSize))
+                {
+                    ActionCopyRemoteToRemoteStreaming(sourceServer, sourceModel, destServer, destModel, BufferSize).GetAwaiter().GetResult();
+                }
             }
             else if (isSourceRemote && !isDestinationRemote)
             {
                 // Remote to Local copy
                 var (sourceServer, sourceModel) = ParseRemoteSource(Source, requireModelName: true);
 
-                Console.WriteLine($"Copying '{sourceModel}' from {sourceServer} to local '{Destination}'...");
-                ActionCopyRemoteToLocal(sourceServer, sourceModel, Destination);
+                Out.StatusLine($"Copying '{sourceModel}' from {sourceServer} to local '{Destination}'...");
+                if (!CopyBetweenServers(sourceServer, sourceModel, OllamaServer.LocalUrl, Destination, BufferSize))
+                {
+                    ActionCopyRemoteToLocal(sourceServer, sourceModel, Destination);
+                }
             }
             else if (!isSourceRemote && isDestinationRemote)
             {
@@ -2725,8 +2699,16 @@ namespace osync
 
                 if (!Directory.Exists(ollama_models))
                 {
-                    Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
+                    // The models directory is not readable from here (e.g. the server runs as the ollama service
+                    // user): copy through the local server with the push relay instead of reading blobs from disk
+                    var localServer = OllamaServer.LocalUrl;
+                    Console.WriteLine($"Local models directory not found at {ollama_models}: copying through the local server {localServer}.");
+                    Out.StatusLine($"Copying '{Source}' from {localServer} to '{destModel}' on {destServer}...");
+                    if (!CopyBetweenServers(localServer, Source, destServer, destModel, BufferSize))
+                    {
+                        ActionCopyRemoteToRemoteStreaming(localServer, Source, destServer, destModel, BufferSize).GetAwaiter().GetResult();
+                    }
+                    return;
                 }
 
                 if (!ValidateServerUrl(destServer))
@@ -2740,6 +2722,47 @@ namespace osync
             {
                 // Local to Local copy
                 ActionCopyLocal(Source, Destination);
+            }
+        }
+
+        /// <summary>
+        /// Copies a model from one server to another through osync's push relay (see RelayCopy): works for every
+        /// model on the source, including created and imported ones. Returns false when the source server cannot
+        /// reach this machine, so the caller can fall back to downloading registry models from registry.ollama.ai.
+        /// Exits with code 1 on any other failure.
+        /// </summary>
+        private bool CopyBetweenServers(string sourceServer, string sourceModel, string destServer, string destModel, string? bufferSizeStr)
+        {
+            if (!ValidateServerUrl(sourceServer))
+            {
+                Out.Error($"cannot connect to source server {sourceServer}");
+                System.Environment.Exit(1);
+            }
+            if (!ValidateServerUrl(destServer))
+            {
+                Out.Error($"cannot connect to destination server {destServer}");
+                System.Environment.Exit(1);
+            }
+
+            long bufferSize = string.IsNullOrEmpty(bufferSizeStr) ? 512L * 1024 * 1024 : ParseSize(bufferSizeStr);
+            try
+            {
+                RelayCopy.CopyAsync(sourceServer, sourceModel, destServer, destModel, btvalue, bufferSize).GetAwaiter().GetResult();
+                Out.StatusLine($"Successfully copied '{sourceModel}' from {sourceServer} to '{destModel}' on {destServer}");
+                return true;
+            }
+            catch (RelayUnreachableException ex)
+            {
+                Out.Warning($"the source server could not reach osync's relay ({ex.Message}).");
+                Console.WriteLine("Falling back to downloading the blobs from registry.ollama.ai (registry models only).");
+                Console.WriteLine("Set OSYNC_RELAY_HOST / OSYNC_RELAY_PORT to an address and port the source server can reach.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Out.Error($"{ex.Message}");
+                System.Environment.Exit(1);
+                return false;
             }
         }
 
@@ -2786,7 +2809,8 @@ namespace osync
 
             // Check if destination already exists
             var checkProcess = new Process();
-            checkProcess.StartInfo.FileName = "ollama";
+            checkProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(checkProcess.StartInfo);
             checkProcess.StartInfo.Arguments = "list";
             checkProcess.StartInfo.CreateNoWindow = true;
             checkProcess.StartInfo.UseShellExecute = false;
@@ -2807,21 +2831,22 @@ namespace osync
 
                 if (modelExists)
                 {
-                    Console.WriteLine($"Error: destination model '{destModel}' already exists");
+                    Out.Error($"destination model '{destModel}' already exists");
                     Console.WriteLine("Please choose a different name or remove the existing model first.");
                     System.Environment.Exit(1);
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Warning: could not check if destination exists: {e.Message}");
+                Out.Warning($"could not check if destination exists: {e.Message}");
             }
 
-            Console.WriteLine($"Copying model '{sourceModel}' to '{destModel}'...");
+            Out.StatusLine($"Copying model '{sourceModel}' to '{destModel}'...");
 
             // Copy using ollama cp
             var copyProcess = new Process();
-            copyProcess.StartInfo.FileName = "ollama";
+            copyProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(copyProcess.StartInfo);
             copyProcess.StartInfo.Arguments = $"cp {sourceModel} {destModel}";
             copyProcess.StartInfo.CreateNoWindow = true;
             copyProcess.StartInfo.UseShellExecute = false;
@@ -2836,11 +2861,11 @@ namespace osync
                 if (copyProcess.ExitCode != 0)
                 {
                     string error = copyProcess.StandardError.ReadToEnd();
-                    Console.WriteLine($"Error: failed to copy model: {error}");
+                    Out.Error($"failed to copy model: {error}");
                     System.Environment.Exit(1);
                 }
 
-                Console.WriteLine($"Successfully copied '{sourceModel}' to '{destModel}'");
+                Out.StatusLine($"Successfully copied '{sourceModel}' to '{destModel}'");
             }
             catch (Exception e)
             {
@@ -2855,7 +2880,7 @@ namespace osync
 
             if (!Directory.Exists(ollama_models))
             {
-                Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                Out.Error($"ollama models directory not found at: {ollama_models}");
                 System.Environment.Exit(1);
             }
 
@@ -2934,18 +2959,18 @@ namespace osync
                     }
                     else
                     {
-                        Console.WriteLine($"Error: model '{Source}' not found (tried '{Source}' and '{latestSource}')");
+                        Out.Error($"model '{Source}' not found (tried '{Source}' and '{latestSource}')");
                         System.Environment.Exit(1);
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"Error: model '{Source}' not found at: {modelDir}");
+                    Out.Error($"model '{Source}' not found at: {modelDir}");
                     System.Environment.Exit(1);
                 }
             }
 
-            Console.WriteLine($"Copying model '{Source}' to '{destModel}' on {destServer}...");
+            Out.StatusLine($"Copying model '{Source}' to '{destModel}' on {destServer}...");
 
             // Parse modelfile to extract template, system, and parameters
             var templateBuilder = new StringBuilder();
@@ -2954,7 +2979,8 @@ namespace osync
             bool inTemplate = false;
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = @" show " + Source + " --modelfile";
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;
@@ -2991,7 +3017,7 @@ namespace osync
 
             if (p.ExitCode != 0)
             {
-                Console.WriteLine($"Error: get Modelfile from ollama show failed: {stdOutput.ToString()}");
+                Out.Error($"get Modelfile from ollama show failed: {stdOutput.ToString()}");
                 System.Environment.Exit(1);
             }
 
@@ -3046,7 +3072,7 @@ namespace osync
             RootManifest? manifest = ManifestReader.Read<RootManifest>(modelDir);
             if (manifest?.layers == null)
             {
-                Console.WriteLine("Error: Invalid manifest file");
+                Out.Error("Invalid manifest file");
                 System.Environment.Exit(1);
                 return;
             }
@@ -3106,13 +3132,13 @@ namespace osync
                 // Validate both servers without modifying global client state
                 if (!ValidateServerUrl(sourceServer))
                 {
-                    Console.WriteLine($"Error: cannot connect to source server {sourceServer}");
+                    Out.Error($"cannot connect to source server {sourceServer}");
                     System.Environment.Exit(1);
                 }
 
                 if (!ValidateServerUrl(destServer))
                 {
-                    Console.WriteLine($"Error: cannot connect to destination server {destServer}");
+                    Out.Error($"cannot connect to destination server {destServer}");
                     System.Environment.Exit(1);
                 }
 
@@ -3135,7 +3161,7 @@ namespace osync
 
                 if (modelfile == null)
                 {
-                    Console.WriteLine($"Error: Could not retrieve model from source server");
+                    Out.Error($"Could not retrieve model from source server");
                     if (modelfileErr != null)
                     {
                         Console.WriteLine($"Details: {modelfileErr}");
@@ -3148,7 +3174,7 @@ namespace osync
 
                 if (blobDigests.Count == 0)
                 {
-                    Console.WriteLine($"Error: No blob references found in modelfile");
+                    Out.Error($"No blob references found in modelfile");
                     System.Environment.Exit(1);
                 }
 
@@ -3205,14 +3231,14 @@ namespace osync
             // Validate source server
             if (!ValidateServerUrl(sourceServer))
             {
-                Console.WriteLine($"Error: cannot connect to source server {sourceServer}");
+                Out.Error($"cannot connect to source server {sourceServer}");
                 System.Environment.Exit(1);
             }
 
             // Ensure local ollama models directory exists
             if (!Directory.Exists(ollama_models))
             {
-                Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                Out.Error($"ollama models directory not found at: {ollama_models}");
                 System.Environment.Exit(1);
             }
 
@@ -3227,7 +3253,7 @@ namespace osync
 
             if (modelfile == null)
             {
-                Console.WriteLine($"Error: Could not retrieve model '{sourceModel}' from source server");
+                Out.Error($"Could not retrieve model '{sourceModel}' from source server");
                 if (modelfileErr != null)
                 {
                     Console.WriteLine($"Details: {modelfileErr}");
@@ -3240,7 +3266,7 @@ namespace osync
 
             if (blobDigests.Count == 0)
             {
-                Console.WriteLine($"Error: No blob references found in modelfile");
+                Out.Error($"No blob references found in modelfile");
                 System.Environment.Exit(1);
             }
 
@@ -3396,26 +3422,8 @@ namespace osync
         /// </summary>
         private async Task CreateLocalModelFromBlobs(string modelName, Dictionary<string, string> files, string? template, string? system, Dictionary<string, object>? parameters)
         {
-            // Create model using ollama create API - use local Ollama URL
-            string localOllamaUrl = System.Environment.GetEnvironmentVariable("OLLAMA_HOST")
-                ?? "http://localhost:11434";
-
-            // Handle bind-all addresses (0.0.0.0 or ::0) - convert to localhost for client connections
-            if (localOllamaUrl.Contains("0.0.0.0") || localOllamaUrl.Contains("::0") || localOllamaUrl.Contains("[::]"))
-            {
-                localOllamaUrl = localOllamaUrl.Replace("0.0.0.0", "localhost").Replace("::0", "localhost").Replace("[::]", "localhost");
-            }
-
-            if (!localOllamaUrl.StartsWith("http"))
-            {
-                localOllamaUrl = "http://" + localOllamaUrl;
-            }
-
-            // Ensure port is present (default Ollama port is 11434)
-            if (!localOllamaUrl.Contains(":11434") && !localOllamaUrl.Contains(":80") && !System.Text.RegularExpressions.Regex.IsMatch(localOllamaUrl, @":\d{2,5}$"))
-            {
-                localOllamaUrl = localOllamaUrl.TrimEnd('/') + ":11434";
-            }
+            // Create model using the create API of the local server
+            string localOllamaUrl = OllamaServer.LocalUrl;
 
             // Build request using same format as RunCreateModel (model + files dictionary)
             var modelCreate = new Dictionary<string, object>
@@ -3470,7 +3478,7 @@ namespace osync
                 }
                 else if (lastStatus != "success")
                 {
-                    Console.WriteLine($"Error: model creation failed with status: {lastStatus}");
+                    Out.Error($"model creation failed with status: {lastStatus}");
                     System.Environment.Exit(1);
                 }
             }
@@ -4219,7 +4227,7 @@ namespace osync
 
                 if (!finalUploadResponse.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: Failed to upload to destination (HTTP {finalUploadResponse.StatusCode})");
+                    Out.Error($"Failed to upload to destination (HTTP {finalUploadResponse.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4243,7 +4251,7 @@ namespace osync
             }
             else if (statusCode != 404)
             {
-                Console.WriteLine($"Error: unexpected status code {statusCode} when checking blob on destination");
+                Out.Error($"unexpected status code {statusCode} when checking blob on destination");
                 System.Environment.Exit(1);
             }
 
@@ -4254,7 +4262,7 @@ namespace osync
 
             if (!downloadResponse.IsSuccessStatusCode)
             {
-                Console.WriteLine($"Error: failed to download blob from source (HTTP {(int)downloadResponse.StatusCode})");
+                Out.Error($"failed to download blob from source (HTTP {(int)downloadResponse.StatusCode})");
                 System.Environment.Exit(1);
             }
 
@@ -4317,12 +4325,12 @@ namespace osync
                     }
                     else if (uploadResponse.StatusCode == System.Net.HttpStatusCode.BadRequest)
                     {
-                        Console.WriteLine("Error: upload failed invalid digest, check both ollama are running the same version.");
+                        Out.Error("upload failed invalid digest, check both ollama are running the same version.");
                         System.Environment.Exit(1);
                     }
                     else
                     {
-                        Console.WriteLine($"Error: upload failed: {uploadResponse.ReasonPhrase}");
+                        Out.Error($"upload failed: {uploadResponse.ReasonPhrase}");
                         System.Environment.Exit(1);
                     }
 
@@ -4330,7 +4338,7 @@ namespace osync
                 }
                 catch (Exception e)
                 {
-                    Console.WriteLine($"Error: {e.Message}");
+                    Out.Error($"{e.Message}");
                     SetCursorVisible(true);
                     System.Environment.Exit(1);
                 }
@@ -4368,7 +4376,7 @@ namespace osync
             {
                 if (!Directory.Exists(ollama_models))
                 {
-                    Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                    Out.Error($"ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
                 ListLocalModels(Pattern ?? "*", sortMode);
@@ -4538,7 +4546,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4572,7 +4580,7 @@ namespace osync
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Error: failed to list remote models: {e.Message}");
+                Out.Error($"failed to list remote models: {e.Message}");
                 System.Environment.Exit(1);
             }
         }
@@ -4583,14 +4591,18 @@ namespace osync
             int idWidth = 16;
             int sizeWidth = 10;
 
-            System.Console.WriteLine($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}MODIFIED");
+            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}MODIFIED"));
 
             foreach (var model in models)
             {
                 var size = ByteSize.FromBytes(model.Size);
                 string sizeStr = size.GigaBytes >= 1 ? $"{size.GigaBytes:F0} GB" : $"{size.MegaBytes:F0} MB";
                 string timeAgo = GetTimeAgo(model.ModifiedAt);
-                System.Console.WriteLine($"{model.Name.PadRight(nameWidth)}{model.Id.PadRight(idWidth)}{sizeStr.PadRight(sizeWidth)}{timeAgo}");
+                System.Console.WriteLine(
+                    Out.Paint(model.Name.PadRight(nameWidth), p => p.Text) +
+                    Out.Paint(model.Id.PadRight(idWidth), p => p.Id) +
+                    Out.Paint(sizeStr.PadRight(sizeWidth), p => p.Size) +
+                    Out.Muted(timeAgo));
             }
         }
 
@@ -4611,7 +4623,7 @@ namespace osync
             return $"{(int)(timeSpan.TotalDays / 365)} years ago";
         }
 
-        public void ActionRemove(string? Pattern, string Destination)
+        public bool ActionRemove(string? Pattern, string Destination)
         {
             Init();
 
@@ -4624,9 +4636,9 @@ namespace osync
 
             if (string.IsNullOrEmpty(Pattern))
             {
-                Console.WriteLine("Error: pattern is required for remove command");
+                Out.Error("pattern is required for remove command");
                 System.Environment.Exit(1);
-                return;
+                return false;
             }
 
             Debug.WriteLine("Remove: you entered pattern '{0}' and destination '{1}'. OLLAMA_MODELS={2}", Pattern, Destination, ollama_models);
@@ -4637,10 +4649,10 @@ namespace osync
             {
                 if (!Directory.Exists(ollama_models))
                 {
-                    Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                    Out.Error($"ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
-                RemoveLocalModels(Pattern);
+                return RemoveLocalModels(Pattern);
             }
             else
             {
@@ -4650,19 +4662,19 @@ namespace osync
                 {
                     System.Environment.Exit(1);
                 }
-                RemoveRemoteModels(Pattern, Destination).GetAwaiter().GetResult();
+                return RemoveRemoteModels(Pattern, Destination).GetAwaiter().GetResult();
             }
         }
 
-        private void RemoveLocalModels(string pattern)
+        private bool RemoveLocalModels(string pattern)
         {
             var modelsToRemove = new List<string>();
             string manifestsDir = Path.Combine(ollama_models, "manifests");
 
             if (!Directory.Exists(manifestsDir))
             {
-                Console.WriteLine($"No local models found.");
-                return;
+                Out.Error($"No local models found.");
+                return false;
             }
 
             // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
@@ -4754,18 +4766,19 @@ namespace osync
 
                     if (modelsToRemove.Count == 0)
                     {
-                        Console.WriteLine($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
-                        return;
+                        Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
+                        return false;
                     }
                 }
                 else
                 {
-                    Console.WriteLine($"No models found matching pattern: {pattern}");
-                    return;
+                    Out.Error($"No models found matching pattern: {pattern}");
+                    return false;
                 }
             }
 
             Console.WriteLine($"Removing {modelsToRemove.Count} model(s)...");
+            int failures = 0;
 
             foreach (var modelName in modelsToRemove)
             {
@@ -4773,7 +4786,8 @@ namespace osync
                 {
                     // Use ollama rm command to properly remove the model
                     var p = new Process();
-                    p.StartInfo.FileName = "ollama";
+                    p.StartInfo.FileName = OllamaServer.CliName;
+                    OllamaServer.ApplyCliEnvironment(p.StartInfo);
                     p.StartInfo.Arguments = $"rm {modelName}";
                     p.StartInfo.CreateNoWindow = true;
                     p.StartInfo.UseShellExecute = false;
@@ -4788,21 +4802,25 @@ namespace osync
 
                     if (p.ExitCode == 0)
                     {
-                        Console.WriteLine($"deleted '{modelName}'");
+                        System.Console.WriteLine($"{Out.Paint("deleted", p => p.Success, bold: true)} '{Out.Paint(modelName, p => p.Text, bold: true)}'");
                     }
                     else
                     {
                         Console.WriteLine($"failed to delete '{modelName}': {error}");
+                        failures++;
                     }
                 }
                 catch (Exception e)
                 {
                     Console.WriteLine($"Error deleting '{modelName}': {e.Message}");
+                    failures++;
                 }
             }
+
+            return failures == 0;
         }
 
-        private async Task RemoveRemoteModels(string pattern, string destination)
+        private async Task<bool> RemoveRemoteModels(string pattern, string destination)
         {
             // Create dedicated HttpClient with BaseAddress
             using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
@@ -4815,7 +4833,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4824,8 +4842,8 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Console.WriteLine("No models found on remote server.");
-                    return;
+                    Out.Error($"No models found on remote server.");
+                    return false;
                 }
 
                 var modelsToRemove = modelsResponse.models
@@ -4846,18 +4864,19 @@ namespace osync
 
                         if (modelsToRemove.Count == 0)
                         {
-                            Console.WriteLine($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
-                            return;
+                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
+                            return false;
                         }
                     }
                     else
                     {
-                        Console.WriteLine($"No models found matching pattern: {pattern}");
-                        return;
+                        Out.Error($"No models found matching pattern: {pattern}");
+                        return false;
                     }
                 }
 
                 Console.WriteLine($"Removing {modelsToRemove.Count} model(s) from remote server...");
+                int failures = 0;
 
                 foreach (var modelName in modelsToRemove)
                 {
@@ -4874,27 +4893,33 @@ namespace osync
 
                         if (deleteResponse.IsSuccessStatusCode)
                         {
-                            Console.WriteLine($"deleted '{modelName}'");
+                            System.Console.WriteLine($"{Out.Paint("deleted", p => p.Success, bold: true)} '{Out.Paint(modelName, p => p.Text, bold: true)}'");
                         }
                         else if (deleteResponse.StatusCode == System.Net.HttpStatusCode.NotFound)
                         {
                             Console.WriteLine($"model '{modelName}' not found");
+                            failures++;
                         }
                         else
                         {
                             Console.WriteLine($"failed to delete '{modelName}': HTTP {(int)deleteResponse.StatusCode}");
+                            failures++;
                         }
                     }
                     catch (Exception e)
                     {
                         Console.WriteLine($"Error deleting '{modelName}': {e.Message}");
+                        failures++;
                     }
                 }
+
+                return failures == 0;
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Error: failed to remove remote models: {e.Message}");
+                Out.Error($"failed to remove remote models: {e.Message}");
                 System.Environment.Exit(1);
+                return false;
             }
         }
 
@@ -4920,7 +4945,8 @@ namespace osync
 
             // Check if destination already exists
             var checkProcess = new Process();
-            checkProcess.StartInfo.FileName = "ollama";
+            checkProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(checkProcess.StartInfo);
             checkProcess.StartInfo.Arguments = "list";
             checkProcess.StartInfo.CreateNoWindow = true;
             checkProcess.StartInfo.UseShellExecute = false;
@@ -4935,22 +4961,23 @@ namespace osync
 
                 if (output.Contains(targetModel))
                 {
-                    Console.WriteLine($"Error: destination model '{targetModel}' already exists");
+                    Out.Error($"destination model '{targetModel}' already exists");
                     Console.WriteLine("Please choose a different name or remove the existing model first.");
                     System.Environment.Exit(1);
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Warning: could not check if destination exists: {e.Message}");
+                Out.Warning($"could not check if destination exists: {e.Message}");
             }
 
-            Console.WriteLine($"Renaming model '{sourceModel}' to '{targetModel}'...");
+            Out.StatusLine($"Renaming model '{sourceModel}' to '{targetModel}'...");
 
             // Step 1: Copy the model using ollama cp
             Console.WriteLine($"Step 1/3: Copying '{sourceModel}' to '{targetModel}'...");
             var copyProcess = new Process();
-            copyProcess.StartInfo.FileName = "ollama";
+            copyProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(copyProcess.StartInfo);
             copyProcess.StartInfo.Arguments = $"cp {sourceModel} {targetModel}";
             copyProcess.StartInfo.CreateNoWindow = true;
             copyProcess.StartInfo.UseShellExecute = false;
@@ -4965,11 +4992,11 @@ namespace osync
                 if (copyProcess.ExitCode != 0)
                 {
                     string error = copyProcess.StandardError.ReadToEnd();
-                    Console.WriteLine($"Error: failed to copy model: {error}");
+                    Out.Error($"failed to copy model: {error}");
                     System.Environment.Exit(1);
                 }
 
-                Console.WriteLine($"Successfully copied to '{targetModel}'");
+                Out.StatusLine($"Successfully copied to '{targetModel}'");
             }
             catch (Exception e)
             {
@@ -4980,7 +5007,8 @@ namespace osync
             // Step 2: Verify the new model exists
             Console.WriteLine($"Step 2/3: Verifying '{targetModel}' exists...");
             var listProcess = new Process();
-            listProcess.StartInfo.FileName = "ollama";
+            listProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(listProcess.StartInfo);
             listProcess.StartInfo.Arguments = "list";
             listProcess.StartInfo.CreateNoWindow = true;
             listProcess.StartInfo.UseShellExecute = false;
@@ -4999,7 +5027,7 @@ namespace osync
 
                 if (!targetExists)
                 {
-                    Console.WriteLine($"Error: failed to verify '{targetModel}' - model not found after copy");
+                    Out.Error($"failed to verify '{targetModel}' - model not found after copy");
                     System.Environment.Exit(1);
                 }
 
@@ -5014,7 +5042,8 @@ namespace osync
             // Step 3: Delete the original model
             Console.WriteLine($"Step 3/3: Deleting original '{sourceModel}'...");
             var deleteProcess = new Process();
-            deleteProcess.StartInfo.FileName = "ollama";
+            deleteProcess.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(deleteProcess.StartInfo);
             deleteProcess.StartInfo.Arguments = $"rm {sourceModel}";
             deleteProcess.StartInfo.CreateNoWindow = true;
             deleteProcess.StartInfo.UseShellExecute = false;
@@ -5029,12 +5058,12 @@ namespace osync
                 if (deleteProcess.ExitCode != 0)
                 {
                     string error = deleteProcess.StandardError.ReadToEnd();
-                    Console.WriteLine($"Warning: failed to delete original model: {error}");
+                    Out.Warning($"failed to delete original model: {error}");
                     Console.WriteLine($"The model was successfully copied to '{targetModel}', but the original '{sourceModel}' still exists.");
                     System.Environment.Exit(1);
                 }
 
-                Console.WriteLine($"Successfully deleted '{sourceModel}'");
+                Out.StatusLine($"Successfully deleted '{sourceModel}'");
                 Console.WriteLine($"\nRename complete: '{source}' → '{newName}'");
             }
             catch (Exception e)
@@ -5045,7 +5074,7 @@ namespace osync
             }
         }
 
-        public void ActionUpdate(string Pattern, string Destination)
+        public bool ActionUpdate(string Pattern, string Destination)
         {
             Init();
 
@@ -5083,10 +5112,10 @@ namespace osync
             {
                 if (!Directory.Exists(ollama_models))
                 {
-                    Console.WriteLine($"Error: ollama models directory not found at: {ollama_models}");
+                    Out.Error($"ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
-                UpdateLocalModels(Pattern);
+                return UpdateLocalModels(Pattern);
             }
             else
             {
@@ -5096,7 +5125,7 @@ namespace osync
                 {
                     System.Environment.Exit(1);
                 }
-                UpdateRemoteModels(Pattern, Destination).GetAwaiter().GetResult();
+                return UpdateRemoteModels(Pattern, Destination).GetAwaiter().GetResult();
             }
         }
 
@@ -5161,7 +5190,7 @@ namespace osync
             var colonIndex = modelPattern.LastIndexOf(':');
             if (colonIndex < 0)
             {
-                Console.WriteLine("Error: Invalid pattern format. Expected model:tag*");
+                Out.Error("Invalid pattern format. Expected model:tag*");
                 System.Environment.Exit(1);
                 return;
             }
@@ -5195,7 +5224,7 @@ namespace osync
             foreach (var tag in resolvedTags)
             {
                 var fullModelName = tag.GetFullModelName();
-                Console.WriteLine($"Pulling {fullModelName}...");
+                Out.StatusLine($"Pulling {fullModelName}...");
 
                 try
                 {
@@ -5207,7 +5236,7 @@ namespace osync
                     {
                         if (!ValidateServerUrl(destination, silent: true))
                         {
-                            Console.WriteLine($"Error: Invalid destination URL: {destination}");
+                            Out.Error($"Invalid destination URL: {destination}");
                             failCount++;
                             continue;
                         }
@@ -5242,7 +5271,7 @@ namespace osync
 
                 if (pathParts.Length < 5)
                 {
-                    Console.WriteLine($"Error: Invalid HuggingFace URL format: {huggingFaceUrl}");
+                    Out.Error($"Invalid HuggingFace URL format: {huggingFaceUrl}");
                     Console.WriteLine($"Expected format: https://huggingface.co/{{namespace}}/{{repo}}/blob/{{branch}}/{{filename}}.gguf");
                     System.Environment.Exit(1);
                 }
@@ -5268,7 +5297,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: Failed to convert HuggingFace URL: {ex.Message}");
+                Out.Error($"Failed to convert HuggingFace URL: {ex.Message}");
                 System.Environment.Exit(1);
                 return null;
             }
@@ -5313,16 +5342,17 @@ namespace osync
             }
 
             // Ultimate fallback: Use the full filename
-            Console.WriteLine($"Warning: Could not detect quantization format from filename '{filename}', using full filename as tag");
+            Out.Warning($"Could not detect quantization format from filename '{filename}', using full filename as tag");
             return filename;
         }
 
         private void PullLocalModel(string modelName)
         {
-            Console.WriteLine($"Pulling '{modelName}' locally...\n");
+            Out.StatusLine($"Pulling '{modelName}' locally...\n");
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = $"pull {modelName}";
             p.StartInfo.CreateNoWindow = false;
             p.StartInfo.UseShellExecute = false;
@@ -5335,16 +5365,16 @@ namespace osync
 
             if (p.ExitCode != 0)
             {
-                Console.WriteLine($"\nError: Failed to pull model '{modelName}'");
+                Out.Error($"\nFailed to pull model '{modelName}'");
                 System.Environment.Exit(1);
             }
 
-            Console.WriteLine($"\n✓ Successfully pulled '{modelName}'");
+            Out.Success($"\nSuccessfully pulled '{modelName}'");
         }
 
         private async Task PullRemoteModel(string modelName, string destination)
         {
-            Console.WriteLine($"Pulling '{modelName}' to remote server {destination}...\n");
+            Out.StatusLine($"Pulling '{modelName}' to remote server {destination}...\n");
 
             using var httpClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
             httpClient.BaseAddress = new Uri(destination);
@@ -5365,7 +5395,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: Failed to pull model (HTTP {response.StatusCode})");
+                    Out.Error($"Failed to pull model (HTTP {response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -5389,7 +5419,7 @@ namespace osync
 
                         if (root.TryGetProperty("error", out var errorProp))
                         {
-                            Console.WriteLine($"\nError: {errorProp.GetString()}");
+                            Out.Error($"\n{errorProp.GetString()}");
                             System.Environment.Exit(1);
                         }
 
@@ -5470,7 +5500,7 @@ namespace osync
                     Console.WriteLine("");
                 }
 
-                Console.WriteLine($"\n✓ Successfully pulled '{modelName}' to remote server");
+                Out.Success($"\nSuccessfully pulled '{modelName}' to remote server");
         }
 
         public void ActionShow(string modelName, string destination, bool license, bool modelfile, bool parameters, bool system, bool template, bool verbose)
@@ -5515,7 +5545,8 @@ namespace osync
             if (verbose) args.Add("--verbose");
 
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = string.Join(" ", args);
             p.StartInfo.CreateNoWindow = false;
             p.StartInfo.UseShellExecute = false;
@@ -5528,120 +5559,141 @@ namespace osync
 
             if (p.ExitCode != 0)
             {
-                Console.WriteLine($"Error: Failed to show model '{modelName}'");
+                Out.Error($"Failed to show model '{modelName}'");
                 System.Environment.Exit(1);
             }
         }
 
         private async Task ShowRemoteModel(string modelName, string destination, bool license, bool modelfile, bool parameters, bool system, bool template, bool verbose)
         {
-            // Create dedicated HttpClient with BaseAddress
             using var httpClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             httpClient.BaseAddress = new Uri(destination);
 
             try
             {
-                var showRequest = new
+                var response = await httpClient.PostAsJsonAsync("api/show", new { model = modelName, verbose });
+                if (response.StatusCode == HttpStatusCode.NotFound)
                 {
-                    name = modelName,
-                    verbose = verbose
-                };
-
-                var content = new StringContent(
-                    JsonSerializer.Serialize(showRequest),
-                    Encoding.UTF8,
-                    "application/json"
-                );
-
-                var response = await httpClient.PostAsync("api/show", content);
-
+                    Out.Error($"model '{modelName}' not found on {destination}");
+                    System.Environment.Exit(1);
+                }
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: Failed to show model (HTTP {response.StatusCode})");
+                    Out.Error($"Failed to show model (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
-                string json = await response.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(json);
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                 var root = doc.RootElement;
+                string Text(string property) =>
+                    root.TryGetProperty(property, out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() ?? "" : "";
 
-                // If specific flags are set, show only those parts
-                bool hasSpecificFlag = license || modelfile || parameters || system || template;
+                // Section flags print just those sections (several may be combined), like `ollama show --<flag>`
+                var sections = new List<string>();
+                if (license) sections.Add(Text("license"));
+                if (modelfile) sections.Add(Text("modelfile"));
+                if (parameters) sections.Add(Text("parameters"));
+                if (system) sections.Add(Text("system"));
+                if (template) sections.Add(Text("template"));
+                if (sections.Count > 0)
+                {
+                    Console.WriteLine(string.Join("\n", sections.Select(t => t.TrimEnd())));
+                    return;
+                }
 
-                if (license && root.TryGetProperty("license", out var licenseElement))
+                // Default view: the same sections as `ollama show`
+                var modelInfo = root.TryGetProperty("model_info", out var mi) && mi.ValueKind == JsonValueKind.Object ? mi : default;
+                var details = root.TryGetProperty("details", out var dt) && dt.ValueKind == JsonValueKind.Object ? dt : default;
+                string Detail(string property) =>
+                    details.ValueKind == JsonValueKind.Object && details.TryGetProperty(property, out var e) ? e.ToString() : "";
+                string Info(string key) =>
+                    modelInfo.ValueKind == JsonValueKind.Object && modelInfo.TryGetProperty(key, out var e) ? e.ToString() : "";
+
+                var architecture = Info("general.architecture");
+                var rows = new List<(string Name, string Value)>
                 {
-                    Console.WriteLine(licenseElement.GetString() ?? "");
-                }
-                else if (modelfile && root.TryGetProperty("modelfile", out var modelfileElement))
+                    ("architecture", architecture.Length > 0 ? architecture : Detail("family")),
+                    ("parameters", Detail("parameter_size")),
+                    ("context length", architecture.Length > 0 ? Info($"{architecture}.context_length") : ""),
+                    ("embedding length", architecture.Length > 0 ? Info($"{architecture}.embedding_length") : ""),
+                    ("quantization", Detail("quantization_level"))
+                };
+                PrintShowSection("Model", rows.Where(r => r.Value.Length > 0));
+
+                if (root.TryGetProperty("capabilities", out var caps) && caps.ValueKind == JsonValueKind.Array)
+                    PrintShowSection("Capabilities", caps.EnumerateArray().Select(c => (c.GetString() ?? "", "")));
+
+                if (root.TryGetProperty("projector_info", out var projector) && projector.ValueKind == JsonValueKind.Object)
                 {
-                    Console.WriteLine(modelfileElement.GetString() ?? "");
-                }
-                else if (parameters && root.TryGetProperty("parameters", out var parametersElement))
-                {
-                    Console.WriteLine(parametersElement.GetString() ?? "");
-                }
-                else if (system && root.TryGetProperty("system", out var systemElement))
-                {
-                    Console.WriteLine(systemElement.GetString() ?? "");
-                }
-                else if (template && root.TryGetProperty("template", out var templateElement))
-                {
-                    Console.WriteLine(templateElement.GetString() ?? "");
-                }
-                else if (!hasSpecificFlag)
-                {
-                    // Show default information (similar to ollama show without flags)
-                    if (root.TryGetProperty("modelfile", out var mf))
+                    string Projector(string key) => projector.TryGetProperty(key, out var e) ? e.ToString() : "";
+                    var projectorArch = Projector("general.architecture");
+                    PrintShowSection("Projector", new List<(string, string)>
                     {
-                        Console.WriteLine(mf.GetString() ?? "");
-                    }
+                        ("architecture", projectorArch),
+                        ("parameters", Projector("general.parameter_count")),
+                        ("embedding length", projectorArch.Length > 0 ? Projector($"{projectorArch}.embedding_length") : ""),
+                        ("dimensions", projectorArch.Length > 0 ? Projector($"{projectorArch}.projection_dim") : "")
+                    }.Where(r => r.Item2.Length > 0));
+                }
 
-                    if (verbose)
-                    {
-                        // Show detailed information
-                        Console.WriteLine("");
-                        if (root.TryGetProperty("license", out var lic))
-                        {
-                            Console.WriteLine("License:");
-                            Console.WriteLine(lic.GetString() ?? "");
-                            Console.WriteLine("");
-                        }
-                        if (root.TryGetProperty("parameters", out var param))
-                        {
-                            Console.WriteLine("Parameters:");
-                            Console.WriteLine(param.GetString() ?? "");
-                            Console.WriteLine("");
-                        }
-                        if (root.TryGetProperty("system", out var sys))
-                        {
-                            Console.WriteLine("System:");
-                            Console.WriteLine(sys.GetString() ?? "");
-                            Console.WriteLine("");
-                        }
-                        if (root.TryGetProperty("template", out var tmpl))
-                        {
-                            Console.WriteLine("Template:");
-                            Console.WriteLine(tmpl.GetString() ?? "");
-                        }
-                    }
+                var parameterLines = Text("parameters").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                PrintShowSection("Parameters", parameterLines.Select(l =>
+                {
+                    var space = l.IndexOf(' ');
+                    return space < 0 ? (l, "") : (l[..space], l[space..].Trim());
+                }));
+
+                var systemText = Text("system");
+                if (systemText.Length > 0)
+                    PrintShowSection("System", systemText.Split('\n').Select(l => (l.TrimEnd(), "")));
+
+                var licenseText = Text("license");
+                if (licenseText.Length > 0)
+                {
+                    var lines = licenseText.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Length > 0).ToList();
+                    var shown = verbose ? lines : lines.Take(2).ToList();
+                    if (!verbose && lines.Count > 2) shown.Add("...");
+                    PrintShowSection("License", shown.Select(l => (l, "")));
+                }
+
+                if (verbose && modelInfo.ValueKind == JsonValueKind.Object)
+                {
+                    PrintShowSection("Metadata", modelInfo.EnumerateObject()
+                        .Where(p => p.Value.ValueKind != JsonValueKind.Array && p.Value.ValueKind != JsonValueKind.Null)
+                        .Select(p => (p.Name, p.Value.ToString())));
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Error: Failed to show model: {e.Message}");
+                Out.Error($"Failed to show model: {e.Message}");
                 System.Environment.Exit(1);
             }
         }
 
-        private void UpdateLocalModels(string pattern)
+        /// <summary>Prints a titled, indented two-column section in the style of `ollama show`.</summary>
+        private static void PrintShowSection(string title, IEnumerable<(string Name, string Value)> rows)
+        {
+            var list = rows.ToList();
+            if (list.Count == 0) return;
+            var width = Math.Max(16, list.Max(r => r.Name.Length) + 4);
+            System.Console.WriteLine($"  {Out.Heading(title)}");
+            foreach (var (name, value) in list)
+                System.Console.WriteLine(value.Length > 0
+                    ? $"    {Out.Muted(name.PadRight(width))}{Out.Paint(value, p => p.Text)}"
+                    : $"    {Out.Paint(name, p => p.Text)}");
+            Console.WriteLine("");
+        }
+
+        private bool UpdateLocalModels(string pattern)
         {
             var modelsToUpdate = new List<string>();
             string manifestsDir = Path.Combine(ollama_models, "manifests");
 
             if (!Directory.Exists(manifestsDir))
             {
-                Console.WriteLine($"No local models found.");
-                return;
+                Out.Error($"No local models found.");
+                // Nothing to update is only an error when a specific model/pattern was asked for
+                return pattern == "*";
             }
 
             // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
@@ -5690,26 +5742,32 @@ namespace osync
 
             if (modelsToUpdate.Count == 0)
             {
-                Console.WriteLine($"No models found matching pattern: {pattern}");
-                return;
+                Out.Error($"No models found matching pattern: {pattern}");
+                // Nothing to update is only an error when a specific model/pattern was asked for
+                return pattern == "*";
             }
 
-            Console.WriteLine($"Updating {modelsToUpdate.Count} model(s)...\n");
+            Out.StatusLine($"Updating {modelsToUpdate.Count} model(s)...\n");
 
+            int failures = 0;
             foreach (var modelName in modelsToUpdate)
             {
-                UpdateSingleLocalModel(modelName);
+                if (!UpdateSingleLocalModel(modelName)) failures++;
             }
+
+            return failures == 0;
         }
 
-        private void UpdateSingleLocalModel(string modelName)
+        private bool UpdateSingleLocalModel(string modelName)
         {
+            bool ok = true;
             try
             {
-                Console.WriteLine($"Updating '{modelName}'...");
+                Out.StatusLine($"Updating '{modelName}'...");
 
                 var p = new Process();
-                p.StartInfo.FileName = "ollama";
+                p.StartInfo.FileName = OllamaServer.CliName;
+                OllamaServer.ApplyCliEnvironment(p.StartInfo);
                 p.StartInfo.Arguments = $"pull {modelName}";
                 p.StartInfo.CreateNoWindow = true;
                 p.StartInfo.UseShellExecute = false;
@@ -5758,31 +5816,35 @@ namespace osync
                         fullOutput.Contains("already exists") ||
                         (!hadDownloadActivity && fullOutput.Contains("success")))
                     {
-                        Console.WriteLine($"✓ '{modelName}' is already up to date\n");
+                        Out.Success($"'{modelName}' is already up to date\n");
                     }
                     else if (hadDownloadActivity)
                     {
-                        Console.WriteLine($"✓ '{modelName}' updated successfully\n");
+                        Out.Success($"'{modelName}' updated successfully\n");
                     }
                     else
                     {
                         // If no clear indicator, assume it's up to date (no downloads happened)
-                        Console.WriteLine($"✓ '{modelName}' is already up to date\n");
+                        Out.Success($"'{modelName}' is already up to date\n");
                     }
                 }
                 else
                 {
                     string error = errorOutput.ToString();
-                    Console.WriteLine($"✗ Failed to update '{modelName}': {error}\n");
+                    Out.Failure($"Failed to update '{modelName}': {error}\n");
+                    ok = false;
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"✗ Error updating '{modelName}': {e.Message}\n");
+                Out.Failure($"Error updating '{modelName}': {e.Message}\n");
+                ok = false;
             }
+
+            return ok;
         }
 
-        private async Task UpdateRemoteModels(string pattern, string destination)
+        private async Task<bool> UpdateRemoteModels(string pattern, string destination)
         {
             // Create dedicated client for remote server
             using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromHours(1) };
@@ -5795,7 +5857,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"Error: failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -5815,29 +5877,35 @@ namespace osync
 
                 if (modelsToUpdate.Count == 0)
                 {
-                    Console.WriteLine($"No models found matching pattern: {pattern}");
-                    return;
+                    Out.Error($"No models found matching pattern: {pattern}");
+                    // Nothing to update is only an error when a specific model/pattern was asked for
+                    return pattern == "*";
                 }
 
-                Console.WriteLine($"Updating {modelsToUpdate.Count} model(s) on remote server...\n");
+                Out.StatusLine($"Updating {modelsToUpdate.Count} model(s) on remote server...\n");
 
+                int failures = 0;
                 foreach (var modelName in modelsToUpdate)
                 {
-                    await UpdateSingleRemoteModel(remoteClient, modelName, destination);
+                    if (!await UpdateSingleRemoteModel(remoteClient, modelName, destination)) failures++;
                 }
+
+                return failures == 0;
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Error: {e.Message}");
+                Out.Error($"{e.Message}");
                 System.Environment.Exit(1);
+                return false;
             }
         }
 
-        private async Task UpdateSingleRemoteModel(HttpClient httpClient, string modelName, string destination)
+        private async Task<bool> UpdateSingleRemoteModel(HttpClient httpClient, string modelName, string destination)
         {
+            bool ok = true;
             try
             {
-                Console.WriteLine($"Updating '{modelName}' on remote server...");
+                Out.StatusLine($"Updating '{modelName}' on remote server...");
 
                 var pullRequest = new
                 {
@@ -5855,8 +5923,9 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Console.WriteLine($"✗ Failed to update '{modelName}': HTTP {(int)response.StatusCode}\n");
-                    return;
+                    Out.Failure($"Failed to update '{modelName}': HTTP {(int)response.StatusCode}\n");
+                    ok = false;
+                    return false;
                 }
 
                 // Read the streaming response
@@ -5907,7 +5976,7 @@ namespace osync
                         if (root.TryGetProperty("error", out var errorProp))
                         {
                             hasError = true;
-                            Console.WriteLine($"Error: {errorProp.GetString()}");
+                            Out.Error($"{errorProp.GetString()}");
                         }
                     }
                     catch
@@ -5918,21 +5987,25 @@ namespace osync
 
                 if (hasError)
                 {
-                    Console.WriteLine($"✗ Failed to update '{modelName}'\n");
+                    Out.Failure($"Failed to update '{modelName}'\n");
+                    ok = false;
                 }
                 else if (isUpToDate || !hadDownloadActivity)
                 {
-                    Console.WriteLine($"✓ '{modelName}' is already up to date\n");
+                    Out.Success($"'{modelName}' is already up to date\n");
                 }
                 else
                 {
-                    Console.WriteLine($"✓ '{modelName}' updated successfully\n");
+                    Out.Success($"'{modelName}' updated successfully\n");
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine($"✗ Error updating '{modelName}': {e.Message}\n");
+                Out.Failure($"Error updating '{modelName}': {e.Message}\n");
+                ok = false;
             }
+
+            return ok;
         }
 
         public void Init()
@@ -5940,18 +6013,11 @@ namespace osync
             // Clear any tab completion options from the screen
             LocalModelsTabCompletionSource.ClearPreviousOptions();
 
-            var env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS");
-            if (env_models != null && env_models.Length > 0)
+            // XOLLAMA_MODELS (xOllama) or OLLAMA_MODELS, process then user scope
+            var env_models = OllamaServer.ModelsDirFromEnvironment();
+            if (!string.IsNullOrEmpty(env_models))
             {
                 ollama_models = env_models;
-            }
-            if (env_models == null || env_models.Length < 1)
-            {
-                env_models = System.Environment.GetEnvironmentVariable("OLLAMA_MODELS", EnvironmentVariableTarget.User);
-                if (env_models != null && env_models.Length > 0)
-                {
-                    ollama_models = env_models;
-                }
             }
             if (ollama_models.Length < 1)
             {
@@ -6016,22 +6082,26 @@ namespace osync
                 // Check if we're already running from the install directory
                 if (Path.GetFullPath(currentExeDir).Equals(Path.GetFullPath(installDir), StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine($"✓ osync is already installed in: {installDir}");
+                    Out.Success($"osync is already installed in: {installDir}");
                 }
                 else
                 {
-                    // Copy the main executable
-                    string sourceExePath = Path.Combine(currentExeDir, exeName);
+                    // Copy the main executable. Use the running binary itself, which may be renamed
+                    // (e.g. the osync-macos-arm64 release asset); it is always installed as osync / osync.exe.
+                    string? processPath = System.Environment.ProcessPath;
+                    bool runningAsApphost = processPath != null &&
+                        !Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+                    string sourceExePath = runningAsApphost ? processPath! : Path.Combine(currentExeDir, exeName);
                     string targetExePath = Path.Combine(installDir, exeName);
 
                     if (!System.IO.File.Exists(sourceExePath))
                     {
-                        Console.WriteLine($"Error: Cannot find executable at {sourceExePath}");
+                        Out.Error($"Cannot find executable at {sourceExePath}");
                         System.Environment.Exit(1);
                     }
 
                     System.IO.File.Copy(sourceExePath, targetExePath, true);
-                    Console.WriteLine($"✓ Copied osync to: {installDir}");
+                    Out.Success($"Copied osync to: {installDir}");
 
                     // Copy platform-specific optional dependencies if they exist
                     int depsCopied = 0;
@@ -6088,11 +6158,31 @@ namespace osync
 
             if (pathUpdated)
             {
-                Console.WriteLine($"✓ Added {installDir} to PATH");
+                Out.Success($"Added {installDir} to PATH");
             }
             else
             {
-                Console.WriteLine($"✓ {installDir} is already in PATH");
+                Out.Success($"{installDir} is already in PATH");
+            }
+
+            // Local server: asked only when it is not clear which one to use (none or both found on this machine)
+            Console.WriteLine("");
+            {
+                var settings = OsyncSettings.Current;
+                if (ServerSetup.AutoConfigure(settings, System.Console.In, System.Console.Out, ServerSetup.ProbeServer,
+                        System.Environment.GetEnvironmentVariable, interactive: !System.Console.IsInputRedirected))
+                {
+                    try
+                    {
+                        settings.SaveAsCurrent();
+                        OllamaServer.ResetLocal();
+                        Out.Success($"Saved settings to {OsyncSettings.FilePath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Out.Warning($"could not save settings to {OsyncSettings.FilePath}: {ex.Message}");
+                    }
+                }
             }
 
             // Check if shell completion is available before asking
@@ -6237,7 +6327,7 @@ namespace osync
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Warning: Could not update PATH: {ex.Message}");
+                Out.Warning($"Could not update PATH: {ex.Message}");
                 Console.WriteLine($"Please add {directory} to your PATH manually.");
                 return false;
             }
@@ -6335,14 +6425,14 @@ namespace osync
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Warning: Could not update shell configuration: {ex.Message}");
+                Out.Warning($"Could not update shell configuration: {ex.Message}");
                 Console.WriteLine($"Please add {directory} to your PATH manually by adding this line to your shell rc file:");
                 Console.WriteLine($"  export PATH=\"{directory}:$PATH\"");
                 return false;
             }
         }
 
-        private void InstallBashCompletion()
+        internal void InstallBashCompletion()
         {
             try
             {
@@ -6374,7 +6464,7 @@ namespace osync
 
                         System.IO.File.WriteAllText(path, completionScript);
                         installPath = path;
-                        Console.WriteLine($"✓ Bash completion installed to: {path}");
+                        Out.Success($"Bash completion installed to: {path}");
                         break;
                     }
                     catch
@@ -6398,17 +6488,17 @@ namespace osync
                         if (!bashrcContent.Contains("# osync completion"))
                         {
                             System.IO.File.AppendAllText(bashrc, sourceCommand);
-                            Console.WriteLine($"✓ Bash completion added to: {bashrc}");
+                            Out.Success($"Bash completion added to: {bashrc}");
                         }
                         else
                         {
-                            Console.WriteLine($"✓ Bash completion already configured in: {bashrc}");
+                            Out.Success($"Bash completion already configured in: {bashrc}");
                         }
                     }
                     else
                     {
                         System.IO.File.WriteAllText(bashrc, sourceCommand);
-                        Console.WriteLine($"✓ Bash completion added to: {bashrc}");
+                        Out.Success($"Bash completion added to: {bashrc}");
                     }
                 }
 
@@ -6423,7 +6513,7 @@ namespace osync
             }
         }
 
-        private void InstallPowerShellCompletion()
+        internal void InstallPowerShellCompletion()
         {
             try
             {
@@ -6438,7 +6528,7 @@ namespace osync
                 // Check if version is >= 6.0
                 if (version.Major < 6)
                 {
-                    Console.WriteLine("\nError: PowerShell version 6.0 or higher is required for completion support.");
+                    Out.Error("\nPowerShell version 6.0 or higher is required for completion support.");
                     Console.WriteLine($"Current version: {version} ({edition})");
                     Console.WriteLine("\nPowerShell Desktop 5.x does not support the ArgumentCompleter used by osync.");
                     Console.WriteLine("\nPlease install PowerShell 7+ from:");
@@ -6453,7 +6543,7 @@ namespace osync
 
                 if (string.IsNullOrEmpty(profilePath))
                 {
-                    Console.WriteLine("Error: Could not determine PowerShell profile path");
+                    Out.Error("Could not determine PowerShell profile path");
                     System.Environment.Exit(1);
                 }
 
@@ -6530,11 +6620,11 @@ namespace osync
 
                 if (profileExists)
                 {
-                    Console.WriteLine($"✓ Updated osync completion in profile: {profilePath}");
+                    Out.Success($"Updated osync completion in profile: {profilePath}");
                 }
                 else
                 {
-                    Console.WriteLine($"✓ Created profile and added osync completion: {profilePath}");
+                    Out.Success($"Created profile and added osync completion: {profilePath}");
                 }
 
                 Console.WriteLine("\nTo activate completion:");
@@ -6556,7 +6646,7 @@ namespace osync
             try
             {
                 var currentProcess = Process.GetCurrentProcess();
-                var parentProcess = GetParentProcess(currentProcess);
+                var parentProcess = OperatingSystem.IsWindows() ? GetParentProcess(currentProcess) : null;
 
                 if (parentProcess != null)
                 {
@@ -6619,6 +6709,7 @@ namespace osync
             return "powershell";
         }
 
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         private Process? GetParentProcess(Process process)
         {
             try
@@ -7176,7 +7267,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                     string commonPrefix = FindCommonPrefix(positionalArgs.Select(p => p.value).ToList());
 
                     System.Console.ForegroundColor = ConsoleColor.Yellow;
-                    System.Console.WriteLine($"Warning: Multiple arguments detected. Shell may have expanded your wildcard pattern.");
+                    Out.Warning($"Multiple arguments detected. Shell may have expanded your wildcard pattern.");
                     System.Console.WriteLine($"Tip: Use quotes to prevent shell expansion: osync {command} '{commonPrefix}*'");
                     System.Console.ResetColor();
                     System.Console.WriteLine();
@@ -7270,92 +7361,32 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         {
             try
             {
-                // Get terminal info early
-                var term = System.Environment.GetEnvironmentVariable("TERM") ?? "";
-                var colorTerm = System.Environment.GetEnvironmentVariable("COLORTERM") ?? "";
-                var sshConnection = System.Environment.GetEnvironmentVariable("SSH_CONNECTION");
-                var tmux = System.Environment.GetEnvironmentVariable("TMUX");
-                var sshTty = System.Environment.GetEnvironmentVariable("SSH_TTY");
+                // Color depth for all Spectre.Console output: OSYNC_COLOR_MODE, NO_COLOR, colorMode in the
+                // settings file, else detected from COLORTERM / the original TERM (see ColorSupport).
+                ColorSupport.ApplyToSpectre();
 
-                // Check for OSYNC_COLOR_MODE environment variable for user override
-                var colorModeOverride = System.Environment.GetEnvironmentVariable("OSYNC_COLOR_MODE");
-
-                // On Windows, console libraries usually work fine - let them auto-detect
                 if (OperatingSystem.IsWindows())
-                {
-                    if (!string.IsNullOrEmpty(colorModeOverride))
-                    {
-                        ApplyColorModeOverride(colorModeOverride);
-                    }
                     return;
-                }
 
-                // Check for known problematic environments (SSH, tmux, screen)
-                bool isRemoteSession = !string.IsNullOrEmpty(sshConnection) || !string.IsNullOrEmpty(sshTty);
-                bool isTmux = !string.IsNullOrEmpty(tmux);
-                bool isScreen = term.StartsWith("screen", StringComparison.OrdinalIgnoreCase);
+                // The TERM the user had (TerminalInitializer replaces it with xterm-16color at startup so that
+                // console libraries do not query the terminal, which could hang over SSH/tmux)
+                var term = TerminalInitializer.OriginalTerm ?? "";
+                bool isRemoteOrMultiplexed =
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("SSH_CONNECTION")) ||
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("SSH_TTY")) ||
+                    !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("TMUX")) ||
+                    term.StartsWith("screen", StringComparison.OrdinalIgnoreCase);
 
-                // Detect 256-color TERM that causes hangs
-                bool has256ColorTerm = term.Contains("256color", StringComparison.OrdinalIgnoreCase) ||
-                                       term.Contains("256-color", StringComparison.OrdinalIgnoreCase);
-
-                // The problematic case: 256-color terminal over SSH/tmux
-                // Some console libraries try to query the terminal for capabilities using
-                // escape sequences like DA1/DA2/XTVERSION, which can hang if the terminal
-                // doesn't respond or the response isn't received properly over SSH.
-                if ((isRemoteSession || isTmux || isScreen) && has256ColorTerm)
+                if (isRemoteOrMultiplexed)
                 {
-                    // Downgrade TERM to avoid the problematic capability detection
-                    // Keep color support but use a simpler terminal type
-                    System.Environment.SetEnvironmentVariable("TERM", "xterm");
-
-                    // Set COLORTERM to indicate we support colors (some apps check this)
-                    if (string.IsNullOrEmpty(colorTerm))
-                    {
-                        System.Environment.SetEnvironmentVariable("COLORTERM", "256");
-                    }
-                }
-
-                // Apply user override if specified
-                if (!string.IsNullOrEmpty(colorModeOverride))
-                {
-                    ApplyColorModeOverride(colorModeOverride);
-                    return;
-                }
-
-                // Configure Spectre.Console based on environment
-                // Detect true color support from COLORTERM
-                bool hasTrueColor = colorTerm.Equals("truecolor", StringComparison.OrdinalIgnoreCase) ||
-                                   colorTerm.Equals("24bit", StringComparison.OrdinalIgnoreCase);
-
-                if (isRemoteSession || isTmux || isScreen)
-                {
-                    if (hasTrueColor)
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.TrueColor;
-                    }
-                    else if (has256ColorTerm || colorTerm == "256")
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.EightBit;
-                    }
-                    else
-                    {
-                        AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.Standard;
-                    }
-
-                    // Disable interactive features that might cause issues
+                    // Interactive prompts only with a real terminal on stdin
                     AnsiConsole.Profile.Capabilities.Interactive = System.Console.IsInputRedirected == false;
                 }
 
-                // Handle dumb terminals
-                if (term.Equals("dumb", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(term))
-                {
-                    AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.NoColors;
-                    AnsiConsole.Profile.Capabilities.Unicode = false;
-                }
-
-                // Disable Unicode on Linux console (not xterm/screen)
-                if (term.Equals("linux", StringComparison.OrdinalIgnoreCase))
+                // No Unicode box drawing on dumb terminals and the Linux text console
+                if (term.Length == 0 ||
+                    term.Equals("dumb", StringComparison.OrdinalIgnoreCase) ||
+                    term.Equals("linux", StringComparison.OrdinalIgnoreCase))
                 {
                     AnsiConsole.Profile.Capabilities.Unicode = false;
                 }
@@ -7363,33 +7394,6 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             catch
             {
                 // If anything fails during terminal configuration, continue with defaults
-            }
-        }
-
-        /// <summary>
-        /// Apply user-specified color mode override
-        /// </summary>
-        static void ApplyColorModeOverride(string colorModeOverride)
-        {
-            ColorSystem? colorSystem = colorModeOverride.ToLowerInvariant() switch
-            {
-                "none" => ColorSystem.NoColors,
-                "0" => ColorSystem.NoColors,
-                "legacy" => ColorSystem.Legacy,
-                "8" => ColorSystem.Legacy,
-                "standard" => ColorSystem.Standard,
-                "16" => ColorSystem.Standard,
-                "256" => ColorSystem.EightBit,
-                "eightbit" => ColorSystem.EightBit,
-                "true" => ColorSystem.TrueColor,
-                "truecolor" => ColorSystem.TrueColor,
-                "24bit" => ColorSystem.TrueColor,
-                _ => null
-            };
-
-            if (colorSystem.HasValue)
-            {
-                AnsiConsole.Profile.Capabilities.ColorSystem = colorSystem.Value;
             }
         }
 
@@ -7435,6 +7439,9 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 // Configure terminal/console capabilities early, before any Spectre.Console output
                 ConfigureTerminalCapabilities();
 
+                // PowerArgs help/usage rendering hangs when the console width is 0 (redirected output on Linux/macOS)
+                SafeConsoleProvider.Install();
+
                 // Skip startup banner for version command to avoid duplicate output
                 bool isVersionCommand = args.Length > 0 &&
                     (args[0].Equals("showversion", StringComparison.OrdinalIgnoreCase) ||
@@ -7443,7 +7450,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
 
                 if (!isVersionCommand)
                 {
-                    Console.WriteLine($"osync {OsyncProgram.GetFullVersion()}");
+                    System.Console.WriteLine(OsyncProgram.VersionBanner());
                     System.Console.WriteLine();
                 }
                 System.Console.ResetColor();
@@ -7507,7 +7514,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 // This is especially important on Linux/macOS where Spectre.Console
                 // may leave the terminal in a colored state
                 // Only write raw ANSI on non-Windows - Windows CMD displays it as literal characters
-                if (!OperatingSystem.IsWindows())
+                if (!OperatingSystem.IsWindows() && !System.Console.IsOutputRedirected)
                 {
                     System.Console.Write("\x1b[0m");
                 }
@@ -7534,7 +7541,8 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             string model_re = "^(?<modelname>\\S*).*";
             var Modelsbuild = new StringBuilder();
             var p = new Process();
-            p.StartInfo.FileName = "ollama";
+            p.StartInfo.FileName = OllamaServer.CliName;
+            OllamaServer.ApplyCliEnvironment(p.StartInfo);
             p.StartInfo.Arguments = @" ls";
             p.StartInfo.CreateNoWindow = true;
             p.StartInfo.UseShellExecute = false;

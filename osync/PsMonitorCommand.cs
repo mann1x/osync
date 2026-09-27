@@ -81,32 +81,8 @@ public class PsMonitorUI
         _initialRefreshInterval = _refreshIntervalSeconds;
         _historyMinutes = Math.Clamp(historyMinutes, _minHistoryMinutes, _maxHistoryMinutes);
 
-        // Resolve Ollama host - same logic as Ps command
-        _ollamaHost = destination
-            ?? Environment.GetEnvironmentVariable("OLLAMA_HOST")
-            ?? "http://localhost:11434";
-
-        // If OLLAMA_HOST is 0.0.0.0 (bind address), replace with localhost
-        if (_ollamaHost == "0.0.0.0" || _ollamaHost == "0.0.0.0:11434" ||
-            _ollamaHost.Contains("://0.0.0.0"))
-        {
-            _ollamaHost = "http://localhost:11434";
-        }
-
-        // Normalize URL
-        if (!_ollamaHost.StartsWith("http://") && !_ollamaHost.StartsWith("https://"))
-            _ollamaHost = "http://" + _ollamaHost;
-
-        // Ensure port is present
-        try
-        {
-            var uri = new Uri(_ollamaHost);
-            if (uri.Port == -1 || uri.Port == 80)
-            {
-                _ollamaHost = $"{uri.Scheme}://{uri.Host}:11434";
-            }
-        }
-        catch { }
+        // Resolve the server - same logic as Ps command
+        _ollamaHost = OllamaServer.ResolveHost(destination);
 
         // Initialize graphs with enough capacity for max history
         // Using MaxStoredDataPoints as width to set internal buffer size

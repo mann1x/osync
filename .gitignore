@@ -348,3 +348,6 @@ healthchecksdb
 tmpclaude*
 *claude/settings.json
 *claude/settings.local.json
+
+# SpecFlow/Reqnroll generated code-behind (regenerated on every build)
+*.feature.cs
