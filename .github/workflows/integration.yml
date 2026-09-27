@@ -7,6 +7,8 @@ name: Integration tests
 # server=ollama : Ollama  on :11434/:11435/:11436, version from .github/ollama-version
 # server=xollama: xOllama on :22434/:22435/:22436 (its default port), version from .github/xollama-version;
 #                 only the xollama CLI is installed, so osync must discover the server and CLI itself.
+#   peer     a server of the other flavor (xOllama for server=ollama, Ollama for server=xollama), for the
+#            interoperability scenarios (@peer): its binary is not on PATH, so it is never the local server
 # Called by ci.yml and server-compat.yml.
 on:
   workflow_call:
@@ -19,6 +21,10 @@ on:
         description: "Release tag; empty = .github/<server>-version"
         type: string
         default: ""
+    secrets:
+      HF_TOKEN:
+        description: "HuggingFace token for osync's huggingface.co API calls (rate limits); optional"
+        required: false
   workflow_dispatch:
     inputs:
       server:
@@ -37,6 +43,8 @@ permissions:
 env:
   DOTNET_NOLOGO: "1"
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  # osync sends it on its own huggingface.co requests (tag lookups); empty when the secret is not set
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   integration:
@@ -55,8 +63,8 @@ jobs:
         run: |
           server="${{ inputs.server }}"
           case "$server" in
-            ollama)  port=11434; hostvar=OLLAMA_HOST ;;
-            xollama) port=22434; hostvar=XOLLAMA_HOST ;;
+            ollama)  port=11434; hostvar=OLLAMA_HOST; peer=xollama; peerport=22437; peerhostvar=XOLLAMA_HOST ;;
+            xollama) port=22434; hostvar=XOLLAMA_HOST; peer=ollama; peerport=11437; peerhostvar=OLLAMA_HOST ;;
             *) echo "::error::unknown server '$server'"; exit 1 ;;
           esac
           v="${{ inputs.version }}"
@@ -64,6 +72,10 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "port=$port" >> "$GITHUB_OUTPUT"
           echo "hostvar=$hostvar" >> "$GITHUB_OUTPUT"
+          echo "peer=$peer" >> "$GITHUB_OUTPUT"
+          echo "peerport=$peerport" >> "$GITHUB_OUTPUT"
+          echo "peerhostvar=$peerhostvar" >> "$GITHUB_OUTPUT"
+          echo "peerversion=$(tr -d '[:space:]' < .github/$peer-version)" >> "$GITHUB_OUTPUT"
           echo "$server $v" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cache server binaries
@@ -71,7 +83,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/srv
-          key: ${{ inputs.server }}-cpu-${{ steps.ver.outputs.version }}
+          key: ${{ inputs.server }}-cpu-${{ steps.ver.outputs.version }}-peer-${{ steps.ver.outputs.peerversion }}
 
       - name: Install Ollama ${{ steps.ver.outputs.version }} (CPU)
         if: inputs.server == 'ollama' && steps.server-cache.outputs.cache-hit != 'true'
@@ -79,6 +91,13 @@ jobs:
           mkdir -p ~/srv
           curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/${{ steps.ver.outputs.version }}/ollama-linux-amd64.tar.zst" \
             | zstd -dc | tar -x -C ~/srv --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
+          # Peer: the xOllama binary, outside bin/ so that it is not on PATH
+          v="${{ steps.ver.outputs.peerversion }}"
+          mkdir -p ~/srv/peer
+          curl -fsSL --retry 5 -o ~/srv/peer/xollama "https://github.com/mann1x/xollama/releases/download/$v/xollama-linux-amd64"
+          curl -fsSL --retry 5 -o peer-sha256sum.txt "https://github.com/mann1x/xollama/releases/download/$v/sha256sum.txt"
+          echo "$(grep ' xollama-linux-amd64$' peer-sha256sum.txt | cut -d' ' -f1)  $HOME/srv/peer/xollama" | sha256sum -c -
+          chmod +x ~/srv/peer/xollama
 
       # xOllama ships a bare Linux binary; its llama.cpp runtime is upstream Ollama's of the base version
       # (the fork's release process pins them to the same llama.cpp).
@@ -95,6 +114,11 @@ jobs:
           chmod +x bin/xollama
           curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/$base/ollama-linux-amd64.tar.zst" \
             | zstd -dc | tar -x -C ~/srv --wildcards 'lib/*' --exclude='*cuda*' --exclude='*rocm*' --exclude='*vulkan*' --exclude='*mlx*'
+          # Peer: stock Ollama (pinned version), outside bin/ so that it is not on PATH
+          mkdir -p ~/srv/peer-ollama
+          curl -fsSL --retry 5 "https://github.com/ollama/ollama/releases/download/${{ steps.ver.outputs.peerversion }}/ollama-linux-amd64.tar.zst" \
+            | zstd -dc | tar -x -C ~/srv/peer-ollama --wildcards 'bin/*'
+          mv ~/srv/peer-ollama/bin ~/srv/peer && rm -rf ~/srv/peer-ollama
 
       - name: Start servers
         run: |
@@ -106,13 +130,21 @@ jobs:
             env ${{ steps.ver.outputs.hostvar }}=127.0.0.1:$2 OLLAMA_MODELS="$RUNNER_TEMP/$1/models" \
               nohup "$HOME/srv/bin/${{ inputs.server }}" serve > "$RUNNER_TEMP/server-$1.log" 2>&1 &
           done
-          for port in $p $((p + 1)) $((p + 2)); do
+          # The peer runs from ~/srv/peer (not on PATH); a stock Ollama there finds its runtime in ~/srv/lib
+          mkdir -p "$RUNNER_TEMP/peer/models"
+          env ${{ steps.ver.outputs.peerhostvar }}=127.0.0.1:${{ steps.ver.outputs.peerport }} OLLAMA_MODELS="$RUNNER_TEMP/peer/models" \
+            nohup "$HOME/srv/peer/${{ steps.ver.outputs.peer }}" serve > "$RUNNER_TEMP/server-peer.log" 2>&1 &
+          for port in $p $((p + 1)) $((p + 2)) ${{ steps.ver.outputs.peerport }}; do
             timeout 60 bash -c "until curl -fs localhost:$port/api/version; do sleep 1; done"; echo
           done
           echo "OSYNC_TEST_LOCAL=http://localhost:$p" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_REMOTE1=http://localhost:$((p + 1))" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_REMOTE2=http://localhost:$((p + 2))" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_PEER=http://localhost:${{ steps.ver.outputs.peerport }}" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_MODELS_DIR=$RUNNER_TEMP/local/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE1_MODELS_DIR=$RUNNER_TEMP/remote1/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE2_MODELS_DIR=$RUNNER_TEMP/remote2/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_PEER_MODELS_DIR=$RUNNER_TEMP/peer/models" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_REGISTRY=1" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_EXCLUSIVE=1" >> "$GITHUB_ENV"
 

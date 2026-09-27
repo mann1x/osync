@@ -11,6 +11,9 @@ on:
         description: "ollama or xollama"
         type: string
         required: true
+    secrets:
+      HF_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -61,6 +64,8 @@ jobs:
     with:
       server: ${{ inputs.server }}
       version: ${{ needs.check.outputs.latest }}
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   report:
     needs: [check, test]

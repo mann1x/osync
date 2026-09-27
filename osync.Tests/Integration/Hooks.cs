@@ -9,6 +9,8 @@ namespace osync.Tests.Integration;
 ///   @local     local Ollama server reachable, ollama CLI on PATH, test model available
 ///   @remote1   OSYNC_TEST_REMOTE1 configured and reachable (+ test model)
 ///   @remote2   OSYNC_TEST_REMOTE2 configured and reachable (+ test model)
+///   @peer      OSYNC_TEST_PEER configured and reachable: a server of the other flavor (Ollama / xOllama)
+///   @stores    the models directory of every server the scenario uses is known (OSYNC_TEST_*_MODELS_DIR)
 ///   @registry  OSYNC_TEST_REGISTRY=1 (downloads from registry.ollama.ai / huggingface.co)
 ///   @cli       needs nothing but the osync binary (runs in the unit-test tier)
 ///   @tty       runs osync in a pseudo terminal (interactive commands such as manage): Linux with script(1)
@@ -38,7 +40,7 @@ public sealed class Hooks
     public static async Task RemoveStaleTestModels()
     {
         // Leftovers of interrupted runs; only names in the test namespace are touched
-        foreach (var url in new[] { TestEnvironment.LocalUrl, TestEnvironment.Remote1Url, TestEnvironment.Remote2Url })
+        foreach (var url in TestEnvironment.Servers.Select(TestEnvironment.ServerUrl))
         {
             if (!TestEnvironment.IsReachable(url)) continue;
             var api = new OllamaApi(url!);
@@ -61,7 +63,7 @@ public sealed class Hooks
             if (!TestEnvironment.IsReachable(TestEnvironment.LocalUrl)) missing.Add($"local Ollama at {TestEnvironment.LocalUrl}");
             if (!TestEnvironment.OllamaCliAvailable) missing.Add("ollama CLI on PATH");
         }
-        foreach (var remote in new[] { "remote1", "remote2" })
+        foreach (var remote in new[] { "remote1", "remote2", "peer" })
         {
             if (!tags.Contains(remote)) continue;
             needsModel = true;
@@ -78,6 +80,12 @@ public sealed class Hooks
             // Discovery prefers 11434: an xOllama on 22434 is only found when nothing answers on 11434
             else if (local.Port == 22434 && TestEnvironment.IsReachable("http://localhost:11434"))
                 missing.Add("no other server on localhost:11434");
+        }
+        if (tags.Contains("stores"))
+        {
+            foreach (var server in TestEnvironment.Servers.Where(tags.Contains))
+                if (TestEnvironment.StoreDir(server) == null)
+                    missing.Add(server == "local" ? "OSYNC_TEST_MODELS_DIR" : $"OSYNC_TEST_{server.ToUpperInvariant()}_MODELS_DIR");
         }
         if (tags.Contains("tty") && !OsyncCli.TerminalAvailable) missing.Add("Linux with script(1) for a pseudo terminal");
         if (tags.Contains("registry") && !TestEnvironment.RegistryEnabled) missing.Add("OSYNC_TEST_REGISTRY=1");
@@ -96,7 +104,7 @@ public sealed class Hooks
     {
         try { Directory.Delete(_state.ConfigDir, recursive: true); } catch { /* best effort */ }
 
-        foreach (var server in new[] { "local", "remote1", "remote2" })
+        foreach (var server in TestEnvironment.Servers)
         {
             var url = TestEnvironment.ServerUrl(server);
             if (!TestEnvironment.IsReachable(url)) continue;

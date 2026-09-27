@@ -58,4 +58,16 @@ public class OllamaServerTests
     {
         OllamaServer.ResolveHost("192.168.1.10").Should().Be("http://192.168.1.10:11434");
     }
+
+    [Fact]
+    public async Task RegistryRelay_ListensOnAFreeEphemeralPortByDefault()
+    {
+        if (Environment.GetEnvironmentVariable("OSYNC_RELAY_PORT") != null) return;
+
+        await using var relay = RegistryRelay.Start("http://127.0.0.1:11434", "http://127.0.0.1:11435", 0, 1024 * 1024);
+
+        var port = int.Parse(relay.Authority[(relay.Authority.LastIndexOf(':') + 1)..]);
+        port.Should().BeGreaterThan(1024);
+        relay.ModelName().Should().StartWith($"127.0.0.1:{port}/osync/relay-");
+    }
 }

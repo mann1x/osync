@@ -17,8 +17,12 @@ jobs:
     uses: ./.github/workflows/server-compat.yml
     with:
       server: ollama
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   xollama:
     uses: ./.github/workflows/server-compat.yml
     with:
       server: xollama
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
