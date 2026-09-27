@@ -100,13 +100,22 @@ public sealed class OllamaApi
             throw new InvalidOperationException($"Creating test model {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
     }
 
-    /// <summary>Pulls a model from the registry (used only by @registry tests).</summary>
+    /// <summary>
+    /// Pulls a model from the registry (used only by @registry tests). Server errors (the server could not reach
+    /// the registry: connection reset, timeout) are retried, so a network hiccup does not fail the scenario's setup.
+    /// </summary>
     public async Task PullAsync(string model)
     {
-        using var resp = await Http.PostAsJsonAsync($"{BaseUrl}/api/pull", new { model = WithTag(model), stream = false });
-        var text = await resp.Content.ReadAsStringAsync();
-        if (!resp.IsSuccessStatusCode || text.Contains("\"error\""))
-            throw new InvalidOperationException($"Pulling {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
+        const int attempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            using var resp = await Http.PostAsJsonAsync($"{BaseUrl}/api/pull", new { model = WithTag(model), stream = false });
+            var text = await resp.Content.ReadAsStringAsync();
+            if (resp.IsSuccessStatusCode && !text.Contains("\"error\"")) return;
+            if ((int)resp.StatusCode < 500 || attempt == attempts)
+                throw new InvalidOperationException($"Pulling {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
+            await Task.Delay(TimeSpan.FromSeconds(2 << attempt));
+        }
     }
 
     public async Task<List<string>> LoadedAsync()

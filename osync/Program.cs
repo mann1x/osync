@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.3.1";
+        public static string AppVersion = "1.4.0";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";

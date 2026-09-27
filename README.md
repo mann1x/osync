@@ -1485,37 +1485,42 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
-v1.3.1
+v1.4.0
+
+**New**
 - **xOllama support** - osync works with the [xOllama](https://github.com/mann1x/xollama) fork as well as Ollama
   - Local server discovery: `XOLLAMA_HOST`, `OLLAMA_HOST`, then `localhost:11434` / `localhost:22434`
   - Server flavor detection (`osync ps` shows `Server: Ollama|xOllama at <url>`)
   - Local operations use the `xollama` CLI when the local server is xOllama (override with `OSYNC_OLLAMA_CLI`)
   - `XOLLAMA_MODELS` honored for the models directory; xOllama processes shown in process stats
+- **Ollama and xOllama side by side** - server type "Both": one is the default local server, each gets an alias (`ollama`, `xollama`)
+- **Remote-to-remote and remote-to-local copy of any model** - new push relay: the source server pushes the model to a temporary registry endpoint run by osync, which streams the blobs straight into the destination. Models that only exist on the source server (created, imported, HuggingFace) can now be copied, the complete manifest is preserved (license, messages, projector, ...), copies work between Ollama and xOllama, and no internet access is needed (previously blobs were downloaded from registry.ollama.ai)
+- **`osync setup`** - one command for the preferences: `server` (Ollama, xOllama or both), `alias` (server aliases), `manage` (theme, default sort order, servers), `shell` (colors, theme, tab completion), `show`; interactive or with arguments for scripts
+- **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), aliases, color mode, `manage` and shell settings
+- **Server aliases** - `osync setup alias add gpu 192.168.1.10`, then `-d gpu`, `osync cp model gpu/`, `osync cp gpu/model copy`, `osync manage gpu`
+- **The settings can win over `XOLLAMA_HOST` / `OLLAMA_HOST`** - `osync setup server` asks when one is set, `osync setup server env ignore|use`, and a check box in the manage settings (Ctrl+E)
+- **`manage` rewritten on Terminal.Gui 2** - true color with multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
+- **`manage` switches servers with Ctrl+Left / Ctrl+Right** - the local server, the other one of Ollama/xOllama side by side, and the aliases chosen with `osync setup manage servers` (`osync setup server` offers them); the top bar shows which one (`[2/3] gpu: Ollama @ ...`)
+- **Colored command output again** - `ls`, `ps`, `show`, `-v`, copy/pull/update progress, errors, warnings and results use the shell theme (removed in 1.0.1 because of garbled output on Linux); plain when redirected, with `NO_COLOR` or the `plain` theme
+- **34 themes** for `manage` and the shell, 7 of them for light terminals, all checked for readable contrast at true color, 256 and 16 colors
+- **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
+- **`osync install` asks for the local server only when needed** - a single server found on this machine is used without questions; when none or both are found it asks for the type (Ollama, xOllama or both), host and port, with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
+- **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
+
+**Fixes**
 - **Fixed `osync <command> -h` and missing-argument errors hanging forever** on Linux/macOS when output is redirected (pipes, scripts, CI): the help renderer looped endlessly at 100% CPU with growing memory
 - **Fixed `run`, `ps`, `qc` ignoring `OLLAMA_HOST`**; `manage`, `psmonitor` and local judge models now use the same local-server resolution
 - **Fixed `ps` truncating model names to 20 characters** when output is redirected
-- **Remote-to-remote and remote-to-local copy of any model** - new push relay: the source server pushes the model to a temporary registry endpoint run by osync, which streams the blobs straight into the destination. Models that only exist on the source server (created, imported, HuggingFace) can now be copied, the complete manifest is preserved (license, messages, projector, ...), copies work between Ollama and xOllama, and no internet access is needed (previously blobs were downloaded from registry.ollama.ai)
 - **Fixed remote `show`** printing only the Modelfile: it now shows the same sections as `ollama show` (model details, capabilities, projector, parameters, system, license; all metadata with `-v`), several section flags can be combined, and a missing model exits with an error
 - **Fixed `rm` and `update` exiting with code 0** when no model matches, or when deleting/updating a model failed (`update` of all models on an empty server is still a success)
 - **Fixed server URLs without a port using port 80 when the model has a tag** (e.g. `osync cp http://server/qwen3:4b ...`): the `:` of the tag was taken for a port. A server given without a port now uses 11434, or 22434 when the host refuses 11434 but accepts 22434 (xOllama)
 - **Fixed `manage` showing `unknown` quantization (and no parameters/family)** when the local models directory and the resolved local server did not match (e.g. Ollama and xOllama both installed): local models are now listed through the local server's API, so the list and its details always come from the same server, and startup no longer makes one `/api/show` call per model. The top bar shows which server is used (`Ollama @ localhost:11434`); the models directory is only read when the server is unreachable, which the top bar says
-- **Preferences file** - `settings.json` in the per-OS configuration folder: local server (Ollama/xOllama, host, port), color mode, `manage` theme
-- **`osync install` asks for the local server** (Ollama or xOllama, host, port), with detected defaults and a connection test; installing from a renamed binary (e.g. `osync-macos-arm64 install`) works
-- **Color depth detection** - true color / 256 / 16 colors detected from the real terminal (it was read after osync had replaced `TERM` with `xterm-16color`, so every terminal was treated as 16-color); `colorMode` setting, `OSYNC_COLOR_MODE` and `NO_COLOR` override it; `osync -v --verbose` shows the result
-- **`manage` rewritten on Terminal.Gui 2** - true color with multi-color themes (one color per column, `●` for models loaded in memory, colored top and bottom bars) adapted to 256 and 16-color terminals with contrast checks; theme picker with live preview (Ctrl+T), the theme is saved in the preferences file; settings dialog (Ctrl+E) for the local server (Ollama/xOllama, host, port, connection test) and the color mode; column headers; F1 help; rename on F2 (Ctrl+M is Enter in most terminals); load runs in the background; console operations (copy, run, update, pull) return to the list without restarting osync; pull validation no longer rejects `hf.co/...` models; confirmations default to the safe answer (Enter cancels a delete)
-- **`osync setup`** - one command for the preferences: `server` (Ollama, xOllama or both), `alias` (server aliases), `manage` (theme, default sort order), `shell` (colors, theme, tab completion), `show`; interactive or with arguments for scripts
-- **Server aliases** - `osync setup alias add gpu 192.168.1.10`, then `-d gpu`, `osync cp model gpu/`, `osync cp gpu/model copy`, `osync manage gpu`
-- **`manage` switches servers with Ctrl+Left / Ctrl+Right** - the local server, the other one of Ollama/xOllama side by side, and the aliases chosen with `osync setup manage servers` (`osync setup server` offers them); the top bar shows which one (`[2/3] gpu: Ollama @ ...`)
-- **The settings can win over `XOLLAMA_HOST` / `OLLAMA_HOST`** - `osync setup server` asks when one is set, `osync setup server env ignore|use`, and a check box in the manage settings (Ctrl+E)
-- **Fixed the theme list of `manage` not scrolling** when the terminal is shorter than the list
-- **Ollama and xOllama side by side** - server type "Both": one is the default local server, each gets an alias (`ollama`, `xollama`)
-- **`osync install` asks for the server only when needed** - a single server found on this machine is used without questions; it asks when none or both are found
-- **Colored command output again** - `ls`, `ps`, `show`, `-v`, copy/pull/update progress, errors, warnings and results use the shell theme (removed in 1.0.1 because of garbled output on Linux); plain when redirected, with `NO_COLOR` or the `plain` theme
-- **34 themes** for `manage` and the shell, 7 of them for light terminals, all checked for readable contrast at true color, 256 and 16 colors
 - **Fixed copy to a remote server failing when the local models directory is not readable** (e.g. the server runs as the `ollama` service user): the upload now goes through the local server with the push relay
-- **Build timestamp embedded at compile time** - `osync -v` shows the real build time (UTC) for every binary, including renamed ones (`osync-macos-arm64`) and downloaded copies, instead of the file's modification time
-- **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS
+- **Fixed the theme list of `manage` not scrolling** when the terminal is shorter than the list
 - **Fixed bandwidth throttling (`-bt`)** not limiting short bursts, counting requested instead of read bytes, and misbehaving after ~25 days of uptime
+- **No stray ANSI reset (`ESC[0m`) in redirected output** on Linux/macOS
+
+**Platform**
 - **.NET 10** - Retargeted from .NET 8 (Windows-only target framework) to cross-platform `net10.0`; builds and tests on Windows, Linux and macOS
 - **macOS binaries** - Releases now include `osync-macos-arm64` and `osync-macos-x64`
 - **New test suite and CI** - Atomic Reqnroll integration scenarios run against real Ollama and xOllama servers (local + two remotes) on every push; `dev` builds publish pre-releases, `master` publishes releases
