@@ -53,6 +53,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `ShellOutput.cs` - `Out`: colored command output (errors, warnings, results, tables) in the shell theme
 - `SetupCommand.cs` - `osync setup` (server, alias, manage, shell); `ServerSetup.cs` - server questions of install/setup
 - `ServerAliases.cs` - server aliases from the settings file (`gpu` → `http://…:11434`)
+- `XOllamaTweak.cs` - xOllama model settings: reads the `xollama` field of `/api/show`, runs `xollama tweak model` (manage Ctrl+W)
 - `ColorSupport.cs` - terminal color depth detection; `OsyncSettings.cs` - preferences file
 - `QcCommand.cs` - Quantization comparison implementation
 - `QcViewCommand.cs` - QC results viewer with PDF/HTML/Markdown output generation
@@ -156,6 +157,7 @@ Always use `OllamaServer` (OllamaServer.cs) — never hardcode `localhost:11434`
 - `OllamaServer.CliName` + `OllamaServer.ApplyCliEnvironment(startInfo)` for CLI shell-outs (`ollama` or `xollama`, `OSYNC_OLLAMA_CLI` override)
 - `OllamaServer.ModelsDirFromEnvironment()`: `XOLLAMA_MODELS`, then `OLLAMA_MODELS`
 - xOllama-only API features (`/api/tokenize`, numeric/extended `think` budgets) must be gated on `GetFlavor(url) == ServerFlavor.XOllama`
+- xOllama's model settings (the `xollama.json` layer) are edited only through the `xollama tweak` CLI (`OllamaServer.XOllamaCli`, pointed at any server with `ApplyCliEnvironment(startInfo, url)`): its field table, questions and consistency rules live in xOllama (`cmd/tweak`), never copy them into osync
 
 ### Colored shell output
 

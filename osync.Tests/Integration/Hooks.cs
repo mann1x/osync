@@ -17,6 +17,7 @@ namespace osync.Tests.Integration;
 ///   @defaultport the local server listens on localhost:11434 (Ollama) or localhost:22434 (xOllama)
 ///   @exclusive OSYNC_TEST_EXCLUSIVE=1 (servers are dedicated to tests; e.g. "unload all")
 ///   @knownbug  documents a confirmed osync bug; excluded from the required CI job until fixed
+///   @xollama   the local server is xOllama and the xollama CLI is on PATH (xOllama-only features: tweak)
 ///   @xollamabug  documents a bug of the xOllama server itself (not osync); skipped when the local server is xOllama
 /// Scenarios without any of these tags need nothing but the osync binary.
 /// </summary>
@@ -92,6 +93,9 @@ public sealed class Hooks
         if (tags.Contains("xollamabug") && TestEnvironment.IsReachable(TestEnvironment.LocalUrl) &&
             TestEnvironment.IsXOllama(TestEnvironment.LocalUrl))
             missing.Add("a local server without the documented xOllama issue (see the scenario comment)");
+        if (tags.Contains("xollama") && !(TestEnvironment.IsReachable(TestEnvironment.LocalUrl) &&
+                                          TestEnvironment.IsXOllama(TestEnvironment.LocalUrl) && TestEnvironment.XOllamaCliAvailable))
+            missing.Add("a local xOllama server and the xollama CLI on PATH");
         if (tags.Contains("exclusive") && !TestEnvironment.ExclusiveServers) missing.Add("OSYNC_TEST_EXCLUSIVE=1");
         if (needsModel && TestModelAsset.Instance == null) missing.Add(TestModelAsset.UnavailableReason ?? "test model");
 
