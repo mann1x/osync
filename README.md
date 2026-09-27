@@ -235,10 +235,10 @@ Ollama has no API to download a model, but a server can push a model to a regist
 This copies **any** model the source has, including models you created or imported, works between Ollama and xOllama in both directions, and needs no internet access.
 
 Requirements and options:
-- The source server must be able to connect to the machine running osync (and the destination should too, to install the manifest; otherwise osync recreates the model from its files). The relay listens on port 80 when it can bind it, else on a random port; open your firewall accordingly.
+- The source server must be able to connect to the machine running osync (and the destination should too, to install the manifest; otherwise osync recreates the model from its files). The relay listens on a free port chosen by the OS (above 1024), or on `OSYNC_RELAY_PORT`; open your firewall accordingly. A Windows destination cannot store a model named after the relay's `host:port`, so the model is recreated there from its manifest (byte for byte); a Windows source needs the relay on port 80, which osync then uses for that copy if it is free.
 - `OSYNC_RELAY_HOST` - address the servers should use to reach osync (default: the local address that routes to the source server), e.g. behind NAT
 - `OSYNC_RELAY_PORT` - fixed relay port (e.g. one opened in the firewall)
-- `OSYNC_RELAY_INSTALL=create` - skip installing the manifest from the relay and recreate the model with `/api/create` (for destinations that cannot connect to osync, or Windows destination servers when the relay cannot use port 80)
+- `OSYNC_RELAY_INSTALL=create` - skip installing the manifest from the relay and recreate the model with `/api/create` (for destinations that cannot connect to osync)
 - If the source server cannot reach the relay, osync falls back to downloading the blobs from registry.ollama.ai, which only works for models pulled from the Ollama registry.
 
 #### List (`ls`)
@@ -1490,6 +1490,7 @@ v1.4.1
 **Fixes**
 - **Copies between servers are byte-for-byte again when the destination cannot pull from the relay** (for example a Windows destination: the relay's `host:port` is not a valid folder name there). The model used to be recreated from `/api/show`, which dropped the renderer, parser, `requires` and xOllama's model settings (a council became a plain model), merged several licenses and changed the parameters, yet osync reported success. It is now recreated from the source's manifest with the config and settings layers verbatim, so every layer and the config have the source's digests
 - **Uploads of a local model to a remote server** keep every part of the model the same way (they parsed `ollama show --modelfile` and lost the same parts)
+- **The relay no longer tries port 80 first**: it listens on a free port the OS assigns (port 80 is often taken, and needs root on Linux/macOS). Port 80 is used only for a Windows source server, which needs a relay name without a port, and only if it is free
 - **Every copy between servers is verified**: osync compares the copy's modelfile with the source's and fails, instead of printing "Successfully copied", when a part differs; the final line says how the model was installed (`through the relay`, `recreated from its manifest`)
 
 v1.4.0

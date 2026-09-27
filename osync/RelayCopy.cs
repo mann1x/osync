@@ -18,8 +18,10 @@ namespace osync
     ///   5. both: compare /api/show, so a copy that lost a part is reported as a failure
     /// Works for any model the source has (registry, created, imported), keeps its manifest byte-for-byte
     /// (all layers: template, params, license, messages, projector, draft, ...) and needs no internet access.
-    /// When the destination cannot pull the manifest (it cannot reach this machine, or it runs on Windows and the
-    /// relay is not on port 80), the model is recreated from the manifest with /api/create (see ModelRecreate).
+    /// The relay listens on a free port the OS picks, so its name is "host:port". A Windows server cannot store a model
+    /// under that name (':' is not allowed in folder names): a Windows destination gets the model recreated from the
+    /// manifest with /api/create (see ModelRecreate), and for a Windows source the relay moves to port 80 if it is free.
+    /// When the destination cannot reach this machine, the model is also recreated.
     /// </summary>
     internal static class RelayCopy
     {
@@ -42,28 +44,55 @@ namespace osync
                 return "on the same server";
             }
 
-            RegistryRelay startedRelay;
+            var relay = StartRelay(sourceServer, destServer, bandwidthLimit, bufferSize, port: null);
             try
             {
-                startedRelay = RegistryRelay.Start(sourceServer, destServer, bandwidthLimit, bufferSize);
-            }
-            catch (Exception ex)
-            {
-                throw new RelayUnreachableException(ex.Message);
-            }
-            await using var relay = startedRelay;
-            var tempName = relay.ModelName();
-            Console.WriteLine($"Relay listening at {relay.Authority} (source pushes, destination receives)");
+                var tempName = relay.ModelName();
+                try
+                {
+                    await PostAsync(sourceServer, "/api/copy", new { source = sourceModel, destination = tempName });
+                }
+                catch (InvalidOperationException ex) when (IsWindowsManifestPathError(ex.Message, relay.Authority))
+                {
+                    // A Windows source cannot store a model named after the relay's host:port. Only a relay on the
+                    // default HTTP port has a name without a port: use port 80 for this copy, if nothing holds it.
+                    Console.WriteLine("The source cannot store a model named after the relay (Windows does not allow ':' in folder names); retrying on port 80.");
+                    await relay.DisposeAsync();
+                    relay = StartRelay(sourceServer, destServer, bandwidthLimit, bufferSize, port: 80,
+                        "the source runs on Windows and needs the relay on port 80, which is in use on this machine");
+                    tempName = relay.ModelName();
+                    await PostAsync(sourceServer, "/api/copy", new { source = sourceModel, destination = tempName });
+                }
 
-            await PostAsync(sourceServer, "/api/copy", new { source = sourceModel, destination = tempName });
-            try
-            {
-                return await PushAndInstallAsync(sourceServer, tempName, sourceShow, destServer, destModel, relay);
+                try
+                {
+                    return await PushAndInstallAsync(sourceServer, tempName, sourceShow, destServer, destModel, relay);
+                }
+                finally
+                {
+                    await TryDeleteAsync(sourceServer, tempName);
+                }
             }
             finally
             {
-                await TryDeleteAsync(sourceServer, tempName);
+                await relay.DisposeAsync();
             }
+        }
+
+        private static RegistryRelay StartRelay(string sourceServer, string destServer, long bandwidthLimit, long bufferSize,
+            int? port, string? failure = null)
+        {
+            RegistryRelay relay;
+            try
+            {
+                relay = RegistryRelay.Start(sourceServer, destServer, bandwidthLimit, bufferSize, port);
+            }
+            catch (Exception ex)
+            {
+                throw new RelayUnreachableException(failure != null ? $"{failure} ({ex.Message})" : ex.Message);
+            }
+            Console.WriteLine($"Relay listening at {relay.Authority} (source pushes, destination receives)");
+            return relay;
         }
 
         private static async Task<string> PushAndInstallAsync(string sourceServer, string tempName, JsonDocument sourceShow,
@@ -134,8 +163,8 @@ namespace osync
         }
 
         /// <summary>
-        /// /api/pull failing because the manifest path would contain the relay's "host:port": ':' is not allowed in a
-        /// Windows folder name, so a Windows destination cannot pull from a relay that is not on port 80.
+        /// /api/pull or /api/copy failing because the manifest path would contain the relay's "host:port": ':' is not
+        /// allowed in a Windows folder name, so a Windows server cannot store a model named after a relay not on port 80.
         /// </summary>
         internal static bool IsWindowsManifestPathError(string message, string relayAuthority) =>
             relayAuthority.Contains(':') &&

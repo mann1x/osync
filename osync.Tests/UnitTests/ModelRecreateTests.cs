@@ -197,6 +197,7 @@ public class ModelRecreateTests
 
     [Theory]
     [InlineData("/api/pull on http://192.168.178.161:22434 failed: 500 mkdir C:\\Users\\me\\.ollama\\models\\manifests\\192.168.178.2:32025: The directory name is invalid.", "192.168.178.2:32025", true)]
+    [InlineData("/api/copy on http://win:11434 failed: 500 mkdir C:\\Users\\me\\.ollama\\models\\manifests\\10.0.0.2:41234: The directory name is invalid.", "10.0.0.2:41234", true)]
     [InlineData("/api/pull on http://gpu:11434 failed: 500 dial tcp 192.168.178.2:32025: connect: connection refused", "192.168.178.2:32025", false)]
     [InlineData("/api/pull failed: 500 mkdir /models/manifests/192.168.178.2: permission denied", "192.168.178.2", false)]
     public void IsWindowsManifestPathError_RecognisesTheColonInTheManifestPath(string message, string authority, bool expected)
