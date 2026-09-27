@@ -62,6 +62,12 @@ namespace osync
             /// server of every command), the other is reached through its alias ("ollama" / "xollama").
             /// </summary>
             public bool? Both { get; set; }
+
+            /// <summary>
+            /// true: this server is used even when XOLLAMA_HOST / OLLAMA_HOST is set (they still reach the
+            /// ollama/xollama CLI osync starts, pointed at this server). Default: the environment takes precedence.
+            /// </summary>
+            public bool? IgnoreEnvironment { get; set; }
         }
 
         public sealed class ManageSettings
@@ -71,6 +77,12 @@ namespace osync
 
             /// <summary>Initial sort order: name+, name-, size+, size-, created+, created- (default name+).</summary>
             public string? Sort { get; set; }
+
+            /// <summary>
+            /// Aliases of the servers manage switches between with Ctrl+Left / Ctrl+Right, after the local server
+            /// (with Ollama and xOllama side by side, the other one is always included).
+            /// </summary>
+            public List<string>? Servers { get; set; }
         }
 
         public sealed class ShellSettings

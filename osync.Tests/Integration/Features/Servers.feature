@@ -34,3 +34,23 @@ Feature: Server discovery (Ollama and xOllama)
     Then the command succeeds
     And the output names the server flavor of remote1
     And the output contains "{configured}:latest"
+
+  # OLLAMA_HOST / XOLLAMA_HOST (set to the local server by the test runner) win over the settings file by
+  # default; with "ignoreEnvironment" the server of the settings file is used anyway.
+  @local @remote1
+  Scenario: The host variables take precedence over the settings file by default
+    Given the settings file configures the remote1 server
+    When I run osync "ps"
+    Then the command succeeds
+    And the output contains "at {local}"
+
+  @local @remote1
+  Scenario: The settings file takes precedence when it ignores the host variables
+    Given a test model "configured" on remote1
+    And the model "{configured}" is loaded on remote1
+    And the settings file configures the remote1 server
+    And the settings file ignores the environment
+    When I run osync "ps"
+    Then the command succeeds
+    And the output contains "at {remote1}"
+    And the output contains "{configured}:latest"

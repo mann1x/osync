@@ -47,9 +47,9 @@ namespace osync
                 : OsyncProgram.NormalizeServerUrl(destination);
 
         /// <summary>
-        /// Local server URL: XOLLAMA_HOST, then OLLAMA_HOST, then the server in the settings file (see
-        /// <see cref="OsyncSettings"/>), then whichever of localhost:11434 (Ollama) or localhost:22434 (xOllama)
-        /// answers, defaulting to localhost:11434.
+        /// Local server URL (see <see cref="ResolveLocalUrl"/>): XOLLAMA_HOST, then OLLAMA_HOST, then the server in
+        /// the settings file (first when the settings ignore the environment), then whichever of localhost:11434
+        /// (Ollama) or localhost:22434 (xOllama) answers, defaulting to localhost:11434.
         /// </summary>
         public static string LocalUrl
         {
@@ -62,26 +62,51 @@ namespace osync
             }
         }
 
-        private static string DetermineLocalUrl()
+        private static string DetermineLocalUrl() =>
+            ResolveLocalUrl(Environment.GetEnvironmentVariable, OsyncSettings.Current, Responds);
+
+        /// <summary>
+        /// Local server resolution (pure, unit-tested): the server in the settings file when it is configured and
+        /// ignoreEnvironment is set; otherwise XOLLAMA_HOST, OLLAMA_HOST, the settings file, then whichever of
+        /// localhost:11434 / localhost:22434 answers (default localhost:11434).
+        /// </summary>
+        internal static string ResolveLocalUrl(Func<string, string?> env, OsyncSettings settings, Func<string, bool> responds)
         {
-            var xollamaHost = Environment.GetEnvironmentVariable("XOLLAMA_HOST");
+            var configured = settings.ConfiguredServerUrl;
+            if (configured != null && settings.Server.IgnoreEnvironment == true)
+                return configured;
+
+            var xollamaHost = env("XOLLAMA_HOST");
             if (!string.IsNullOrWhiteSpace(xollamaHost))
                 return ToClientUrl(xollamaHost, XOllamaDefaultPort);
 
-            var ollamaHost = Environment.GetEnvironmentVariable("OLLAMA_HOST");
+            var ollamaHost = env("OLLAMA_HOST");
             if (!string.IsNullOrWhiteSpace(ollamaHost))
                 return ToClientUrl(ollamaHost, OllamaDefaultPort);
 
-            var configured = OsyncSettings.Current.ConfiguredServerUrl;
             if (configured != null)
                 return configured;
 
             var ollamaUrl = $"http://localhost:{OllamaDefaultPort}";
-            if (Responds(ollamaUrl)) return ollamaUrl;
+            if (responds(ollamaUrl)) return ollamaUrl;
             var xollamaUrl = $"http://localhost:{XOllamaDefaultPort}";
-            if (Responds(xollamaUrl)) return xollamaUrl;
+            if (responds(xollamaUrl)) return xollamaUrl;
             return ollamaUrl;
         }
+
+        /// <summary>
+        /// The environment variable that decides the local server instead of the settings file, or null
+        /// (none is set, or the settings say to ignore the environment).
+        /// </summary>
+        public static string? OverridingEnvironmentVariable(Func<string, string?> env, OsyncSettings settings)
+        {
+            if (settings.ConfiguredServerUrl != null && settings.Server.IgnoreEnvironment == true) return null;
+            return EnvironmentServerVariable(env);
+        }
+
+        /// <summary>XOLLAMA_HOST or OLLAMA_HOST when set (in that order), else null.</summary>
+        public static string? EnvironmentServerVariable(Func<string, string?> env) =>
+            new[] { "XOLLAMA_HOST", "OLLAMA_HOST" }.FirstOrDefault(v => !string.IsNullOrWhiteSpace(env(v)));
 
         /// <summary>
         /// Turns a host setting (bind address or URL) into a URL a client can connect to:

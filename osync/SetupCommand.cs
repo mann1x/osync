@@ -92,9 +92,11 @@ namespace osync
 
             _output.WriteLine($"{Out.Heading("osync settings")} {Out.Muted(OsyncSettings.FilePath + (File.Exists(OsyncSettings.FilePath) ? "" : " (not created yet)"))}");
             Row("Local server", ServerSetup.Describe(s));
-            var overriding = new[] { "XOLLAMA_HOST", "OLLAMA_HOST" }.FirstOrDefault(v => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(v)));
-            if (overriding != null)
-                Row("", Out.Paint($"{overriding}={Environment.GetEnvironmentVariable(overriding)} takes precedence", p => p.Warning));
+            var variable = OllamaServer.EnvironmentServerVariable(Environment.GetEnvironmentVariable);
+            if (variable != null)
+                Row("", OllamaServer.OverridingEnvironmentVariable(Environment.GetEnvironmentVariable, s) != null
+                    ? Out.Paint($"{variable}={Environment.GetEnvironmentVariable(variable)} takes precedence", p => p.Warning) + Out.Muted(" (osync setup server env ignore)")
+                    : Out.Muted($"{variable}={Environment.GetEnvironmentVariable(variable)} is ignored (osync setup server env use)"));
             if (s.Aliases.Count == 0)
                 Row("Aliases", Out.Muted("none (osync setup alias add NAME ADDRESS)"));
             else
@@ -104,6 +106,8 @@ namespace osync
             Row("Colors", $"{s.ColorMode} (now {ColorSupport.DisplayName(ColorSupport.Current)}, {ColorSupport.Reason})");
             Row("Shell theme", string.IsNullOrWhiteSpace(s.Shell.Theme) ? $"default ({Themes.DefaultForShell(Environment.GetEnvironmentVariable).Name})" : s.Shell.Theme!);
             Row("Manage", $"theme {Themes.Find(s.Manage.Theme).Name}, sort {ManageSortOrders.Name(ManageSortOrders.Parse(s.Manage.Sort) ?? SortOrder.AlphabeticalAsc)}");
+            var managed = ManageServers.Targets(s, localUrl: null).Skip(1).Select(t => t.Name).ToList();
+            Row("", "servers: local" + (managed.Count > 0 ? ", " + string.Join(", ", managed) : "") + Out.Muted(" (Ctrl+Left/Right in manage)"));
             _output.WriteLine();
         }
 
@@ -142,12 +146,41 @@ namespace osync
             switch (Lower(type))
             {
                 case "":
+                {
                     if (!ServerSetup.Configure(s, _input, _output, _probe))
                     {
                         _output.WriteLine("No changes.");
                         return 0;
                     }
-                    return Save($"Local server: {ServerSetup.Describe(s)}");
+                    var code = Save($"Local server: {ServerSetup.Describe(s)}");
+                    if (code != 0 || s.Aliases.Count == 0) return code;
+                    var servers = ChooseManageServers();
+                    if (servers == null) return 0;
+                    s.Manage.Servers = servers;
+                    return Save($"Manage servers: {DescribeManageServers(s)}");
+                }
+
+                case "env":
+                case "environment":
+                {
+                    var variable = OllamaServer.EnvironmentServerVariable(Environment.GetEnvironmentVariable) ?? "XOLLAMA_HOST / OLLAMA_HOST";
+                    switch (Lower(address))
+                    {
+                        case "ignore":
+                        case "settings":
+                            if (s.ConfiguredServerUrl == null)
+                                return Fail("configure a server first (osync setup server), the environment decides until then");
+                            s.Server.IgnoreEnvironment = true;
+                            return Save($"The settings take precedence over {variable}");
+                        case "use":
+                        case "prefer":
+                        case "environment":
+                            s.Server.IgnoreEnvironment = null;
+                            return Save($"{variable} takes precedence over the settings");
+                        default:
+                            return Fail("usage: osync setup server env ignore|use");
+                    }
+                }
 
                 case "auto":
                     s.Server.Flavor = "auto";
@@ -303,6 +336,7 @@ namespace osync
                     var existing = s.Aliases.Keys.FirstOrDefault(k => string.Equals(k, name.Trim(), StringComparison.OrdinalIgnoreCase));
                     if (existing == null) return Fail($"no alias named '{name}'");
                     s.Aliases.Remove(existing);
+                    s.Manage.Servers?.RemoveAll(n => string.Equals(n, existing, StringComparison.OrdinalIgnoreCase));
                     return Save($"Removed alias {existing}");
 
                 default:
@@ -382,7 +416,30 @@ namespace osync
                     if (sort == null) return 0;
                     s.Manage.Theme = theme.Name;
                     s.Manage.Sort = ManageSortOrders.Name(sort.Value);
-                    return Save($"Manage: theme {theme.Name}, sort {s.Manage.Sort}");
+                    if (s.Aliases.Count > 0)
+                    {
+                        var servers = ChooseManageServers();
+                        if (servers == null) return 0;
+                        s.Manage.Servers = servers;
+                    }
+                    return Save($"Manage: theme {theme.Name}, sort {s.Manage.Sort}, servers {DescribeManageServers(s)}");
+                }
+
+                case "servers":
+                case "server":
+                {
+                    List<string>? servers;
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        servers = ChooseManageServers();
+                        if (servers == null) return 0;
+                    }
+                    else if (!TryParseManageServers(value, out servers, out var error))
+                    {
+                        return Fail(error!);
+                    }
+                    s.Manage.Servers = servers;
+                    return Save($"Manage servers: {DescribeManageServers(s)}");
                 }
 
                 case "themes":
@@ -418,8 +475,63 @@ namespace osync
                 }
 
                 default:
-                    return Fail($"unknown manage setting '{item}' (theme, sort, themes)");
+                    return Fail($"unknown manage setting '{item}' (theme, sort, servers, themes)");
             }
+        }
+
+        private static string DescribeManageServers(OsyncSettings s) =>
+            string.Join(", ", ManageServers.Targets(s, localUrl: null).Select(t => t.Name));
+
+        /// <summary>"gpu,nas", "gpu nas", "all" or "none" → alias names (existing aliases only).</summary>
+        private bool TryParseManageServers(string text, out List<string>? servers, out string? error)
+        {
+            servers = null;
+            error = null;
+            var aliases = Settings.Aliases;
+            var value = Lower(text);
+            if (value == "none") { servers = new List<string>(); return true; }
+            if (value == "all") { servers = aliases.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList(); return true; }
+
+            var result = new List<string>();
+            var names = aliases.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (var part in text.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string? name = int.TryParse(part, out var number) && number >= 1 && number <= names.Count
+                    ? names[number - 1]
+                    : names.FirstOrDefault(n => string.Equals(n, part, StringComparison.OrdinalIgnoreCase));
+                if (name == null)
+                {
+                    error = $"no alias named '{part}' (osync setup alias lists them)";
+                    return false;
+                }
+                if (!result.Contains(name, StringComparer.OrdinalIgnoreCase)) result.Add(name);
+            }
+            servers = result;
+            return true;
+        }
+
+        /// <summary>Asks which aliases manage switches between; null at the end of input.</summary>
+        private List<string>? ChooseManageServers()
+        {
+            var s = Settings;
+            var names = s.Aliases.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            var current = ManageServers.Targets(s, localUrl: null).Skip(1).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _output.WriteLine(Out.Heading("Servers in manage") + Out.Muted(" (Ctrl+Left / Ctrl+Right switch between the local server and these)"));
+            for (int i = 0; i < names.Count; i++)
+            {
+                var marker = current.Contains(names[i]) ? Out.Paint("*", p => p.Success, bold: true) : " ";
+                _output.WriteLine($" {marker}{(i + 1),2}) {Out.Paint(names[i].PadRight(14), p => p.Text)}{Out.Server(s.Aliases[names[i]])}");
+            }
+            if (s.Server.Both == true)
+                _output.WriteLine(Out.Muted($"     (with Ollama and xOllama side by side, the other one is always included)"));
+
+            var currentText = current.Count == 0 ? "none" : string.Join(",", names.Where(current.Contains));
+            var answer = ServerSetup.Ask(_input, _output, $"Aliases for manage (numbers or names, all, none) [{currentText}]: ",
+                a => TryParseManageServers(a, out _, out _));
+            if (answer == null) return null;
+            if (answer.Length == 0) return names.Where(current.Contains).ToList();
+            TryParseManageServers(answer, out var servers, out _);
+            return servers;
         }
 
         private SortOrder? ChooseSort()

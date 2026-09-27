@@ -193,11 +193,21 @@ public sealed record OsyncResult(string Arguments, int ExitCode, string Output, 
 
 /// <summary>
 /// Keys for <see cref="OsyncCli.RunInTerminalAsync"/>, written as space-separated names: Ctrl+A..Ctrl+Z, Tab,
-/// Shift+Tab, Enter, Esc, Space, Backspace, Up, Down, Left, Right, Home, End, F1, F2, or text:abc for typed text.
+/// Shift+Tab, Enter, Esc, Space, Backspace, Up, Down, Left, Right, Ctrl+Left, Ctrl+Right, Home, End, F1, F2, or
+/// text:abc for typed text; KEY*N repeats a key N times.
 /// </summary>
 public static class TerminalKeys
 {
-    public static List<string> Parse(string spec) => spec.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(Key).ToList();
+    /// <summary>Space-separated keys; "Down*5" repeats a key.</summary>
+    public static List<string> Parse(string spec) => spec.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+        .SelectMany(token =>
+        {
+            var star = token.LastIndexOf('*');
+            return star > 0 && int.TryParse(token[(star + 1)..], out var count)
+                ? Enumerable.Repeat(Key(token[..star]), count)
+                : new[] { Key(token) };
+        })
+        .ToList();
 
     private static string Key(string name)
     {
@@ -220,6 +230,8 @@ public static class TerminalKeys
             "End" => "\x1b[F",
             "F1" => "\x1bOP",
             "F2" => "\x1bOQ",
+            "Ctrl+Right" => "\x1b[1;5C",
+            "Ctrl+Left" => "\x1b[1;5D",
             _ => throw new ArgumentException($"Unknown key '{name}'")
         };
     }

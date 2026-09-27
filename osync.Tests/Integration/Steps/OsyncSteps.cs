@@ -81,7 +81,8 @@ public sealed class OsyncSteps
         {
             element.TryGetProperty(name, out element).Should().BeTrue($"settings.json should contain {path}");
         }
-        var actual = element.ValueKind == System.Text.Json.JsonValueKind.String ? element.GetString() : element.GetRawText();
+        // Strings as text, anything else as compact JSON (true, 11434, ["a","b"])
+        var actual = element.ValueKind == System.Text.Json.JsonValueKind.String ? element.GetString() : System.Text.Json.JsonSerializer.Serialize(element);
         actual.Should().Be(_state.Resolve(expected));
     }
 
@@ -101,22 +102,42 @@ public sealed class OsyncSteps
         throw new Xunit.Sdk.XunitException($"settings.json should not contain {path}, but it is {element}");
     }
 
-    /// <summary>Adds a server alias to settings.json (keeping what is already there) for one of the test servers.</summary>
-    [Given("the alias {string} for the {word} server")]
-    public void GivenTheAliasForTheServer(string alias, string server)
+    /// <summary>Changes settings.json (keeping what is already there).</summary>
+    private void MergeSettings(Action<System.Text.Json.Nodes.JsonObject> change)
     {
         var file = Path.Combine(_state.ConfigDir, "settings.json");
         var root = File.Exists(file)
             ? System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(file))!.AsObject()
             : new System.Text.Json.Nodes.JsonObject();
-        if (root["aliases"] is not System.Text.Json.Nodes.JsonObject aliases)
-        {
-            aliases = new System.Text.Json.Nodes.JsonObject();
-            root["aliases"] = aliases;
-        }
-        aliases[_state.Resolve(alias)] = TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured");
+        change(root);
         File.WriteAllText(file, root.ToJsonString());
     }
+
+    private static System.Text.Json.Nodes.JsonObject Section(System.Text.Json.Nodes.JsonObject root, string name)
+    {
+        if (root[name] is not System.Text.Json.Nodes.JsonObject section)
+        {
+            section = new System.Text.Json.Nodes.JsonObject();
+            root[name] = section;
+        }
+        return section;
+    }
+
+    /// <summary>Adds a server alias to settings.json for one of the test servers.</summary>
+    [Given("the alias {string} for the {word} server")]
+    public void GivenTheAliasForTheServer(string alias, string server) =>
+        MergeSettings(root => Section(root, "aliases")[_state.Resolve(alias)] =
+            TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured"));
+
+    [Given("manage shows the servers {string}")]
+    public void GivenManageShowsTheServers(string names) =>
+        MergeSettings(root => Section(root, "manage")["servers"] = new System.Text.Json.Nodes.JsonArray(
+            names.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                 .Select(n => (System.Text.Json.Nodes.JsonNode?)System.Text.Json.Nodes.JsonValue.Create(n)).ToArray()));
+
+    [Given("the settings file ignores the environment")]
+    public void GivenTheSettingsFileIgnoresTheEnvironment() =>
+        MergeSettings(root => Section(root, "server")["ignoreEnvironment"] = true);
 
     [Then("the settings file does not exist")]
     public void ThenTheSettingsFileDoesNotExist() =>

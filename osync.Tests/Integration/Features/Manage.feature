@@ -73,3 +73,33 @@ Feature: Manage (full-screen TUI)
     And the settings file has "server.host" set to "{remote1.host}"
     And the settings file has "server.port" set to "{remote1.port}"
     And the output contains "{beta}:latest"
+
+  # The theme list is taller than the 30-row terminal: End must scroll it to the last theme
+  @local
+  Scenario: The theme list scrolls to themes below the visible rows
+    Given a test model "alpha" on local
+    When I open manage in a terminal and press "Ctrl+T End Enter Ctrl+Q"
+    Then the command succeeds
+    And the settings file has "manage.theme" set to "Rose Pine Dawn"
+    And the output contains "Rose Pine Dawn"
+
+  @local @remote1
+  Scenario: Ctrl+Right switches to the next server
+    Given a test model "alpha" on local
+    And a test model "beta" on remote1
+    And the alias "r1" for the remote1 server
+    And manage shows the servers "r1"
+    When I open manage in a terminal and press "Ctrl+Right text:{prefix} Ctrl+Q"
+    Then the command succeeds
+    And the output contains "{beta}:latest"
+    And the output contains "[2/2] r1:"
+
+  @local @remote1
+  Scenario: Ctrl+Left comes back to the local server
+    Given a test model "alpha" on local
+    And a test model "beta" on remote1
+    And the alias "r1" for the remote1 server
+    And manage shows the servers "r1"
+    When I open manage in a terminal and press "Ctrl+Right Ctrl+Left text:{prefix} Ctrl+Q"
+    Then the command succeeds
+    And the output contains "[1/2] local:"
