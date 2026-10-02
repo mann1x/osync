@@ -124,11 +124,21 @@ Feature: Manage (full-screen TUI)
     And the output contains "xOllama settings (Ctrl+W to change)"
     And the output contains "kv.k  f16"
 
+  # A server on this machine also offers its own settings (defaults for every model, GPUs, environment
+  # variables): xOllama changes them only for a client on its own machine.
+  @local @xollama
+  Scenario: Ctrl+W offers the settings of a server on this machine
+    Given a test model "alpha" on local
+    When I open manage in a terminal and press "text:{prefix} Ctrl+W Esc Ctrl+Q"
+    Then the command succeeds
+    And the output contains "Server: GPUs"
+    And the output contains "Engine policies"
+
   # The last option removes the settings; the confirmation keeps Cancel last (Enter), Tab moves to Remove.
   @local @xollama
   Scenario: Ctrl+W removes the xOllama settings of the model after confirming
     Given a test model "alpha" on local
     And the model "alpha" on local has the xOllama settings '{"kv":{"v":"q8_0"}}'
-    When I open manage in a terminal and press "text:{prefix} Ctrl+W Down*8 Enter Tab Enter wait:view... Space wait:Sorting Ctrl+Q"
+    When I open manage in a terminal and press "text:{prefix} Ctrl+W Down*11 Enter Tab Enter wait:view... Space wait:Sorting Ctrl+Q"
     Then the command succeeds
     And the model "{alpha}" on local has no xOllama settings
