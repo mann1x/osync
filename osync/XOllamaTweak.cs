@@ -54,19 +54,66 @@ namespace osync
             new("Server: what is set, and where it comes from (tweak show server)", "show server", PerModel: false)
         };
 
-        /// <summary>Arguments of `xollama tweak` for <paramref name="scope"/>: the command, the model, the scope's flags, then the typed ones.</summary>
-        public static string Arguments(Scope scope, string? model, string? extraFlags)
+        /// <summary>
+        /// Arguments of `xollama tweak` for <paramref name="scope"/>: the command, the model, the scope's flags, then
+        /// the typed ones, one element per argument (a quoted value stays one argument, see <see cref="SplitFlags"/>).
+        /// </summary>
+        public static List<string> Arguments(Scope scope, string? model, string? extraFlags)
         {
-            var parts = new List<string> { "tweak", scope.Command };
+            var parts = new List<string> { "tweak" };
+            parts.AddRange(scope.Command.Split(' ', StringSplitOptions.RemoveEmptyEntries));
             if (scope.PerModel && model != null) parts.Add(model);
-            if (!string.IsNullOrWhiteSpace(scope.Flags)) parts.Add(scope.Flags.Trim());
-            if (!string.IsNullOrWhiteSpace(extraFlags)) parts.Add(extraFlags.Trim());
-            return string.Join(" ", parts);
+            parts.AddRange(SplitFlags(scope.Flags) ?? new List<string>());
+            parts.AddRange(SplitFlags(extraFlags) ?? throw new FormatException("A quote in the flags is not closed."));
+            return parts;
         }
 
         /// <summary>Arguments of `xollama tweak model` for <paramref name="model"/>: the scope's flags, then the typed ones.</summary>
-        public static string Arguments(string model, string scopeFlags, string? extraFlags) =>
+        public static List<string> Arguments(string model, string scopeFlags, string? extraFlags) =>
             Arguments(new Scope("", "model", scopeFlags), model, extraFlags);
+
+        /// <summary>Whether <paramref name="scope"/> only shows settings, so it takes no flags that set one.</summary>
+        public static bool IsShowScope(Scope scope) => scope.Command.StartsWith("show", StringComparison.Ordinal);
+
+        /// <summary>
+        /// Splits typed flags into arguments the way a shell does: whitespace separates them, single or double
+        /// quotes keep spaces in one (<c>--council-instructions="be brief"</c>, <c>'@C:\my dir\file'</c>) and are
+        /// removed, a backslash is literal (Windows paths) except before a double quote inside double quotes.
+        /// Null when a quote is not closed.
+        /// </summary>
+        public static List<string>? SplitFlags(string? flags)
+        {
+            var args = new List<string>();
+            if (string.IsNullOrWhiteSpace(flags)) return args;
+            var current = new System.Text.StringBuilder();
+            var inArg = false;
+            char quote = '\0';
+            for (var i = 0; i < flags.Length; i++)
+            {
+                var c = flags[i];
+                if (quote != '\0')
+                {
+                    if (c == quote) quote = '\0';
+                    else if (c == '\\' && quote == '"' && i + 1 < flags.Length && flags[i + 1] == '"') current.Append(flags[++i]);
+                    else current.Append(c);
+                }
+                else if (char.IsWhiteSpace(c))
+                {
+                    if (inArg) args.Add(current.ToString());
+                    current.Clear();
+                    inArg = false;
+                }
+                else
+                {
+                    inArg = true;
+                    if (c is '"' or '\'') quote = c;
+                    else current.Append(c);
+                }
+            }
+            if (quote != '\0') return null;
+            if (inArg) args.Add(current.ToString());
+            return args;
+        }
 
         /// <summary>
         /// Whether <paramref name="url"/> reaches the server over loopback, the only way xOllama accepts changes to
@@ -84,19 +131,42 @@ namespace osync
         /// <summary>
         /// The server's defaults for every model's settings (POST /api/xollama/settings with no changes reads
         /// them), as "path value" rows; empty when it has none, null when the server does not answer (an older
-        /// xOllama, a remote client, an API key).
+        /// xOllama, a remote client, a wrong API key). Sends the API key the xollama CLI would (<see cref="ApiKey"/>).
         /// </summary>
         public static List<(string Path, string Value)>? FetchServerDefaults(string url)
         {
             try
             {
                 using var client = new HttpClient { BaseAddress = new Uri(url), Timeout = TimeSpan.FromSeconds(5) };
-                using var response = client.PostAsync("api/xollama/settings", null).GetAwaiter().GetResult();
+                using var request = new HttpRequestMessage(HttpMethod.Post, "api/xollama/settings");
+                if (ApiKey() is { } key)
+                    request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
+                using var response = client.SendAsync(request).GetAwaiter().GetResult();
                 if (!response.IsSuccessStatusCode) return null;
                 using var doc = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
                 return ServerDefaults(doc.RootElement);
             }
             catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The xOllama API key, in the xollama CLI's order: XOLLAMA_API_KEY, else the file `tweak server --api-key`
+        /// writes (~/.ollama/xollama-api-key, %USERPROFILE%\.ollama\xollama-api-key on Windows). Null when neither has one.
+        /// </summary>
+        public static string? ApiKey(string? environmentKey = null, string? keyFile = null)
+        {
+            environmentKey ??= Environment.GetEnvironmentVariable("XOLLAMA_API_KEY");
+            if (!string.IsNullOrWhiteSpace(environmentKey)) return environmentKey.Trim();
+            keyFile ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "xollama-api-key");
+            try
+            {
+                var key = File.Exists(keyFile) ? File.ReadAllText(keyFile).Trim() : "";
+                return key.Length > 0 ? key : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 return null;
             }
@@ -174,14 +244,15 @@ namespace osync
         /// Runs `xollama tweak` on the console against the server <paramref name="url"/> (local or remote),
         /// with the console's input and output, so its questions are answered as usual. Returns the exit code.
         /// </summary>
-        public static int Run(string cli, string url, string arguments)
+        public static int Run(string cli, string url, IEnumerable<string> arguments)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = cli,
-                Arguments = arguments,
                 UseShellExecute = false
             };
+            foreach (var argument in arguments)
+                startInfo.ArgumentList.Add(argument);
             OllamaServer.ApplyCliEnvironment(startInfo, url);
             using var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Could not start {cli}");
             process.WaitForExit();

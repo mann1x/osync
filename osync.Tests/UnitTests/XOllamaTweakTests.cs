@@ -56,7 +56,7 @@ public class XOllamaTweakTests
     [InlineData("", " --kv-k=q8_0 --kv-v=q8_0 ", "tweak model qwen3:8b --kv-k=q8_0 --kv-v=q8_0")]
     [InlineData("--dca", "--dca-chunk=32768", "tweak model qwen3:8b --dca --dca-chunk=32768")]
     public void Arguments_ScopeThenTypedFlags(string scope, string? extra, string expected) =>
-        XOllamaTweak.Arguments("qwen3:8b", scope, extra).Should().Be(expected);
+        string.Join(" ", XOllamaTweak.Arguments("qwen3:8b", scope, extra)).Should().Be(expected);
 
     [Fact]
     public void Scopes_EndWithClear()
@@ -70,7 +70,7 @@ public class XOllamaTweakTests
     {
         XOllamaTweak.Scopes.Select(s => s.Flags).Should().Contain(
             "--kv-residency --kv-rolling-window --fit --vram-target --mtp-policy");
-        XOllamaTweak.Arguments(XOllamaTweak.Scopes[8], "qwen3:8b", null)
+        string.Join(" ", XOllamaTweak.Arguments(XOllamaTweak.Scopes[8], "qwen3:8b", null))
             .Should().Be("tweak model qwen3:8b --kv-residency --kv-rolling-window --fit --vram-target --mtp-policy");
     }
 
@@ -78,7 +78,9 @@ public class XOllamaTweakTests
     public void ShowModelScope_RunsTweakShowModel()
     {
         var show = XOllamaTweak.Scopes.Single(s => s.Command == "show model");
-        XOllamaTweak.Arguments(show, "qwen3:8b", null).Should().Be("tweak show model qwen3:8b");
+        XOllamaTweak.Arguments(show, "qwen3:8b", null).Should().Equal("tweak", "show", "model", "qwen3:8b");
+        XOllamaTweak.IsShowScope(show).Should().BeTrue();
+        XOllamaTweak.IsShowScope(XOllamaTweak.Scopes[0]).Should().BeFalse();
     }
 
     [Theory]
@@ -91,7 +93,60 @@ public class XOllamaTweakTests
     {
         var scope = XOllamaTweak.ServerScopes[index];
         scope.PerModel.Should().BeFalse();
-        XOllamaTweak.Arguments(scope, "qwen3:8b", extra).Should().Be(expected);
+        string.Join(" ", XOllamaTweak.Arguments(scope, "qwen3:8b", extra)).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Arguments_QuotedValueStaysOneArgument()
+    {
+        XOllamaTweak.Arguments("qwen3:8b", "--council", "--council-instructions=\"be brief\" '@C:\\my dir\\charter.md' --kv-k=q8_0")
+            .Should().Equal("tweak", "model", "qwen3:8b", "--council",
+                "--council-instructions=be brief", @"@C:\my dir\charter.md", "--kv-k=q8_0");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public void SplitFlags_NothingTyped_GivesNoArguments(string? flags) =>
+        XOllamaTweak.SplitFlags(flags).Should().BeEmpty();
+
+    [Theory]
+    [InlineData(@"--council-charter=""say \""hi\""""", @"--council-charter=say ""hi""")]
+    [InlineData(@"--dca-chunk=32768", "--dca-chunk=32768")]
+    [InlineData(@"--council-instructions=""""", "--council-instructions=")]
+    public void SplitFlags_HandlesQuotes(string flags, string expected) =>
+        XOllamaTweak.SplitFlags(flags).Should().Equal(expected);
+
+    [Theory]
+    [InlineData("--council-instructions=\"be brief")]
+    [InlineData("'@C:\\dir")]
+    public void SplitFlags_UnclosedQuote_IsNull(string flags) =>
+        XOllamaTweak.SplitFlags(flags).Should().BeNull();
+
+    [Fact]
+    public void Flatten_SchemaV6Keys()
+    {
+        using var doc = JsonDocument.Parse("""{"version":6,"kv":{"rolling_window":"256"},"fit":{"enabled":false}}""");
+        XOllamaTweak.Flatten(doc.RootElement).Should().Equal(("kv.rolling_window", "256"), ("fit.enabled", "off"));
+    }
+
+    [Fact]
+    public void ApiKey_EnvironmentFirst_ThenTheKeyFile()
+    {
+        var file = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(file, "  file-key\n");
+            XOllamaTweak.ApiKey("env-key", file).Should().Be("env-key");
+            XOllamaTweak.ApiKey("", file).Should().Be("file-key");
+            File.WriteAllText(file, "");
+            XOllamaTweak.ApiKey("", file).Should().BeNull();
+            XOllamaTweak.ApiKey("", file + ".missing").Should().BeNull();
+        }
+        finally
+        {
+            File.Delete(file);
+        }
     }
 
     [Theory]
