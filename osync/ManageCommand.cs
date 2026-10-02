@@ -2184,9 +2184,20 @@ namespace osync
             dialog.Add(flagsField);
             dialog.Validate = () =>
             {
-                if (selector.Value == clearScope && !string.IsNullOrWhiteSpace(flagsField.Text))
+                if (string.IsNullOrWhiteSpace(flagsField.Text) || selector.Value is not int chosen) return true;
+                if (chosen == clearScope)
                 {
                     ShowError("Removing the settings cannot be combined with flags that set one.");
+                    return false;
+                }
+                if (XOllamaTweak.IsShowScope(scopes[chosen]))
+                {
+                    ShowError("Showing the settings takes no flags: leave the field empty.");
+                    return false;
+                }
+                if (XOllamaTweak.SplitFlags(flagsField.Text) == null)
+                {
+                    ShowError("A quote in the flags is not closed.");
                     return false;
                 }
                 return true;

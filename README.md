@@ -1505,6 +1505,9 @@ v1.4.3
 - **The relay answers only the source and destination servers** (`OSYNC_RELAY_ALLOW_ANY=1` lifts this), listens only on the address it advertises instead of every interface, and uses a longer random name. A refused connection is named in the error when the push fails
 - **The relay keeps the first manifest it receives**: a different manifest is refused, so the model being copied cannot be swapped before the destination installs it. Manifests are limited to 4 MiB, uploads and connections are capped, and a connection that sends no request is closed after 30 seconds
 - **Warning for a cloud API key on the command line** (`@provider:token/model` in `--judge`/`--judgebest`): it stays in the shell history and the process list; the environment variables are safer. Keys were never written to logs or result files
+- **`manage` tweak: flag values with spaces reach xOllama intact**: typed flags were joined into one command line, so `--council-instructions="be brief"` or a quoted `@C:\my dir\file` was split apart. Each flag is now passed as its own argument, quotes keep a value together, and an unclosed quote is refused in the dialog
+- **`manage` tweak lists the server's defaults when the server has an API key**: osync now sends the key the xollama CLI uses (`XOLLAMA_API_KEY`, else `~/.ollama/xollama-api-key`); before, the defaults were silently missing
+- **`manage` tweak refuses flags for the "show" options**: `xollama tweak show` takes none and failed with "unknown flag"
 
 v1.4.2
 
