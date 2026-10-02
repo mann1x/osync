@@ -1268,9 +1268,11 @@ osync manage myserver/                    # trailing slash
 - **Ctrl+W** - Tweak (xOllama servers): change the model's xOllama settings (see below)
 - **Ctrl+Q** - Quit
 
-**Tweak (xOllama):** xOllama keeps settings of its own in the model: engine, KV cache types, dynamic slots, DCA, session affinity and prefix pooling, council, GPU/devices, speculative decoding. They are listed in the model details (Enter), and on an xOllama server **Ctrl+W** changes them for the model under the cursor, or for each selected model. Pick what to change (every setting, or one group such as KV cache or council), or remove the settings. You can also type flags: a flag with a value is set without questions, e.g. `--kv-k=q8_0 --kv-v=q8_0` or `--council=on`.
+**Tweak (xOllama):** xOllama keeps settings of its own in the model: engine, KV cache types, dynamic slots, DCA, session affinity and prefix pooling, council, GPU/devices, speculative decoding. They are listed in the model details (Enter), and on an xOllama server **Ctrl+W** changes them for the model under the cursor, or for each selected model. Pick what to change (every setting, or one group such as KV cache, council or the engine policies), show what the model runs with (its own settings and the server's defaults), or remove the settings. You can also type flags: a flag with a value is set without questions, e.g. `--kv-k=q8_0 --kv-v=q8_0` or `--council=on`.
 
-osync runs `xollama tweak model <model>` on the console against the server manage shows, including a remote one. The questions, the explanations and the consistency checks are xOllama's own, and so is the list of settings, so it always matches the xOllama version. This needs the `xollama` CLI on this machine: on PATH, or set `OSYNC_XOLLAMA_CLI` to its path. Only the xOllama settings layer changes: weights, template, system prompt and parameters stay as they are. See [xOllama's tweak documentation](https://github.com/mann1x/xollama/blob/main/docs/xollama/tweak.mdx).
+When the server runs on this machine, Ctrl+W also offers the server's own settings: defaults for every model's settings (a model that states a setting keeps it), the local API key, the GPUs (which ones, their priority, backend, link speed and split) and the environment variables the server keeps in its own settings file; the dialog lists the server's defaults. xOllama takes these only from its own machine, so they are not offered for a remote server.
+
+osync runs `xollama tweak model <model>` (or `tweak server`, `tweak envs`, `tweak show ...`) on the console against the server manage shows, including a remote one. The questions, the explanations and the consistency checks are xOllama's own, and so is the list of settings, so it always matches the xOllama version. This needs the `xollama` CLI on this machine: on PATH, or set `OSYNC_XOLLAMA_CLI` to its path. Only the xOllama settings layer changes: weights, template, system prompt and parameters stay as they are. See [xOllama's tweak documentation](https://github.com/mann1x/xollama/blob/main/docs/xollama/tweak.mdx).
 
 **Sort Modes:**
 - Name+ (ascending), Name- (descending)
@@ -1494,6 +1496,9 @@ osync mv qwen2 qwen2-7b:dev
 ## Changelog
 
 v1.4.3
+
+**New**
+- **`manage` tweak follows xOllama's new settings**: Ctrl+W adds the engine policies (KV residency, rolling window, fit, VRAM target, MTP policy), the drafter's speculative type, and "show what the model runs with" (`xollama tweak show model`: each setting marked as the model's own or the server's default). For a server on this machine it also offers the server's own settings: defaults for every model and the API key (`tweak server`), the GPUs (`tweak server gpu`), environment variables kept by the server (`tweak envs`) and `tweak show server`, and the dialog lists the server's defaults next to the model's settings. xOllama accepts those changes only from its own machine, so they are not offered for a remote server. Needs an xOllama with `tweak server` (after v0.34.4-xollama.2); an older one reports the unknown command
 
 **Fixes**
 - **The copy relay can no longer be used to reach the destination server's API**: a crafted digest (`../pull`) made osync forward a request to any `/api/*` endpoint of the destination (pull, create, copy, push), which in a remote-to-local copy exposed a local server that listens only on localhost. Digests must now be `sha256:` and 64 hex digits

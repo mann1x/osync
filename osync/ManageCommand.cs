@@ -1069,7 +1069,7 @@ namespace osync
             "  L  load into memory                             K  unload from memory\n" +
             "  X  loaded models (ps)                           O  sort order\n" +
             "  T  theme (saved in the settings file)           E  settings: server, colors\n" +
-            "  W  tweak: xOllama settings of the model (xOllama servers, needs the xollama CLI)\n" +
+            "  W  tweak: xOllama settings of the model, or of a server on this machine (xollama CLI)\n" +
             "  Q  quit\n" +
             "\n" +
             "In the list: [X] = selected, " + LoadedMarker + " = loaded in memory.";
@@ -2117,42 +2117,55 @@ namespace osync
 
         private bool IsXOllamaServer => OllamaServer.GetFlavor(ServerUrl) == ServerFlavor.XOllama;
 
-        // Action: xOllama settings of the model(s), with `xollama tweak model` on the console
+        // Action: xOllama settings of the model(s), and of the server when it runs on this machine, with
+        // `xollama tweak` on the console
         private void ExecuteTweak()
         {
+            if (_app == null) return;
             var models = TargetModels(out bool isBatch);
-            if (models.Count == 0 || _app == null) return;
-
             var url = ServerUrl;
+            var local = XOllamaTweak.IsOnThisMachine(url);
+            if (models.Count == 0 && !local) return;
+
             if (!IsXOllamaServer)
             {
-                ShowInfo("Tweak", $"Tweak changes xOllama's own model settings,\nand {new Uri(url).Authority} is not an xOllama server.");
+                ShowInfo("Tweak", $"Tweak changes xOllama's own settings,\nand {new Uri(url).Authority} is not an xOllama server.");
                 return;
             }
             var cli = OllamaServer.XOllamaCli;
             if (cli == null)
             {
-                ShowError("Tweak runs the xollama CLI (xollama tweak model), which is not on PATH.\n" +
+                ShowError("Tweak runs the xollama CLI (xollama tweak), which is not on PATH.\n" +
                           "Install xOllama on this machine, or set OSYNC_XOLLAMA_CLI to its path.");
                 return;
             }
 
-            var dialog = NewDialog(isBatch ? $"Tweak - {models.Count} models" : $"Tweak - {models[0].Name}", 78);
+            // The model options (none without a model), then the server's own: xOllama takes changes to those
+            // only from its own machine
+            var scopes = (models.Count > 0 ? XOllamaTweak.Scopes : Array.Empty<XOllamaTweak.Scope>())
+                .Concat(local ? XOllamaTweak.ServerScopes : Array.Empty<XOllamaTweak.Scope>())
+                .ToArray();
+            var clearScope = models.Count > 0 ? XOllamaTweak.ClearScope : -1;
+
+            var title = models.Count == 0 ? $"Tweak - {new Uri(url).Authority}"
+                : isBatch ? $"Tweak - {models.Count} models" : $"Tweak - {models[0].Name}";
+            var dialog = NewDialog(title, 82);
+            // Rows left for the current settings: the options, the flags, the buttons and the borders take the
+            // rest; a block (heading, rows, blank line) is left out when not even one row of it fits
+            var room = _app.Screen.Height - scopes.Length - 8;
             int y = 0;
-            if (!isBatch)
+            if (models.Count > 0 && !isBatch && room >= 3)
             {
                 FetchExtendedInfo(models[0]);
                 var current = models[0].XOllamaSettings is { Count: > 0 } rows
                     ? XOllamaTweak.Describe(rows, 40).ToList()
-                    : new List<string> { "none: the server's environment decides" };
-                const int shown = 6;
-                dialog.Add(NewLabel("xOllama settings now:", 0, y++));
-                foreach (var line in current.Take(shown))
-                    dialog.Add(NewLabel("  " + line, 0, y++));
-                if (current.Count > shown)
-                    dialog.Add(NewLabel($"  ... and {current.Count - shown} more (model details show them all)", 0, y++));
-                y++;
+                    : new List<string> { local ? "none: the server's defaults and environment decide" : "none: the server decides" };
+                y = AddSettingRows(dialog, "xOllama settings now:", current, Math.Min(6, room - 3), y,
+                    "model details show them all");
             }
+            if (local && room - y >= 3 && XOllamaTweak.FetchServerDefaults(url) is { Count: > 0 } defaults)
+                y = AddSettingRows(dialog, "Server defaults (for what a model leaves unset):",
+                    XOllamaTweak.Describe(defaults, 40).ToList(), Math.Min(4, room - y - 3), y, "tweak show server lists them all");
 
             dialog.Add(NewLabel("Settings to change:", 0, y++));
             var selector = new OptionSelector
@@ -2161,17 +2174,17 @@ namespace osync
                 Y = y,
                 TabBehavior = TabBehavior.NoStop,
                 HotKeySpecifier = NoHotKey,
-                Labels = XOllamaTweak.Scopes.Select(s => s.Label).ToArray(),
+                Labels = scopes.Select(s => s.Label).ToArray(),
                 Value = 0
             };
             dialog.Add(selector);
-            y += XOllamaTweak.Scopes.Length + 1;
+            y += scopes.Length + 1;
             dialog.Add(NewLabel("Flags (optional; a flag with a value, --kv-v=q8_0, is set without asking):", 0, y++));
             var flagsField = NewField("", 0, y);
             dialog.Add(flagsField);
             dialog.Validate = () =>
             {
-                if (selector.Value == XOllamaTweak.ClearScope && !string.IsNullOrWhiteSpace(flagsField.Text))
+                if (selector.Value == clearScope && !string.IsNullOrWhiteSpace(flagsField.Text))
                 {
                     ShowError("Removing the settings cannot be combined with flags that set one.");
                     return false;
@@ -2183,31 +2196,51 @@ namespace osync
             selector.SetFocus();
             FocusSelected(selector);
 
-            if (RunDialog(dialog) != 1 || selector.Value is not int scope) return;
+            if (RunDialog(dialog) != 1 || selector.Value is not int index) return;
+            var scope = scopes[index];
             var extra = flagsField.Text.Trim();
 
-            if (scope == XOllamaTweak.ClearScope)
+            if (index == clearScope)
             {
                 var what = isBatch ? $"{models.Count} models" : $"'{models[0].Name}'";
                 // Enter presses the last button: keep Cancel there
                 if (MessageBox.ErrorQuery(_app, "Remove xOllama settings",
-                        $"Remove the xOllama settings of {what}?\nThe server's environment then decides every setting.",
+                        $"Remove the xOllama settings of {what}?\nThe server's defaults and environment then decide every setting.",
                         "Remove", "Cancel") != 0)
                     return;
             }
 
             RequestConsoleAction(token =>
             {
+                if (!scope.PerModel)
+                {
+                    Out.StatusLine($"\nxollama tweak {scope.Command} on {url}");
+                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(scope, null, extra));
+                    if (code != 0)
+                        Out.Failure($"xollama tweak {scope.Command} exited with code {code}");
+                    return null;
+                }
                 foreach (var model in models)
                 {
                     if (token.IsCancellationRequested) break;
-                    Out.StatusLine($"\nxollama tweak model '{model.Name}' on {url}");
-                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(model.Name, XOllamaTweak.Scopes[scope].Flags, extra));
+                    Out.StatusLine($"\nxollama tweak {scope.Command} '{model.Name}' on {url}");
+                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(scope, model.Name, extra));
                     if (code != 0)
                         Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
                 }
                 return models[0].Name;
             });
+        }
+
+        /// <summary>A heading and up to <paramref name="shown"/> setting rows of the tweak dialog; returns the next row.</summary>
+        private static int AddSettingRows(Dialog dialog, string heading, List<string> lines, int shown, int y, string more)
+        {
+            dialog.Add(NewLabel(heading, 0, y++));
+            foreach (var line in lines.Take(shown))
+                dialog.Add(NewLabel("  " + line, 0, y++));
+            if (lines.Count > shown)
+                dialog.Add(NewLabel($"  ... and {lines.Count - shown} more ({more})", 0, y++));
+            return y + 1;
         }
 
         // Action: choose the theme (live preview; the choice is saved in the settings file)

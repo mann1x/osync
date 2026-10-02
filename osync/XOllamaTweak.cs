@@ -6,38 +6,107 @@ namespace osync
 {
     /// <summary>
     /// xOllama's model settings (the model's xollama.json layer: engine, KV cache types, dynamic slots, DCA,
-    /// session pooling, council, devices, ...) and `xollama tweak model`, the xOllama command that edits them.
+    /// session pooling, council, devices, engine policies, ...) and `xollama tweak`, the xOllama command that
+    /// edits them, the server's defaults for them, its GPU policy and its environment overrides.
     /// The settings, their rules and the questions live in the xollama CLI (cmd/tweak in the xOllama repository),
     /// so osync runs it rather than keeping a copy of its table that would fall behind; osync only reads the
-    /// settings back from /api/show (its "xollama" field) to display them.
+    /// settings back to display them: the model's from /api/show (its "xollama" field), the server's defaults
+    /// from /api/xollama/settings.
     /// </summary>
     internal static class XOllamaTweak
     {
-        /// <summary>What the tweak dialog offers: a label and the tweak flags it passes (a bare flag scopes the walk).</summary>
-        public static readonly (string Label, string Flags)[] Scopes =
+        /// <summary>
+        /// One option of the tweak dialog: the xollama tweak subcommand it runs ("model", "server gpu", ...), the
+        /// flags it passes (a bare flag scopes the walk to that feature) and whether it runs once per model.
+        /// </summary>
+        public sealed record Scope(string Label, string Command, string Flags = "", bool PerModel = true);
+
+        /// <summary>The options about the chosen model(s).</summary>
+        public static readonly Scope[] Scopes =
         {
-            ("Every setting", ""),
-            ("KV cache types (--kv-k)", "--kv-k"),
-            ("Dynamic slots (--slots)", "--slots"),
-            ("DCA, context past the trained length (--dca)", "--dca"),
-            ("Session affinity and prefix pooling (--session-affinity)", "--session-affinity"),
-            ("Council (--council)", "--council"),
-            ("GPU / devices (--device-backend)", "--device-backend"),
-            ("Engine (--engine)", "--engine"),
-            ("Remove the xOllama settings (--clear)", "--clear")
+            new("Every setting", "model"),
+            new("KV cache types (--kv-k)", "model", "--kv-k"),
+            new("Dynamic slots (--slots)", "model", "--slots"),
+            new("DCA, context past the trained length (--dca)", "model", "--dca"),
+            new("Session affinity and prefix pooling (--session-affinity)", "model", "--session-affinity"),
+            new("Council (--council)", "model", "--council"),
+            new("GPU / devices (--device-backend)", "model", "--device-backend"),
+            new("Engine (--engine)", "model", "--engine"),
+            new("Engine policies: KV residency, rolling window, fit, VRAM target, MTP", "model",
+                "--kv-residency --kv-rolling-window --fit --vram-target --mtp-policy"),
+            new("Drafter's speculative type (--spec-type)", "model", "--spec-type"),
+            new("Show what the model runs with, its own or the server's (tweak show model)", "show model"),
+            new("Remove the xOllama settings (--clear)", "model", "--clear")
         };
 
         /// <summary>Index of the scope that removes the settings.</summary>
         public static int ClearScope => Scopes.Length - 1;
 
-        /// <summary>Arguments of `xollama tweak model` for <paramref name="model"/>: the scope's flags, then the typed ones.</summary>
-        public static string Arguments(string model, string scopeFlags, string? extraFlags)
+        /// <summary>
+        /// The options about the server itself. xOllama answers its settings only from its own machine, so they
+        /// are offered only for a server on this one (<see cref="IsOnThisMachine"/>).
+        /// </summary>
+        public static readonly Scope[] ServerScopes =
         {
-            var parts = new List<string> { "tweak", "model", model };
-            if (!string.IsNullOrWhiteSpace(scopeFlags)) parts.Add(scopeFlags.Trim());
+            new("Server: defaults for every model, the API key, the GPUs (tweak server)", "server", PerModel: false),
+            new("Server: GPUs - priority, backend, link speed, split (tweak server gpu)", "server gpu", PerModel: false),
+            new("Server: environment variables, without the environment (tweak envs)", "envs", PerModel: false),
+            new("Server: what is set, and where it comes from (tweak show server)", "show server", PerModel: false)
+        };
+
+        /// <summary>Arguments of `xollama tweak` for <paramref name="scope"/>: the command, the model, the scope's flags, then the typed ones.</summary>
+        public static string Arguments(Scope scope, string? model, string? extraFlags)
+        {
+            var parts = new List<string> { "tweak", scope.Command };
+            if (scope.PerModel && model != null) parts.Add(model);
+            if (!string.IsNullOrWhiteSpace(scope.Flags)) parts.Add(scope.Flags.Trim());
             if (!string.IsNullOrWhiteSpace(extraFlags)) parts.Add(extraFlags.Trim());
             return string.Join(" ", parts);
         }
+
+        /// <summary>Arguments of `xollama tweak model` for <paramref name="model"/>: the scope's flags, then the typed ones.</summary>
+        public static string Arguments(string model, string scopeFlags, string? extraFlags) =>
+            Arguments(new Scope("", "model", scopeFlags), model, extraFlags);
+
+        /// <summary>
+        /// Whether <paramref name="url"/> reaches the server over loopback, the only way xOllama accepts changes to
+        /// its own settings (defaults, GPUs, environment variables): localhost, 127.x, ::1 or 0.0.0.0.
+        /// </summary>
+        public static bool IsOnThisMachine(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+            var host = uri.Host.Trim('[', ']');
+            if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+            return System.Net.IPAddress.TryParse(host, out var ip) &&
+                   (System.Net.IPAddress.IsLoopback(ip) || ip.Equals(System.Net.IPAddress.Any) || ip.Equals(System.Net.IPAddress.IPv6Any));
+        }
+
+        /// <summary>
+        /// The server's defaults for every model's settings (POST /api/xollama/settings with no changes reads
+        /// them), as "path value" rows; empty when it has none, null when the server does not answer (an older
+        /// xOllama, a remote client, an API key).
+        /// </summary>
+        public static List<(string Path, string Value)>? FetchServerDefaults(string url)
+        {
+            try
+            {
+                using var client = new HttpClient { BaseAddress = new Uri(url), Timeout = TimeSpan.FromSeconds(5) };
+                using var response = client.PostAsync("api/xollama/settings", null).GetAwaiter().GetResult();
+                if (!response.IsSuccessStatusCode) return null;
+                using var doc = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
+                return ServerDefaults(doc.RootElement);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>The "defaults" of a /api/xollama/settings answer as rows (none when it states none).</summary>
+        public static List<(string Path, string Value)> ServerDefaults(JsonElement settings) =>
+            settings.ValueKind == JsonValueKind.Object && settings.TryGetProperty("defaults", out var defaults)
+                ? Flatten(defaults)
+                : new List<(string, string)>();
 
         /// <summary>
         /// The settings a model states, as "path value" rows in the order the server wrote them ("kv.k" "q8_0",
@@ -102,7 +171,7 @@ namespace osync
         }
 
         /// <summary>
-        /// Runs `xollama tweak model` on the console against the server <paramref name="url"/> (local or remote),
+        /// Runs `xollama tweak` on the console against the server <paramref name="url"/> (local or remote),
         /// with the console's input and output, so its questions are answered as usual. Returns the exit code.
         /// </summary>
         public static int Run(string cli, string url, string arguments)
