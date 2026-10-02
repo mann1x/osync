@@ -56,6 +56,14 @@ namespace osync
                     };
                 }
 
+                if (!config.ApiKeyFromEnv)
+                {
+                    // A key on the command line stays in the shell history and is visible to other users in the process list
+                    var envVars = CloudJudgeProviderFactory.GetEnvVarsForProvider(config.ProviderName);
+                    var hint = envVars.Length > 0 ? $"; prefer {string.Join(" or ", envVars)}" : "";
+                    Out.Warning($"the {config.ProviderName} API key is on the command line (shell history, process list){hint}.");
+                }
+
                 return new JudgeParseResult
                 {
                     Success = true,

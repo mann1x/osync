@@ -238,6 +238,8 @@ Requirements and options:
 - The source server must be able to connect to the machine running osync (and the destination should too, to install the manifest; otherwise osync recreates the model from its files). The relay listens on a free port chosen by the OS (above 1024), or on `OSYNC_RELAY_PORT`; open your firewall accordingly. A Windows destination cannot store a model named after the relay's `host:port`, so the model is recreated there from its manifest (byte for byte); a Windows source needs the relay on port 80, which osync then uses for that copy if it is free.
 - `OSYNC_RELAY_HOST` - address the servers should use to reach osync (default: the local address that routes to the source server), e.g. behind NAT
 - `OSYNC_RELAY_PORT` - fixed relay port (e.g. one opened in the firewall)
+- The relay listens only on the address it advertises (all interfaces when `OSYNC_RELAY_HOST` is set), answers only the source and destination servers, accepts only the model being copied (a random name), and lives only for the copy
+- `OSYNC_RELAY_ALLOW_ANY=1` - accept connections from any address (when a server reaches osync through NAT, a proxy or a container network, so its connections come from another address)
 - `OSYNC_RELAY_INSTALL=create` - skip installing the manifest from the relay and recreate the model with `/api/create` (for destinations that cannot connect to osync)
 - If the source server cannot reach the relay, osync falls back to downloading the blobs from registry.ollama.ai, which only works for models pulled from the Ollama registry.
 
@@ -1490,6 +1492,14 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.3
+
+**Fixes**
+- **The copy relay can no longer be used to reach the destination server's API**: a crafted digest (`../pull`) made osync forward a request to any `/api/*` endpoint of the destination (pull, create, copy, push), which in a remote-to-local copy exposed a local server that listens only on localhost. Digests must now be `sha256:` and 64 hex digits
+- **The relay answers only the source and destination servers** (`OSYNC_RELAY_ALLOW_ANY=1` lifts this), listens only on the address it advertises instead of every interface, and uses a longer random name. A refused connection is named in the error when the push fails
+- **The relay keeps the first manifest it receives**: a different manifest is refused, so the model being copied cannot be swapped before the destination installs it. Manifests are limited to 4 MiB, uploads and connections are capped, and a connection that sends no request is closed after 30 seconds
+- **Warning for a cloud API key on the command line** (`@provider:token/model` in `--judge`/`--judgebest`): it stays in the shell history and the process list; the environment variables are safer. Keys were never written to logs or result files
 
 v1.4.2
 
