@@ -19,11 +19,18 @@ namespace osync
     ///
     /// Implements just what Ollama's push/pull clients use: HEAD blob, POST upload, PATCH chunk,
     /// PUT upload completion, PUT/GET/HEAD manifest. Every response closes the connection.
-    /// Requests for any repository other than <see cref="Repository"/> are rejected.
+    /// Requests for any repository other than <see cref="Repository"/> are rejected, and so are connections from
+    /// anything but the source and destination servers (OSYNC_RELAY_ALLOW_ANY=1 lifts this, e.g. behind NAT); digests
+    /// must be sha256:&lt;64 hex&gt; (they become part of the destination's URL), and once a manifest is stored a
+    /// different one is refused.
     /// </summary>
     internal sealed class RegistryRelay : IAsyncDisposable
     {
         private const string ManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json";
+        private const int MaxManifestSize = 4 * 1024 * 1024;
+        private const int MaxConnections = 64;
+        private const int MaxUploads = 64;
+        private static readonly TimeSpan HeaderTimeout = TimeSpan.FromSeconds(30);
         private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromDays(1) };
 
         private readonly TcpListener _listener;
@@ -33,8 +40,13 @@ namespace osync
         private readonly long _bufferSize;
         private readonly ConcurrentDictionary<string, UploadSession> _uploads = new();
         private readonly object _lock = new();
+        private readonly HashSet<IPAddress>? _allowedClients; // null: any client (OSYNC_RELAY_ALLOW_ANY)
+        private readonly SemaphoreSlim _connections = new(MaxConnections);
         private string? _pendingDigest;
         private Task? _acceptLoop;
+
+        /// <summary>Addresses whose connections were refused because they are neither server.</summary>
+        public ConcurrentDictionary<string, bool> RefusedClients { get; } = new();
 
         /// <summary>host[:port] under which the servers reach this relay (port omitted when it is 80).</summary>
         public string Authority { get; }
@@ -66,11 +78,13 @@ namespace osync
         /// <summary>First error that happened while forwarding a blob, if any.</summary>
         public string? ForwardError { get; private set; }
 
-        private RegistryRelay(TcpListener listener, string authority, string destServer, long bandwidthLimit, long bufferSize)
+        private RegistryRelay(TcpListener listener, string authority, string destServer, long bandwidthLimit, long bufferSize,
+            HashSet<IPAddress>? allowedClients)
         {
             _listener = listener;
             Authority = authority;
-            Repository = "osync/relay-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant();
+            _allowedClients = allowedClients;
+            Repository = "osync/relay-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             _destServer = destServer.TrimEnd('/');
             _bandwidthLimit = bandwidthLimit;
             _bufferSize = Math.Max(1024 * 1024, bufferSize);
@@ -81,7 +95,9 @@ namespace osync
         /// address used to route to the source - or to the destination when the source runs on this machine, so
         /// both can connect - (override with OSYNC_RELAY_HOST, e.g. behind NAT). The port is <paramref name="port"/> when
         /// given, else OSYNC_RELAY_PORT, else a free ephemeral port the OS assigns (above 1024; binding port 0 picks one
-        /// atomically, so no other program can take it between a check and the bind).
+        /// atomically, so no other program can take it between a check and the bind). The relay listens only on the
+        /// advertised address (both servers connect to it, it is in the model name), or on every interface when
+        /// OSYNC_RELAY_HOST names an address that may not be local.
         /// </summary>
         public static RegistryRelay Start(string sourceServer, string destServer, long bandwidthLimit, long bufferSize, int? port = null)
         {
@@ -98,7 +114,9 @@ namespace osync
                     advertised = LocalAddressTowards(destServer);
             }
 
-            var bindAddress = IPAddress.IsLoopback(advertised) ? IPAddress.Loopback : IPAddress.Any;
+            var bindAddress = string.IsNullOrWhiteSpace(overrideHost) ? advertised : IPAddress.Any;
+            var allowAny = Environment.GetEnvironmentVariable("OSYNC_RELAY_ALLOW_ANY") is "1" or "true";
+            var allowed = allowAny ? null : AllowedClients(advertised, sourceServer, destServer);
             var listenPort = port
                 ?? (int.TryParse(Environment.GetEnvironmentVariable("OSYNC_RELAY_PORT"), out var configured) ? configured : 0);
 
@@ -115,13 +133,44 @@ namespace osync
             // On port 80 the name carries no port (the registry client's default for http)
             var boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
             var authority = boundPort == 80 ? advertised.ToString() : $"{advertised}:{boundPort}";
-            var relay = new RegistryRelay(listener, authority, destServer, bandwidthLimit, bufferSize);
+            var relay = new RegistryRelay(listener, authority, destServer, bandwidthLimit, bufferSize, allowed);
             relay._acceptLoop = Task.Run(relay.AcceptLoopAsync);
             return relay;
         }
 
         /// <summary>Model reference for the relay, e.g. 192.168.1.5/osync/relay-1a2b3c4d:latest.</summary>
         public string ModelName(string tag = "latest") => $"{Authority}/{Repository}:{tag}";
+
+        /// <summary>
+        /// The addresses the servers connect from: theirs, plus this machine's (advertised and loopback) for a server
+        /// running here, which connects to the advertised address from that same address.
+        /// </summary>
+        internal static HashSet<IPAddress> AllowedClients(IPAddress advertised, params string[] servers)
+        {
+            var allowed = new HashSet<IPAddress> { advertised, IPAddress.Loopback };
+            foreach (var server in servers)
+                foreach (var address in Dns.GetHostAddresses(new Uri(server).Host))
+                    allowed.Add(Normalize(address));
+            return allowed;
+        }
+
+        private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+
+        /// <summary>A blob digest as registries send it: sha256 and 64 hex digits (it is put in the destination's URL).</summary>
+        internal static bool IsValidDigest(string? digest) =>
+            digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.Ordinal) &&
+            digest.AsSpan(7).IndexOfAnyExcept("0123456789abcdefABCDEF") < 0;
+
+        /// <summary>Text to add to a push error: what the relay refused or failed to forward.</summary>
+        public string? Diagnostics()
+        {
+            var parts = new List<string>();
+            if (ForwardError != null) parts.Add($"relay: {ForwardError}");
+            if (!RefusedClients.IsEmpty)
+                parts.Add($"the relay refused connections from {string.Join(", ", RefusedClients.Keys)}, which is neither server; " +
+                          "set OSYNC_RELAY_ALLOW_ANY=1 if a server connects through another address");
+            return parts.Count > 0 ? string.Join("; ", parts) : null;
+        }
 
         /// <summary>Local IPv4 address used to reach <paramref name="serverUrl"/> (loopback for local servers).</summary>
         private static IPAddress LocalAddressTowards(string serverUrl)
@@ -149,7 +198,23 @@ namespace osync
                 {
                     return;
                 }
-                _ = Task.Run(() => HandleConnectionAsync(client));
+                var remote = Normalize(((IPEndPoint)client.Client.RemoteEndPoint!).Address);
+                if (_allowedClients != null && !_allowedClients.Contains(remote))
+                {
+                    RefusedClients.TryAdd(remote.ToString(), true);
+                    client.Dispose();
+                    continue;
+                }
+                if (!_connections.Wait(0))
+                {
+                    client.Dispose();
+                    continue;
+                }
+                _ = Task.Run(async () =>
+                {
+                    try { await HandleConnectionAsync(client); }
+                    finally { _connections.Release(); }
+                });
             }
         }
 
@@ -161,7 +226,19 @@ namespace osync
                 {
                     client.NoDelay = true;
                     var stream = client.GetStream();
-                    var request = await HttpRequest.ReadAsync(stream, _cts.Token);
+                    HttpRequest? request;
+                    using (var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token))
+                    {
+                        headerTimeout.CancelAfter(HeaderTimeout);
+                        try
+                        {
+                            request = await HttpRequest.ReadAsync(stream, headerTimeout.Token);
+                        }
+                        catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
+                        {
+                            return; // a connection that sends no request
+                        }
+                    }
                     if (request == null) return;
                     await RouteAsync(request, stream);
                 }
@@ -210,6 +287,11 @@ namespace osync
             else if (rest.StartsWith("blobs/", StringComparison.Ordinal))
             {
                 var digest = rest["blobs/".Length..];
+                if (req.Method == "HEAD" && !IsValidDigest(digest))
+                {
+                    await WriteResponseAsync(stream, 400, "Bad Request");
+                    return;
+                }
                 if (req.Method == "HEAD")
                 {
                     await BlobExistsAsync(stream, digest);
@@ -261,6 +343,16 @@ namespace osync
         {
             await req.DrainBodyAsync(_cts.Token);
             string? digest = req.Query("digest");
+            if (digest != null && !IsValidDigest(digest))
+            {
+                await WriteResponseAsync(stream, 400, "Bad Request");
+                return;
+            }
+            if (_uploads.Count >= MaxUploads)
+            {
+                await WriteResponseAsync(stream, 429, "Too Many Requests");
+                return;
+            }
             if (digest == null)
             {
                 lock (_lock)
@@ -328,6 +420,7 @@ namespace osync
             try
             {
                 if (digest == null) throw new InvalidOperationException("upload completed without a digest");
+                if (!IsValidDigest(digest)) throw new InvalidOperationException($"invalid digest '{digest}'");
                 if (session.Digest != null && !string.Equals(session.Digest, digest, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException($"upload for {session.Digest} completed as {digest}");
                 session.Digest = digest;
@@ -353,10 +446,36 @@ namespace osync
 
         private async Task PutManifestAsync(HttpRequest req, NetworkStream stream)
         {
+            if (long.TryParse(req.Header("Content-Length"), out var length) && length > MaxManifestSize)
+            {
+                await WriteResponseAsync(stream, 413, "Payload Too Large");
+                return;
+            }
             using var body = new MemoryStream();
-            await req.CopyBodyAsync(body, _cts.Token);
-            Manifest = body.ToArray();
-            ManifestContentType = req.Header("Content-Type") ?? ManifestMediaType;
+            await req.ReadBodyAsync(chunk =>
+            {
+                if (body.Length + chunk.Length > MaxManifestSize) throw new InvalidOperationException("manifest too large");
+                body.Write(chunk.Span);
+                return Task.CompletedTask;
+            }, _cts.Token);
+            var manifest = body.ToArray();
+
+            bool accepted;
+            lock (_lock)
+            {
+                // Every push of the model sends the same manifest: a different one would replace the model being copied
+                accepted = Manifest == null || Manifest.AsSpan().SequenceEqual(manifest);
+                if (accepted && Manifest == null)
+                {
+                    Manifest = manifest;
+                    ManifestContentType = req.Header("Content-Type") ?? ManifestMediaType;
+                }
+            }
+            if (!accepted)
+            {
+                await WriteResponseAsync(stream, 409, "Conflict");
+                return;
+            }
             await WriteResponseAsync(stream, 201, "Created", new() { ["Docker-Content-Digest"] = ManifestDigest() });
         }
 
@@ -596,9 +715,6 @@ namespace osync
             }
 
             public Task DrainBodyAsync(CancellationToken ct) => ReadBodyAsync(_ => Task.CompletedTask, ct);
-
-            public async Task CopyBodyAsync(Stream destination, CancellationToken ct) =>
-                await ReadBodyAsync(chunk => destination.WriteAsync(chunk, ct).AsTask(), ct);
 
             /// <summary>Delivers the body in chunks as it arrives from the socket.</summary>
             public async Task ReadBodyAsync(Func<ReadOnlyMemory<byte>, Task> sink, CancellationToken ct)

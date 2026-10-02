@@ -216,10 +216,10 @@ namespace osync
                 {
                     progress.Finish();
                     var message = error.GetString() ?? "unknown error";
+                    var diagnostics = relay.Diagnostics() is { } text ? $" ({text})" : "";
                     if (relay.Transferred.IsEmpty && relay.Skipped.IsEmpty && relay.Manifest == null && LooksLikeConnectivity(message))
-                        throw new RelayUnreachableException(message);
-                    throw new InvalidOperationException($"push failed: {message}" +
-                        (relay.ForwardError != null ? $" (relay: {relay.ForwardError})" : ""));
+                        throw new RelayUnreachableException(message + diagnostics);
+                    throw new InvalidOperationException($"push failed: {message}{diagnostics}");
                 }
 
                 var status = root.TryGetProperty("status", out var s) ? s.GetString() ?? "" : "";
@@ -233,7 +233,7 @@ namespace osync
 
             if (!success)
                 throw new InvalidOperationException("push ended without success" +
-                    (relay.ForwardError != null ? $" (relay: {relay.ForwardError})" : ""));
+                    (relay.Diagnostics() is { } text ? $" ({text})" : ""));
         }
 
         private static bool LooksLikeConnectivity(string message)
