@@ -41,6 +41,12 @@ namespace osync
             new("Remove the xOllama settings (--clear)", "model", "--clear")
         };
 
+        /// <summary>
+        /// The default voice of a speech model, picked from the voices the server lists (offered for one model with
+        /// speech, after <see cref="Scopes"/>): it sets --tts-voice.
+        /// </summary>
+        public static readonly Scope VoiceScope = new("Speech: default voice, picked from the model's voices (--tts-voice)", "model", "--tts-voice");
+
         /// <summary>Index of the scope that removes the settings.</summary>
         public static int ClearScope => Scopes.Length - 1;
 

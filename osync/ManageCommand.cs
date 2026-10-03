@@ -33,6 +33,12 @@ namespace osync
         public string Family { get; set; } = "";
         public string ParameterSize { get; set; } = "";
 
+        // What the model is (llm, embed, image, stt, tts, video): from /api/tags capabilities, or the local manifest
+        public List<string> Kinds { get; set; } = new();
+        public bool IsMediaOnly => XOllamaMedia.IsMediaOnly(Kinds);
+        public bool HasMedia => Kinds.Any(XOllamaMedia.IsMediaKind);
+        public string KindsText => string.Join(",", Kinds);
+
         // Modelfile parameters
         public int? NumCtx { get; set; }
         public string? Stop { get; set; }
@@ -156,6 +162,7 @@ namespace osync
         private int _paramsColumnWidth = 6;
         private int _quantColumnWidth = 6;
         private int _familyColumnWidth = 6;
+        private int _kindColumnWidth;   // 0: no column (no model has a media kind)
         private int _modifiedColumnWidth = 3;
         private int _idColumnWidth = 12;
         private string _serverLabel = "";
@@ -614,6 +621,10 @@ namespace osync
             _paramsColumnWidth = Math.Max(_allModels.Select(m => m.ParameterSize.Length).DefaultIfEmpty(0).Max(), 6);
             _quantColumnWidth = Math.Max(_allModels.Select(m => string.IsNullOrEmpty(m.Quantization) ? 7 : m.Quantization.Length).DefaultIfEmpty(0).Max(), 6);
             _familyColumnWidth = Math.Max(_allModels.Select(m => m.Family.Length).DefaultIfEmpty(0).Max(), 6);
+            // The kind column, like osync ls, only when a model has media engines (xOllama)
+            _kindColumnWidth = _allModels.Any(m => m.HasMedia)
+                ? Math.Max(_allModels.Select(m => m.KindsText.Length).DefaultIfEmpty(0).Max(), 4)
+                : 0;
             _modifiedColumnWidth = Math.Max(_allModels.Select(m => m.ModifiedFormatted.Length).DefaultIfEmpty(0).Max(), 3);
             _idColumnWidth = 12; // ID is always 12 characters from digest (same as ollama ls)
 
@@ -632,6 +643,8 @@ namespace osync
                     _paramsColumnWidth = Math.Max(3, (int)(_paramsColumnWidth * scaleFactor));
                     _quantColumnWidth = Math.Max(4, (int)(_quantColumnWidth * scaleFactor));
                     _familyColumnWidth = Math.Max(4, (int)(_familyColumnWidth * scaleFactor));
+                    if (_kindColumnWidth > 0)
+                        _kindColumnWidth = Math.Max(3, (int)(_kindColumnWidth * scaleFactor));
                     _modifiedColumnWidth = Math.Max(2, (int)(_modifiedColumnWidth * scaleFactor));
                     _idColumnWidth = Math.Max(6, (int)(_idColumnWidth * scaleFactor));
                 }
@@ -643,7 +656,8 @@ namespace osync
 
         /// <summary>Width of the data columns after the name, including the separating spaces.</summary>
         private int ColumnsWidth() =>
-            _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth + _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth + 6;
+            _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth + _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth + 6 +
+            (_kindColumnWidth > 0 ? _kindColumnWidth + 1 : 0);
 
         private int NameWidth(int width) => Math.Max(20, width - PrefixWidth - ColumnsWidth());
 
@@ -696,6 +710,7 @@ namespace osync
                             var fileInfo = new FileInfo(tagFile);
                             long totalSize = 0;
                             string modelId = "";
+                            var kinds = new List<string>();
 
                             try
                             {
@@ -703,6 +718,7 @@ namespace osync
                                 if (manifest?.layers != null)
                                 {
                                     totalSize = manifest.layers.Sum(l => l.size);
+                                    kinds = _program.LocalModelKinds(manifest.layers);
                                 }
 
                                 // Compute SHA256 of manifest file content (same as ollama ls)
@@ -719,7 +735,8 @@ namespace osync
                                 Size = totalSize,
                                 SizeFormatted = FormatSize(totalSize),
                                 ModifiedAt = fileInfo.LastWriteTime,
-                                ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime)
+                                ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime),
+                                Kinds = kinds
                             });
                         }
                     }
@@ -774,7 +791,8 @@ namespace osync
                             ModifiedFormatted = GetTimeAgo(model.modified_at),
                             Quantization = model.details?.quantization_level ?? "",
                             Family = model.details?.family ?? "",
-                            ParameterSize = model.details?.parameter_size ?? ""
+                            ParameterSize = model.details?.parameter_size ?? "",
+                            Kinds = OsyncProgram.RemoteModelKinds(model)
                         });
                     }
                 }
@@ -1038,6 +1056,7 @@ namespace osync
                        Fit("PARAMS", _paramsColumnWidth) + " " +
                        Fit("QUANT", _quantColumnWidth) + " " +
                        Fit("FAMILY", _familyColumnWidth) + " " +
+                       (_kindColumnWidth > 0 ? Fit("KIND", _kindColumnWidth) + " " : "") +
                        Fit("AGE", _modifiedColumnWidth) + " " +
                        Fit("ID", _idColumnWidth);
             _header.Set(new[] { new SegmentBar.Segment(text, C(t.Muted), true) }, Array.Empty<SegmentBar.Segment>(), C(t.Background));
@@ -1623,6 +1642,11 @@ namespace osync
         {
             var model = CurrentModel();
             if (model == null) return;
+            if (XOllamaMedia.CannotChatReason(model.Name, model.Kinds) is { } noChat)
+            {
+                ShowError(noChat + ".");
+                return;
+            }
 
             var dialog = NewDialog($"Run/Chat - {model.Name}", 76);
             const int fieldX = 28;
@@ -1927,6 +1951,12 @@ namespace osync
             var model = CurrentModel();
             var app = _app;
             if (model == null || app == null) return;
+            if (XOllamaMedia.CannotChatReason(model.Name, model.Kinds) is { } noChat)
+            {
+                // A media model's engines start on their first request; there is no LLM to load
+                ShowError(noChat + ".");
+                return;
+            }
 
             var serverUrl = ServerUrl;
             SetStatus($"Loading {model.Name}...");
@@ -1945,7 +1975,8 @@ namespace osync
                     var preloadRequest = new { model = model.Name, messages = Array.Empty<object>(), keep_alive = "5m", stream = false };
                     var response = httpClient.PostAsync("/api/chat", new StringContent(
                         JsonSerializer.Serialize(preloadRequest), Encoding.UTF8, "application/json")).Result;
-                    response.EnsureSuccessStatusCode();
+                    // The server's own error says what is wrong (and what to do), not just the status code
+                    XOllamaMedia.EnsureSuccessAsync(response).GetAwaiter().GetResult();
                     response.Content.ReadAsStringAsync().Wait();
                 }
                 catch (Exception ex)
@@ -2083,6 +2114,8 @@ namespace osync
                 lines.Add($"Parameters: {model.ParameterSize}");
             if (!string.IsNullOrEmpty(model.Quantization))
                 lines.Add($"Quantization: {model.Quantization}");
+            if (model.Kinds.Count > 0)
+                lines.Add($"Kind: {model.KindsText}" + (model.IsMediaOnly ? " (media model: no chat)" : ""));
             if (model.IsLoaded)
                 lines.Add("Status: LOADED IN MEMORY");
             lines.Add("");
@@ -2142,7 +2175,10 @@ namespace osync
 
             // The model options (none without a model), then the server's own: xOllama takes changes to those
             // only from its own machine
+            // A speech model also gets the voice picker, after the model options (so they keep their places)
+            var voiceScope = models.Count == 1 && !isBatch && models[0].Kinds.Contains("tts") ? XOllamaTweak.Scopes.Length : -1;
             var scopes = (models.Count > 0 ? XOllamaTweak.Scopes : Array.Empty<XOllamaTweak.Scope>())
+                .Concat(voiceScope >= 0 ? new[] { XOllamaTweak.VoiceScope } : Array.Empty<XOllamaTweak.Scope>())
                 .Concat(local ? XOllamaTweak.ServerScopes : Array.Empty<XOllamaTweak.Scope>())
                 .ToArray();
             var clearScope = models.Count > 0 ? XOllamaTweak.ClearScope : -1;
@@ -2190,6 +2226,11 @@ namespace osync
                     ShowError("Removing the settings cannot be combined with flags that set one.");
                     return false;
                 }
+                if (chosen == voiceScope)
+                {
+                    ShowError("The voice is picked from a list: leave the flags empty.");
+                    return false;
+                }
                 if (XOllamaTweak.IsShowScope(scopes[chosen]))
                 {
                     ShowError("Showing the settings takes no flags: leave the field empty.");
@@ -2210,6 +2251,11 @@ namespace osync
             if (RunDialog(dialog) != 1 || selector.Value is not int index) return;
             var scope = scopes[index];
             var extra = flagsField.Text.Trim();
+            if (index == voiceScope)
+            {
+                PickVoice(models[0], cli, url);
+                return;
+            }
 
             if (index == clearScope)
             {
@@ -2240,6 +2286,86 @@ namespace osync
                         Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
                 }
                 return models[0].Name;
+            });
+        }
+
+        /// <summary>
+        /// The voice picker of a speech model: asks the server for the model's voices (it starts the speech engine,
+        /// so off the UI thread), lists them, and sets the chosen one as the default with `xollama tweak --tts-voice`.
+        /// </summary>
+        private void PickVoice(ManageModelInfo model, string cli, string url)
+        {
+            var app = _app;
+            if (app == null) return;
+            SetStatus($"Asking for the voices of {model.Name} (this starts its speech engine)...");
+            Task.Run(async () =>
+            {
+                XOllamaMedia.VoiceList? voices = null;
+                string? error = null;
+                try
+                {
+                    voices = await XOllamaMedia.FetchVoicesAsync(url, model.Name, XOllamaTweak.ApiKey());
+                }
+                catch (Exception ex)
+                {
+                    error = ex.InnerException?.Message ?? ex.Message;
+                }
+
+                try
+                {
+                    app.Invoke(() =>
+                    {
+                        if (_app != app) return;   // the session has ended meanwhile
+                        SetStatus("");
+                        if (error != null)
+                            ShowError($"Could not list the voices of {model.Name}: {error}");
+                        else if (voices!.Voices.Count == 0)
+                            ShowInfo("Voices", $"{model.Name} lists no voices.");
+                        else
+                            ShowVoicePicker(model, voices, cli, url);
+                    });
+                }
+                catch
+                {
+                    // The session ended (and the application was disposed) meanwhile
+                }
+            });
+        }
+
+        private void ShowVoicePicker(ManageModelInfo model, XOllamaMedia.VoiceList voices, string cli, string url)
+        {
+            var labels = new ObservableCollection<string>(voices.Voices.Select(v => XOllamaMedia.VoiceLabel(v, voices.Default)));
+            var dialog = NewDialog($"Default voice - {model.Name}", 60);
+            var screenHeight = _app?.Screen.Height ?? 24;
+            var listHeight = Math.Clamp(screenHeight - 8, 3, labels.Count);
+            var list = new ListView
+            {
+                X = 0,
+                Y = 0,
+                Width = Dim.Fill(),
+                Height = listHeight,
+                KeystrokeNavigator = null,
+                HotKeySpecifier = NoHotKey
+            };
+            list.SetSource(labels);
+            var current = voices.Voices.ToList().FindIndex(v => v.Id == voices.Default);
+            list.SelectedItem = Math.Max(0, current);
+            list.FrameChanged += (_, _) => list.EnsureSelectedItemVisible();
+            dialog.Add(list);
+            dialog.AddButton(NewButton("Cancel"));
+            dialog.AddButton(NewButton("Set"));
+            list.SetFocus();
+
+            if (RunDialog(dialog) != 1 || list.SelectedItem is not int index || index < 0 || index >= voices.Voices.Count)
+                return;
+            var voice = voices.Voices[index].Id;
+            RequestConsoleAction(_ =>
+            {
+                Out.StatusLine($"\nxollama tweak model '{model.Name}' --tts-voice={voice} on {url}");
+                var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(model.Name, "", $"--tts-voice={voice}"));
+                if (code != 0)
+                    Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
+                return model.Name;
             });
         }
 
@@ -2602,7 +2728,8 @@ namespace osync
                 Rgb Fg(Rgb color) => selected ? t.SelectionText : color;
 
                 var nameWidth = o.NameWidth(width);
-                var quant = string.IsNullOrEmpty(model.Quantization) ? "unknown" : model.Quantization;
+                // A media model (xOllama engines, no LLM) has no weights to quantize
+                var quant = !string.IsNullOrEmpty(model.Quantization) ? model.Quantization : model.IsMediaOnly ? "media" : "unknown";
                 var id = model.ShortId.Length > 12 ? model.ShortId[..12] : model.ShortId;
 
                 var segments = new (string Text, Rgb Fg, TextStyle Style)[]
@@ -2614,6 +2741,7 @@ namespace osync
                     (Fit(model.ParameterSize, o._paramsColumnWidth) + " ", Fg(t.Params), TextStyle.None),
                     (Fit(quant, o._quantColumnWidth) + " ", Fg(string.IsNullOrEmpty(model.Quantization) ? t.Muted : t.Quant), TextStyle.None),
                     (Fit(model.Family, o._familyColumnWidth) + " ", Fg(t.Family), TextStyle.None),
+                    (o._kindColumnWidth > 0 ? Fit(model.KindsText, o._kindColumnWidth) + " " : "", Fg(model.HasMedia ? t.Family : t.Muted), TextStyle.None),
                     (Fit(model.ModifiedFormatted, o._modifiedColumnWidth) + " ", Fg(t.Muted), TextStyle.None),
                     (Fit(id, o._idColumnWidth), Fg(t.Id), TextStyle.None)
                 };
