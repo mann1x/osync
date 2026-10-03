@@ -4529,6 +4529,8 @@ namespace osync
             // Create dedicated HttpClient with BaseAddress
             using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             remoteClient.BaseAddress = new Uri(destination);
+            // Name the local server in errors: osync may resolve a different one than the user expects (Ollama and xOllama side by side)
+            string onServer = remote ? "" : $" on {destination}";
 
             try
             {
@@ -4546,7 +4548,7 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Out.Error(remote ? "No models found on remote server." : $"No models found matching pattern: {pattern}");
+                    Out.Error(remote ? "No models found on remote server." : $"No models found matching pattern: {pattern}{onServer}");
                     return false;
                 }
 
@@ -4568,18 +4570,18 @@ namespace osync
 
                         if (modelsToRemove.Count == 0)
                         {
-                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
+                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}'){onServer}");
                             return false;
                         }
                     }
                     else
                     {
-                        Out.Error($"No models found matching pattern: {pattern}");
+                        Out.Error($"No models found matching pattern: {pattern}{onServer}");
                         return false;
                     }
                 }
 
-                Console.WriteLine(remote ? $"Removing {modelsToRemove.Count} model(s) from remote server..." : $"Removing {modelsToRemove.Count} model(s)...");
+                Console.WriteLine(remote ? $"Removing {modelsToRemove.Count} model(s) from remote server..." : $"Removing {modelsToRemove.Count} model(s) from {destination}...");
                 int failures = 0;
 
                 foreach (var modelName in modelsToRemove)
