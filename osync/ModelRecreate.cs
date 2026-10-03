@@ -24,9 +24,12 @@ namespace osync
         /// <summary>xOllama's per-model settings (council, KV cache types, ...): the "xollama" field of /api/create.</summary>
         public const string XOllamaLayer = "application/vnd.ollama.image.json";
 
-        /// <summary>Layers whose blob must be on the destination before /api/create (sent by digest).</summary>
+        /// <summary>
+        /// Layers whose blob must be on the destination before /api/create (sent by digest): GGUF files, and xOllama's
+        /// media components (image, speech, transcription and video engines' weights).
+        /// </summary>
         public static bool IsFileLayer(string mediaType) =>
-            mediaType is ModelLayer or ProjectorLayer or AdapterLayer or DraftLayer;
+            mediaType is ModelLayer or ProjectorLayer or AdapterLayer or DraftLayer or XOllamaMedia.Layer;
 
         /// <summary>
         /// Digests of the blobs <see cref="BuildCreateRequest"/> sends inline: the config and every layer that is not a
@@ -65,7 +68,7 @@ namespace osync
             var draftFiles = new Dictionary<string, string>();
             var request = new Dictionary<string, object> { ["model"] = destModel, ["stream"] = false };
             var licenses = new List<string>();
-            int models = 0, projectors = 0;
+            int models = 0, projectors = 0, mediaLayers = 0;
 
             foreach (var layer in root.GetProperty("layers").EnumerateArray())
             {
@@ -108,14 +111,22 @@ namespace osync
                     case XOllamaLayer:
                         request["xollama"] = JsonOf(readBlob(digest), show, "xollama");
                         break;
+                    case XOllamaMedia.Layer:
+                        // A media component is named by its digest in the xOllama settings (media.<kind>.<role>), which
+                        // the server turns back into this layer: only its blob has to be there
+                        mediaLayers++;
+                        break;
                     default:
                         throw new NotSupportedException($"the model has a {mediaType} layer, which /api/create cannot rebuild");
                 }
             }
 
-            if (files.Count == 0)
+            // A media template (xOllama media engines, no LLM) has no GGUF: its settings carry everything
+            if (files.Count == 0 && mediaLayers == 0)
                 throw new NotSupportedException("the model has no GGUF layers that /api/create can use");
-            request["files"] = files;
+            if (mediaLayers > 0 && !request.ContainsKey("xollama"))
+                throw new NotSupportedException("the model has xOllama media layers but no xOllama settings that name them");
+            if (files.Count > 0) request["files"] = files;
             if (adapters.Count > 0) request["adapters"] = adapters;
             if (draftFiles.Count > 0) request["draft_files"] = draftFiles;
             if (licenses.Count > 0)
@@ -140,6 +151,16 @@ namespace osync
                 var value = config != null ? StringField(config.Value, field) : StringField(show, field);
                 if (!string.IsNullOrEmpty(value)) request[field] = value;
             }
+
+            // CAPABILITY lines (Ollama v0.35.1) are stated capabilities, which the server adds to the ones it infers; only
+            // the modelfile tells them apart (the config lists both). xOllama's media kinds are derived from its settings,
+            // never stated.
+            var capabilities = (ModelfileEntries(StringField(show, "modelfile") ?? "").GetValueOrDefault("CAPABILITY") ?? new List<string>())
+                .Select(c => c.Trim())
+                .Where(c => c.Length > 0 && XOllamaMedia.KindOf(c) is null or "llm" or "embed")
+                .Distinct()
+                .ToList();
+            if (capabilities.Count > 0) request["capabilities"] = capabilities;
 
             return request;
         }
@@ -173,7 +194,7 @@ namespace osync
         }
 
         private static readonly string[] ModelfileKeywords =
-            { "FROM", "ADAPTER", "DRAFT", "TEMPLATE", "SYSTEM", "RENDERER", "PARSER", "REQUIRES", "PARAMETER", "LICENSE", "MESSAGE", "XOLLAMA" };
+            { "FROM", "ADAPTER", "DRAFT", "TEMPLATE", "SYSTEM", "RENDERER", "PARSER", "REQUIRES", "CAPABILITY", "PARAMETER", "LICENSE", "MESSAGE", "XOLLAMA" };
 
         /// <summary>
         /// The instructions of a modelfile from /api/show, grouped by keyword, in order. Comments are dropped, and the

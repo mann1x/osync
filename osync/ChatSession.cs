@@ -893,7 +893,7 @@ namespace osync
                 };
 
                 var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
-                response.EnsureSuccessStatusCode();
+                await XOllamaMedia.EnsureSuccessAsync(response);
 
                 // Consume the response to complete the preload
                 await response.Content.ReadAsStringAsync();
@@ -1059,7 +1059,7 @@ namespace osync
                 };
 
                 var response = await _client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, _cancellationTokenSource.Token);
-                response.EnsureSuccessStatusCode();
+                await XOllamaMedia.EnsureSuccessAsync(response);
 
                 await ProcessStreamingResponseAsync(response);
             }

@@ -57,6 +57,8 @@ namespace osync
         public string Id { get; set; } = string.Empty;
         public long Size { get; set; }
         public DateTime ModifiedAt { get; set; }
+        /// <summary>What the model is (llm, embed, image, stt, tts, video, see <see cref="XOllamaMedia.Kinds"/>); empty when unknown.</summary>
+        public List<string> Kinds { get; set; } = new();
     }
 
     /// <summary>
@@ -78,6 +80,8 @@ namespace osync
         public long size { get; set; }
         public string digest { get; set; } = string.Empty;
         public OllamaModelDetails? details { get; set; }
+        /// <summary>completion, tools, vision, embedding, ... and xOllama's media kinds (speech, image_generation, ...)</summary>
+        public List<string>? capabilities { get; set; }
     }
 
     /// <summary>

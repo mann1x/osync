@@ -933,6 +933,14 @@ Output your judgment:
                         }
                     }
 
+                    // A media model (xOllama image/speech/transcription/video engines, no LLM) answers chat with an error
+                    if (await XOllamaMedia.CannotChatReasonAsync(_httpClient, _baseUrl, modelFullName) is { } mediaOnly)
+                    {
+                        Log($"[yellow]Skipping: {Markup.Escape(mediaOnly)}[/]");
+                        if (pulledOnDemand) await DeleteModelAsync(modelFullName);
+                        continue;
+                    }
+
                     // Get model metadata (pass tagForTracking for fallback quantization extraction)
                     var modelInfo = await GetModelInfoAsync(modelFullName, tagForTracking);
                     if (modelInfo == null)
