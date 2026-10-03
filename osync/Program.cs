@@ -150,7 +150,7 @@ namespace osync
             else if (args.SortByTime) sortMode = "time_desc";
             else if (args.SortByTimeAsc) sortMode = "time_asc";
 
-            ActionList(args.Pattern, args.Destination, sortMode);
+            ActionList(args.Pattern, args.Destination, sortMode, args.Kind);
         }
 
         [ArgActionMethod, ArgDescription("Remove models matching pattern locally or on remote server (aliases: rm, delete, del)"), ArgShortcut("rm"), ArgShortcut("delete"), ArgShortcut("del")]
@@ -221,6 +221,12 @@ namespace osync
             if (!modelName.Contains(':'))
             {
                 modelName += ":latest";
+            }
+
+            if (await XOllamaMedia.CannotChatReasonAsync(client, ollamaHost, modelName) is { } cannotChat)
+            {
+                Out.Error(cannotChat);
+                System.Environment.Exit(1);
             }
 
             try
@@ -329,7 +335,9 @@ namespace osync
                         vramUsage = FormatBytes(model.SizeVram);
                     }
 
-                    var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
+                    // An xOllama media engine (image, speech, transcription, video) has no context
+                    var context = model.ContextLength > 0 ? model.ContextLength.ToString()
+                        : model.Details?.Format == "media" ? "media" : "N/A";
                     var until = FormatUntil(model.ExpiresAt);
 
                     // Partly offloaded to the CPU: warning color; fully in VRAM: success color
@@ -1155,6 +1163,13 @@ namespace osync
                 modelName += ":latest";
             }
 
+            if (await XOllamaMedia.CannotChatReasonAsync(client, ollamaHost, modelName) is { } mediaOnly)
+            {
+                // Its engines start with the first media request (/v1/images, /v1/audio, /v1/videos), not with a prompt
+                Out.Error($"{mediaOnly}; its engines start with its first media request");
+                System.Environment.Exit(1);
+            }
+
             try
             {
                 Out.StatusLine($"Loading model '{modelName}' into memory...");
@@ -1186,7 +1201,8 @@ namespace osync
                 };
 
                 var response = await httpClient.SendAsync(requestMessage);
-                response.EnsureSuccessStatusCode();
+                // The server's own error ("... update the engine", "... pull the model again") says what to do
+                await XOllamaMedia.EnsureSuccessAsync(response);
 
                 // Parse the response to get load_duration
                 var responseContent = await response.Content.ReadAsStringAsync();
@@ -1242,8 +1258,7 @@ namespace osync
                 }
                 else if (ex.StatusCode.HasValue)
                 {
-                    Out.Error($"Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
-                    Console.WriteLine($"Details: {ex.Message}");
+                    Out.Error($"Could not load '{modelName}' (HTTP {(int)ex.StatusCode.Value}): {ex.Message}");
                 }
                 else
                 {
@@ -4210,9 +4225,16 @@ namespace osync
             }
         }
 
-        public void ActionList(string? Pattern, string Destination, string sortMode = "name")
+        public void ActionList(string? Pattern, string Destination, string sortMode = "name", string? kind = null)
         {
             Init();
+
+            kind = string.IsNullOrWhiteSpace(kind) ? null : kind.Trim().ToLowerInvariant();
+            if (kind != null && !XOllamaMedia.Kinds.Contains(kind))
+            {
+                Out.Error($"unknown kind '{kind}': use one of {string.Join(", ", XOllamaMedia.Kinds)}");
+                System.Environment.Exit(1);
+            }
 
             // If pattern looks like a URL or IP address, treat it as destination
             if (!string.IsNullOrEmpty(Pattern) && LooksLikeRemoteServer(Pattern))
@@ -4240,7 +4262,7 @@ namespace osync
                     Out.Error($"ollama models directory not found at: {ollama_models}");
                     System.Environment.Exit(1);
                 }
-                ListLocalModels(Pattern ?? "*", sortMode);
+                ListLocalModels(Pattern ?? "*", sortMode, kind);
             }
             else
             {
@@ -4250,7 +4272,7 @@ namespace osync
                 {
                     System.Environment.Exit(1);
                 }
-                ListRemoteModels(Destination, Pattern ?? "*", sortMode).GetAwaiter().GetResult();
+                ListRemoteModels(Destination, Pattern ?? "*", sortMode, kind).GetAwaiter().GetResult();
             }
         }
 
@@ -4293,7 +4315,7 @@ namespace osync
             return false;
         }
 
-        private void ListLocalModels(string pattern, string sortMode = "name")
+        private void ListLocalModels(string pattern, string sortMode = "name", string? kind = null)
         {
             var models = new List<LocalModelInfo>();
             string manifestsDir = Path.Combine(ollama_models, "manifests");
@@ -4347,6 +4369,7 @@ namespace osync
                                 var fileInfo = new FileInfo(tagFile);
                                 long totalSize = 0;
                                 string modelId = "";
+                                var kinds = new List<string>();
 
                                 try
                                 {
@@ -4354,6 +4377,7 @@ namespace osync
                                     if (manifest?.layers != null)
                                     {
                                         totalSize = manifest.layers.Sum(l => l.size);
+                                        kinds = LocalModelKinds(manifest.layers);
                                     }
 
                                     // Compute SHA256 of manifest file content (same as ollama ls)
@@ -4370,7 +4394,8 @@ namespace osync
                                     Name = fullModelName,
                                     Id = modelId,
                                     Size = totalSize,
-                                    ModifiedAt = fileInfo.LastWriteTime
+                                    ModifiedAt = fileInfo.LastWriteTime,
+                                    Kinds = kinds
                                 });
                             }
                         }
@@ -4378,13 +4403,45 @@ namespace osync
                 }
             }
 
+            if (kind != null)
+                models = models.Where(m => m.Kinds.Contains(kind)).ToList();
             if (models.Count == 0)
             {
-                Console.WriteLine($"No models found matching pattern: {pattern ?? "*"}");
+                Console.WriteLine(kind == null
+                    ? $"No models found matching pattern: {pattern ?? "*"}"
+                    : $"No {kind} models found matching pattern: {pattern ?? "*"}");
                 return;
             }
 
             PrintModelTable(SortModels(models, sortMode));
+        }
+
+        /// <summary>
+        /// What a local model is, from its manifest: an LLM when it has GGUF weights, plus the media kinds its xOllama
+        /// settings state when it carries media layers (read from the settings blob).
+        /// </summary>
+        private List<string> LocalModelKinds(List<Layer> layers)
+        {
+            var kinds = new List<string>();
+            if (layers.Any(l => l.mediaType == ModelRecreate.ModelLayer)) kinds.Add("llm");
+            if (!layers.Any(l => l.mediaType == XOllamaMedia.Layer)) return kinds;
+            var settings = layers.FirstOrDefault(l => l.mediaType == ModelRecreate.XOllamaLayer);
+            var path = settings != null && settings.digest.StartsWith("sha256:")
+                ? Path.Combine(ollama_models, "blobs", "sha256-" + settings.digest[7..])
+                : null;
+            try
+            {
+                if (path != null && System.IO.File.Exists(path))
+                {
+                    using var doc = JsonDocument.Parse(System.IO.File.ReadAllBytes(path));
+                    kinds.AddRange(XOllamaMedia.KindsOfSettings(doc.RootElement));
+                }
+            }
+            catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
+            {
+                // the kinds stay unknown; the model still lists
+            }
+            return XOllamaMedia.Kinds.Where(kinds.Contains).ToList();
         }
 
         private List<LocalModelInfo> SortModels(List<LocalModelInfo> models, string sortMode)
@@ -4399,7 +4456,7 @@ namespace osync
             };
         }
 
-        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name")
+        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name", string? kind = null)
         {
             try
             {
@@ -4427,13 +4484,17 @@ namespace osync
                         Name = m.name,
                         Id = m.digest?.StartsWith("sha256:") == true ? m.digest.Substring(7, 12) : m.digest?.Substring(0, Math.Min(12, m.digest.Length)) ?? "",
                         Size = m.size,
-                        ModifiedAt = m.modified_at
+                        ModifiedAt = m.modified_at,
+                        Kinds = RemoteModelKinds(m)
                     })
+                    .Where(m => kind == null || m.Kinds.Contains(kind))
                     .ToList();
 
                 if (filteredModels.Count == 0)
                 {
-                    Console.WriteLine($"No models found matching pattern: {pattern ?? "*"}");
+                    Console.WriteLine(kind == null
+                        ? $"No models found matching pattern: {pattern ?? "*"}"
+                        : $"No {kind} models found matching pattern: {pattern ?? "*"}");
                     return;
                 }
 
@@ -4446,13 +4507,25 @@ namespace osync
             }
         }
 
+        /// <summary>
+        /// What a model of /api/tags is: from its capabilities when the server lists them, otherwise an LLM when it has
+        /// a model format (a server that predates capabilities in /api/tags).
+        /// </summary>
+        internal static List<string> RemoteModelKinds(OllamaModel model) =>
+            model.capabilities is { Count: > 0 } capabilities
+                ? XOllamaMedia.KindsOf(capabilities)
+                : string.IsNullOrEmpty(model.details?.format) ? new List<string>() : new List<string> { "llm" };
+
         private void PrintModelTable(List<LocalModelInfo> models)
         {
             int nameWidth = Math.Max(50, models.Max(m => m.Name.Length) + 2);
             int idWidth = 16;
             int sizeWidth = 10;
+            // The KIND column appears only when a listed model has media engines, so plain lists keep their layout
+            bool showKinds = models.Any(m => m.Kinds.Any(XOllamaMedia.IsMediaKind));
+            int kindWidth = showKinds ? Math.Max(6, models.Max(m => string.Join(",", m.Kinds).Length) + 2) : 0;
 
-            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}MODIFIED"));
+            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}{(showKinds ? "KIND".PadRight(kindWidth) : "")}MODIFIED"));
 
             foreach (var model in models)
             {
@@ -4463,6 +4536,7 @@ namespace osync
                     Out.Paint(model.Name.PadRight(nameWidth), p => p.Text) +
                     Out.Paint(model.Id.PadRight(idWidth), p => p.Id) +
                     Out.Paint(sizeStr.PadRight(sizeWidth), p => p.Size) +
+                    (showKinds ? Out.Paint(string.Join(",", model.Kinds).PadRight(kindWidth), p => p.Text) : "") +
                     Out.Muted(timeAgo));
             }
         }
@@ -5483,6 +5557,15 @@ namespace osync
 
                 if (root.TryGetProperty("capabilities", out var caps) && caps.ValueKind == JsonValueKind.Array)
                     PrintShowSection("Capabilities", caps.EnumerateArray().Select(c => (c.GetString() ?? "", "")));
+
+                // xOllama's own settings, media engines included (schema v7 media.* rows), as `xollama show` lists them
+                if (root.TryGetProperty("xollama", out var xollama) && xollama.ValueKind == JsonValueKind.Object)
+                    PrintShowSection("xOllama", XOllamaTweak.Flatten(xollama).Select(r =>
+                    {
+                        // long values (council prompts) shortened unless --verbose
+                        var value = r.Value.ReplaceLineEndings(" ");
+                        return (r.Path, !verbose && value.Length > 80 ? value[..77] + "..." : value);
+                    }));
 
                 if (root.TryGetProperty("projector_info", out var projector) && projector.ValueKind == JsonValueKind.Object)
                 {

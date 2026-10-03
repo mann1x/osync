@@ -131,6 +131,26 @@ public class XOllamaTweakTests
     }
 
     [Fact]
+    public void Flatten_SchemaV7Media_VoicesAsOneSortedRow()
+    {
+        using var doc = JsonDocument.Parse("""
+            {"version":7,"media":{"tts":{"engine":"outetts","model":"sha256:aa",
+             "voices":{"narrator":"sha256:n1","host":"sha256:h1"},"voice_map":{"nova":"af_bella","alloy":"af_heart"},
+             "defaults":{"voice":"host","speed":1.25},"fixed":["voice"]}}}
+            """);
+        XOllamaTweak.Flatten(doc.RootElement).Should().Equal(
+            ("media.tts.engine", "outetts"), ("media.tts.model", "sha256:aa"),
+            ("media.tts.voices", "host=sha256:h1,narrator=sha256:n1"),
+            ("media.tts.voice_map", "alloy=af_heart,nova=af_bella"),
+            ("media.tts.defaults.voice", "host"), ("media.tts.defaults.speed", "1.25"),
+            ("media.tts.fixed", "voice"));
+    }
+
+    [Fact]
+    public void Scopes_OfferTheMediaEngines() =>
+        XOllamaTweak.Scopes.Select(s => s.Flags).Should().Contain("--image --stt --tts --video");
+
+    [Fact]
     public void ApiKey_EnvironmentFirst_ThenTheKeyFile()
     {
         var file = Path.GetTempFileName();

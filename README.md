@@ -273,7 +273,12 @@ osync ls --time
 
 # Sort by modified time (oldest first)
 osync ls --timeasc
+
+# Only models of one kind: llm, embed, image, stt, tts, video (xOllama media engines)
+osync ls --kind tts -d xollama
 ```
+
+On an xOllama server with media models (image generation, speech, transcription, video), a KIND column shows what each model is; a media model without an LLM (`mannix/outetts:0.3`, `mannix/flux2-klein:4b`, ...) is listed with its media kinds. Locally osync tells LLMs and media kinds apart from the manifest (embedding models count as `llm` there); a remote server reports every model's capabilities.
 
 **Output:**
 ```
@@ -1498,6 +1503,9 @@ osync mv qwen2 qwen2-7b:dev
 v1.4.3
 
 **New**
+- **xOllama media models** (image generation and editing, speech, transcription, video; xOllama settings schema v7): `osync ls` shows a KIND column when a model has media engines and filters with `--kind llm|embed|image|stt|tts|video`; `osync show` lists a remote model's xOllama settings, media engines included (a speech model's extra voices and voice map as `name=value` pairs); `osync ps` and `monitor` show a media engine's context as `media`; `manage` Ctrl+W offers the media engines (`--image --stt --tts --video`). A media model without an LLM is refused by `run` and `load` with the reason (its engines start with its first media request) and skipped by `bench` and `qc`. Copies keep the media components (`application/vnd.xollama.media` layers), also when the model is recreated on the destination
+- **Load and chat errors from the server are shown as the server words them** ("the opencoti engine does not offer ..., update the engine", "media component ... is missing from the store; pull the model again") instead of an HTTP status
+- **Copies keep `CAPABILITY` lines** (Ollama v0.35.1 Modelfiles) when the model is recreated on the destination, and the copy check compares them; `decision` counts as an LLM capability
 - **`manage` tweak follows xOllama's new settings**: Ctrl+W adds the engine policies (KV residency, rolling window, fit, VRAM target, MTP policy), the drafter's speculative type, and "show what the model runs with" (`xollama tweak show model`: each setting marked as the model's own or the server's default). For a server on this machine it also offers the server's own settings: defaults for every model and the API key (`tweak server`), the GPUs (`tweak server gpu`), environment variables kept by the server (`tweak envs`) and `tweak show server`, and the dialog lists the server's defaults next to the model's settings. xOllama accepts those changes only from its own machine, so they are not offered for a remote server. Needs an xOllama with `tweak server` (after v0.34.4-xollama.2); an older one reports the unknown command
 
 **Fixes**

@@ -53,6 +53,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `ShellOutput.cs` - `Out`: colored command output (errors, warnings, results, tables) in the shell theme
 - `SetupCommand.cs` - `osync setup` (server, alias, manage, shell); `ServerSetup.cs` - server questions of install/setup
 - `ServerAliases.cs` - server aliases from the settings file (`gpu` → `http://…:11434`)
+- `XOllamaMedia.cs` - xOllama media models (image, speech, transcription, video engines): kinds from capabilities or the settings' `media` block, media-only detection (no chat/bench/qc), verbatim server errors
 - `XOllamaTweak.cs` - xOllama settings: reads the `xollama` field of `/api/show` and the server defaults of `/api/xollama/settings`, runs `xollama tweak model/server/envs/show` (manage Ctrl+W; server settings only for a server on this machine)
 - `ColorSupport.cs` - terminal color depth detection; `OsyncSettings.cs` - preferences file
 - `QcCommand.cs` - Quantization comparison implementation

@@ -35,6 +35,8 @@ namespace osync
             new("Engine policies: KV residency, rolling window, fit, VRAM target, MTP", "model",
                 "--kv-residency --kv-rolling-window --fit --vram-target --mtp-policy"),
             new("Drafter's speculative type (--spec-type)", "model", "--spec-type"),
+            new("Media engines: image, speech-to-text, text-to-speech, video (--image --stt --tts --video)", "model",
+                "--image --stt --tts --video"),
             new("Show what the model runs with, its own or the server's (tweak show model)", "show model"),
             new("Remove the xOllama settings (--clear)", "model", "--clear")
         };
@@ -191,6 +193,15 @@ namespace osync
             return rows;
         }
 
+        /// <summary>
+        /// Settings that are name-to-value maps rather than groups of settings: one row, "name=value" pairs sorted by
+        /// name, as `xollama show` prints them (the extra voices of a speech engine, its client-to-model voice names).
+        /// </summary>
+        private static readonly HashSet<string> MapSettings = new(StringComparer.Ordinal)
+        {
+            "media.tts.voices", "media.tts.voice_map"
+        };
+
         private static void Flatten(JsonElement element, string prefix, List<(string, string)> rows)
         {
             foreach (var property in element.EnumerateObject())
@@ -200,6 +211,14 @@ namespace osync
                 var value = property.Value;
                 switch (value.ValueKind)
                 {
+                    case JsonValueKind.Object when MapSettings.Contains(path):
+                        var pairs = value.EnumerateObject()
+                            .Where(p => p.Value.ValueKind != JsonValueKind.Null)
+                            .Select(p => $"{p.Name}={Scalar(p.Value)}")
+                            .Order(StringComparer.Ordinal)
+                            .ToList();
+                        if (pairs.Count > 0) rows.Add((path, string.Join(",", pairs)));
+                        break;
                     case JsonValueKind.Object:
                         Flatten(value, path, rows);
                         break;
