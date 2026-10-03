@@ -151,6 +151,14 @@ public class XOllamaTweakTests
         XOllamaTweak.Scopes.Select(s => s.Flags).Should().Contain("--image --stt --tts --video");
 
     [Fact]
+    public void VoiceScope_SetsTheDefaultVoice()
+    {
+        XOllamaTweak.Scopes.Should().NotContain(XOllamaTweak.VoiceScope, "it is offered only for one speech model");
+        XOllamaTweak.Arguments("mannix/outetts:0.3", "", "--tts-voice=narrator")
+            .Should().Equal("tweak", "model", "mannix/outetts:0.3", "--tts-voice=narrator");
+    }
+
+    [Fact]
     public void ApiKey_EnvironmentFirst_ThenTheKeyFile()
     {
         var file = Path.GetTempFileName();

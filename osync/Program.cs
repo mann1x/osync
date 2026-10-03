@@ -4420,7 +4420,7 @@ namespace osync
         /// What a local model is, from its manifest: an LLM when it has GGUF weights, plus the media kinds its xOllama
         /// settings state when it carries media layers (read from the settings blob).
         /// </summary>
-        private List<string> LocalModelKinds(List<Layer> layers)
+        internal List<string> LocalModelKinds(List<Layer> layers)
         {
             var kinds = new List<string>();
             if (layers.Any(l => l.mediaType == ModelRecreate.ModelLayer)) kinds.Add("llm");

@@ -80,4 +80,44 @@ public class XOllamaMediaTests
             .Should().Equal("llm");
         OsyncProgram.RemoteModelKinds(new OllamaModel()).Should().BeEmpty();
     }
+
+    [Fact]
+    public void ParseVoices_ReadsIdsAliasesAndTheDefault()
+    {
+        var voices = XOllamaMedia.ParseVoices(Json("""
+            {"model":"mannix/outetts:0.3","default":"en-female-1",
+             "voices":[{"id":"en-female-1","aliases":["alloy","nova"]},{"id":"narrator"},{"aliases":["x"]},{"id":""}],
+             "voice_map":{"alloy":"en-female-1","nova":"en-female-1"},"response_formats":["mp3","wav"],"sample_rate":24000}
+            """));
+
+        voices.Default.Should().Be("en-female-1");
+        voices.Voices.Select(v => v.Id).Should().Equal("en-female-1", "narrator");
+        voices.Voices[0].Aliases.Should().Equal("alloy", "nova");
+        voices.Voices[1].Aliases.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ParseVoices_ToleratesAnAnswerWithoutVoices()
+    {
+        var voices = XOllamaMedia.ParseVoices(Json("""{"model":"m"}"""));
+        voices.Default.Should().BeEmpty();
+        voices.Voices.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void VoiceLabel_ShowsAliasesAndMarksTheDefault()
+    {
+        XOllamaMedia.VoiceLabel(new XOllamaMedia.Voice("af_heart", new[] { "alloy" }), "af_heart")
+            .Should().Be("af_heart (alloy) - default");
+        XOllamaMedia.VoiceLabel(new XOllamaMedia.Voice("narrator", Array.Empty<string>()), "af_heart")
+            .Should().Be("narrator");
+    }
+
+    [Fact]
+    public void CannotChatReason_FromKinds()
+    {
+        XOllamaMedia.CannotChatReason("m", new[] { "tts" }).Should().Contain("media model (tts)");
+        XOllamaMedia.CannotChatReason("m", new[] { "llm", "tts" }).Should().BeNull();
+        XOllamaMedia.CannotChatReason("m", Array.Empty<string>()).Should().BeNull();
+    }
 }
