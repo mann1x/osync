@@ -139,6 +139,6 @@ Feature: Manage (full-screen TUI)
   Scenario: Ctrl+W removes the xOllama settings of the model after confirming
     Given a test model "alpha" on local
     And the model "alpha" on local has the xOllama settings '{"kv":{"v":"q8_0"}}'
-    When I open manage in a terminal and press "text:{prefix} Ctrl+W Down*11 Enter Tab Enter wait:view... Space wait:Sorting Ctrl+Q"
+    When I open manage in a terminal and press "text:{prefix} Ctrl+W Down*12 Enter Tab Enter wait:view... Space wait:Sorting Ctrl+Q"
     Then the command succeeds
     And the model "{alpha}" on local has no xOllama settings
