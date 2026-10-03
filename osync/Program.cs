@@ -4582,12 +4582,9 @@ namespace osync
 
             if (localRemove)
             {
-                if (!Directory.Exists(ollama_models))
-                {
-                    Out.Error($"ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
-                }
-                return RemoveLocalModels(Pattern);
+                // Through the server's API like a remote removal: scanning the models directory and running
+                // the ollama/xollama CLI failed whenever either was not where osync expected it
+                return RemoveRemoteModels(Pattern, OllamaServer.LocalUrl, remote: false).GetAwaiter().GetResult();
             }
             else
             {
@@ -4601,165 +4598,13 @@ namespace osync
             }
         }
 
-        private bool RemoveLocalModels(string pattern)
-        {
-            var modelsToRemove = new List<string>();
-            string manifestsDir = Path.Combine(ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
-            {
-                Out.Error($"No local models found.");
-                return false;
-            }
-
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-            {
-                string host = Path.GetFileName(hostDir);
-
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
-                {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                    {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            if (MatchesPattern(fullModelName, pattern))
-                            {
-                                modelsToRemove.Add(fullModelName);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (modelsToRemove.Count == 0)
-            {
-                // If no models found, pattern has no wildcards, and no tag specified, try with :latest
-                if (!pattern.Contains("*") && !pattern.Contains(":"))
-                {
-                    string latestPattern = $"{pattern}:latest";
-
-                    // Retry scan with :latest pattern
-                    foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-                    {
-                        string host = Path.GetFileName(hostDir);
-                        foreach (string namespaceDir in Directory.GetDirectories(hostDir))
-                        {
-                            string ns = Path.GetFileName(namespaceDir);
-                            foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                            {
-                                string model = Path.GetFileName(modelDir);
-                                foreach (string tagFile in Directory.GetFiles(modelDir))
-                                {
-                                    string tag = Path.GetFileName(tagFile);
-                                    string fullModelName;
-                                    if (host == "registry.ollama.ai" && ns == "library")
-                                    {
-                                        fullModelName = $"{model}:{tag}";
-                                    }
-                                    else if (host == "registry.ollama.ai")
-                                    {
-                                        fullModelName = $"{ns}/{model}:{tag}";
-                                    }
-                                    else
-                                    {
-                                        fullModelName = $"{host}/{ns}/{model}:{tag}";
-                                    }
-
-                                    if (MatchesPattern(fullModelName, latestPattern))
-                                    {
-                                        modelsToRemove.Add(fullModelName);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (modelsToRemove.Count == 0)
-                    {
-                        Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
-                        return false;
-                    }
-                }
-                else
-                {
-                    Out.Error($"No models found matching pattern: {pattern}");
-                    return false;
-                }
-            }
-
-            Console.WriteLine($"Removing {modelsToRemove.Count} model(s)...");
-            int failures = 0;
-
-            foreach (var modelName in modelsToRemove)
-            {
-                try
-                {
-                    // Use ollama rm command to properly remove the model
-                    var p = new Process();
-                    p.StartInfo.FileName = OllamaServer.CliName;
-                    OllamaServer.ApplyCliEnvironment(p.StartInfo);
-                    p.StartInfo.Arguments = $"rm {modelName}";
-                    p.StartInfo.CreateNoWindow = true;
-                    p.StartInfo.UseShellExecute = false;
-                    p.StartInfo.RedirectStandardOutput = true;
-                    p.StartInfo.RedirectStandardError = true;
-
-                    p.Start();
-                    // Read and discard stdout/stderr to prevent ANSI codes leaking to console
-                    p.StandardOutput.ReadToEnd();
-                    string error = p.StandardError.ReadToEnd();
-                    p.WaitForExit();
-
-                    if (p.ExitCode == 0)
-                    {
-                        System.Console.WriteLine($"{Out.Paint("deleted", p => p.Success, bold: true)} '{Out.Paint(modelName, p => p.Text, bold: true)}'");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"failed to delete '{modelName}': {error}");
-                        failures++;
-                    }
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"Error deleting '{modelName}': {e.Message}");
-                    failures++;
-                }
-            }
-
-            return failures == 0;
-        }
-
-        private async Task<bool> RemoveRemoteModels(string pattern, string destination)
+        private async Task<bool> RemoveRemoteModels(string pattern, string destination, bool remote = true)
         {
             // Create dedicated HttpClient with BaseAddress
             using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             remoteClient.BaseAddress = new Uri(destination);
+            // Name the local server in errors: osync may resolve a different one than the user expects (Ollama and xOllama side by side)
+            string onServer = remote ? "" : $" on {destination}";
 
             try
             {
@@ -4768,7 +4613,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from {(remote ? "remote" : "local")} server (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4777,7 +4622,7 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Out.Error($"No models found on remote server.");
+                    Out.Error(remote ? "No models found on remote server." : $"No models found matching pattern: {pattern}{onServer}");
                     return false;
                 }
 
@@ -4799,18 +4644,18 @@ namespace osync
 
                         if (modelsToRemove.Count == 0)
                         {
-                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
+                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}'){onServer}");
                             return false;
                         }
                     }
                     else
                     {
-                        Out.Error($"No models found matching pattern: {pattern}");
+                        Out.Error($"No models found matching pattern: {pattern}{onServer}");
                         return false;
                     }
                 }
 
-                Console.WriteLine($"Removing {modelsToRemove.Count} model(s) from remote server...");
+                Console.WriteLine(remote ? $"Removing {modelsToRemove.Count} model(s) from remote server..." : $"Removing {modelsToRemove.Count} model(s) from {destination}...");
                 int failures = 0;
 
                 foreach (var modelName in modelsToRemove)
@@ -4852,7 +4697,7 @@ namespace osync
             }
             catch (Exception e)
             {
-                Out.Error($"failed to remove remote models: {e.Message}");
+                Out.Error($"failed to remove {(remote ? "remote" : "local")} models: {e.Message}");
                 System.Environment.Exit(1);
                 return false;
             }
