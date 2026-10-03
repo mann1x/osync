@@ -1604,7 +1604,7 @@ namespace osync
 
                 var deleteMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
                 {
-                    Content = new StringContent(JsonSerializer.Serialize(new { name = model.Name }), Encoding.UTF8, "application/json")
+                    Content = new StringContent(JsonSerializer.Serialize(new { model = model.Name }), Encoding.UTF8, "application/json")
                 };
                 response = httpClient.SendAsync(deleteMessage).Result;
                 response.EnsureSuccessStatusCode();
@@ -1779,7 +1779,7 @@ namespace osync
                     {
                         var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
                         {
-                            Content = new StringContent(JsonSerializer.Serialize(new { name = model.Name }), Encoding.UTF8, "application/json")
+                            Content = new StringContent(JsonSerializer.Serialize(new { model = model.Name }), Encoding.UTF8, "application/json")
                         };
                         var response = httpClient.SendAsync(requestMessage).Result;
                         response.EnsureSuccessStatusCode();
