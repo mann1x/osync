@@ -4257,12 +4257,9 @@ namespace osync
 
             if (localList)
             {
-                if (!Directory.Exists(ollama_models))
-                {
-                    Out.Error($"ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
-                }
-                ListLocalModels(Pattern ?? "*", sortMode, kind);
+                // From the server like rm: the models directory osync guesses may belong to another server
+                // (Ollama and xOllama side by side), so ls listed models rm could not find
+                ListRemoteModels(OllamaServer.LocalUrl, Pattern ?? "*", sortMode, kind, remote: false).GetAwaiter().GetResult();
             }
             else
             {
@@ -4315,107 +4312,6 @@ namespace osync
             return false;
         }
 
-        private void ListLocalModels(string pattern, string sortMode = "name", string? kind = null)
-        {
-            var models = new List<LocalModelInfo>();
-            string manifestsDir = Path.Combine(ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
-            {
-                Console.WriteLine($"No local models found.");
-                return;
-            }
-
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-            {
-                string host = Path.GetFileName(hostDir);
-
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
-                {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                    {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                // Official library models: just "model:tag"
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                // User namespace models: "namespace/model:tag"
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                // Other registries: "host/namespace/model:tag"
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            if (MatchesPattern(fullModelName, pattern))
-                            {
-                                var fileInfo = new FileInfo(tagFile);
-                                long totalSize = 0;
-                                string modelId = "";
-                                var kinds = new List<string>();
-
-                                try
-                                {
-                                    RootManifest? manifest = ManifestReader.Read<RootManifest>(tagFile);
-                                    if (manifest?.layers != null)
-                                    {
-                                        totalSize = manifest.layers.Sum(l => l.size);
-                                        kinds = LocalModelKinds(manifest.layers);
-                                    }
-
-                                    // Compute SHA256 of manifest file content (same as ollama ls)
-                                    var manifestBytes = System.IO.File.ReadAllBytes(tagFile);
-                                    using var sha256 = System.Security.Cryptography.SHA256.Create();
-                                    var hashBytes = sha256.ComputeHash(manifestBytes);
-                                    var fullDigest = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
-                                    modelId = fullDigest.Substring(0, 12);
-                                }
-                                catch { }
-
-                                models.Add(new LocalModelInfo
-                                {
-                                    Name = fullModelName,
-                                    Id = modelId,
-                                    Size = totalSize,
-                                    ModifiedAt = fileInfo.LastWriteTime,
-                                    Kinds = kinds
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (kind != null)
-                models = models.Where(m => m.Kinds.Contains(kind)).ToList();
-            if (models.Count == 0)
-            {
-                Console.WriteLine(kind == null
-                    ? $"No models found matching pattern: {pattern ?? "*"}"
-                    : $"No {kind} models found matching pattern: {pattern ?? "*"}");
-                return;
-            }
-
-            PrintModelTable(SortModels(models, sortMode));
-        }
-
         /// <summary>
         /// What a local model is, from its manifest: an LLM when it has GGUF weights, plus the media kinds its xOllama
         /// settings state when it carries media layers (read from the settings blob).
@@ -4456,15 +4352,16 @@ namespace osync
             };
         }
 
-        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name", string? kind = null)
+        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name", string? kind = null, bool remote = true)
         {
+            string onServer = remote ? "" : $" on {serverUrl}";
             try
             {
                 HttpResponseMessage response = await client.GetAsync($"{serverUrl.TrimEnd('/')}/api/tags");
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from {(remote ? "remote" : "local")} server{onServer} (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4473,7 +4370,7 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Console.WriteLine("No models found on remote server.");
+                    Console.WriteLine(remote ? "No models found on remote server." : $"No local models found{onServer}.");
                     return;
                 }
 
@@ -4493,8 +4390,8 @@ namespace osync
                 if (filteredModels.Count == 0)
                 {
                     Console.WriteLine(kind == null
-                        ? $"No models found matching pattern: {pattern ?? "*"}"
-                        : $"No {kind} models found matching pattern: {pattern ?? "*"}");
+                        ? $"No models found matching pattern: {pattern ?? "*"}{onServer}"
+                        : $"No {kind} models found matching pattern: {pattern ?? "*"}{onServer}");
                     return;
                 }
 
@@ -4502,7 +4399,7 @@ namespace osync
             }
             catch (Exception e)
             {
-                Out.Error($"failed to list remote models: {e.Message}");
+                Out.Error($"failed to list {(remote ? "remote" : "local")} models{onServer}: {e.Message}");
                 System.Environment.Exit(1);
             }
         }
