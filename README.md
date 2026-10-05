@@ -238,6 +238,8 @@ Requirements and options:
 - The source server must be able to connect to the machine running osync (and the destination should too, to install the manifest; otherwise osync recreates the model from its files). The relay listens on a free port chosen by the OS (above 1024), or on `OSYNC_RELAY_PORT`; open your firewall accordingly. A Windows destination cannot store a model named after the relay's `host:port`, so the model is recreated there from its manifest (byte for byte); a Windows source needs the relay on port 80, which osync then uses for that copy if it is free.
 - `OSYNC_RELAY_HOST` - address the servers should use to reach osync (default: the local address that routes to the source server), e.g. behind NAT
 - `OSYNC_RELAY_PORT` - fixed relay port (e.g. one opened in the firewall)
+- The relay listens only on the address it advertises (all interfaces when `OSYNC_RELAY_HOST` is set), answers only the source and destination servers, accepts only the model being copied (a random name), and lives only for the copy
+- `OSYNC_RELAY_ALLOW_ANY=1` - accept connections from any address (when a server reaches osync through NAT, a proxy or a container network, so its connections come from another address)
 - `OSYNC_RELAY_INSTALL=create` - skip installing the manifest from the relay and recreate the model with `/api/create` (for destinations that cannot connect to osync)
 - If the source server cannot reach the relay, osync falls back to downloading the blobs from registry.ollama.ai, which only works for models pulled from the Ollama registry.
 
@@ -271,7 +273,12 @@ osync ls --time
 
 # Sort by modified time (oldest first)
 osync ls --timeasc
+
+# Only models of one kind: llm, embed, image, stt, tts, video (xOllama media engines)
+osync ls --kind tts -d xollama
 ```
+
+On an xOllama server with media models (image generation, speech, transcription, video), a KIND column shows what each model is; a media model without an LLM (`mannix/outetts:0.3`, `mannix/flux2-klein:4b`, ...) is listed with its media kinds. Locally osync tells LLMs and media kinds apart from the manifest (embedding models count as `llm` there); a remote server reports every model's capabilities.
 
 **Output:**
 ```
@@ -1266,9 +1273,13 @@ osync manage myserver/                    # trailing slash
 - **Ctrl+W** - Tweak (xOllama servers): change the model's xOllama settings (see below)
 - **Ctrl+Q** - Quit
 
-**Tweak (xOllama):** xOllama keeps settings of its own in the model: engine, KV cache types, dynamic slots, DCA, session affinity and prefix pooling, council, GPU/devices, speculative decoding. They are listed in the model details (Enter), and on an xOllama server **Ctrl+W** changes them for the model under the cursor, or for each selected model. Pick what to change (every setting, or one group such as KV cache or council), or remove the settings. You can also type flags: a flag with a value is set without questions, e.g. `--kv-k=q8_0 --kv-v=q8_0` or `--council=on`.
+**Tweak (xOllama):** xOllama keeps settings of its own in the model: engine, KV cache types, dynamic slots, DCA, session affinity and prefix pooling, council, GPU/devices, speculative decoding. They are listed in the model details (Enter), and on an xOllama server **Ctrl+W** changes them for the model under the cursor, or for each selected model. Pick what to change (every setting, or one group such as KV cache, council, the engine policies or the media engines), show what the model runs with (its own settings and the server's defaults), or remove the settings. You can also type flags: a flag with a value is set without questions, e.g. `--kv-k=q8_0 --kv-v=q8_0` or `--council=on`.
 
-osync runs `xollama tweak model <model>` on the console against the server manage shows, including a remote one. The questions, the explanations and the consistency checks are xOllama's own, and so is the list of settings, so it always matches the xOllama version. This needs the `xollama` CLI on this machine: on PATH, or set `OSYNC_XOLLAMA_CLI` to its path. Only the xOllama settings layer changes: weights, template, system prompt and parameters stay as they are. See [xOllama's tweak documentation](https://github.com/mann1x/xollama/blob/main/docs/xollama/tweak.mdx).
+For one speech model (KIND `tts`), Ctrl+W also offers a voice picker: osync asks the server for the model's voices (this starts its speech engine), lists them with the client names mapped to each one, and sets the chosen one as the model's default voice (`--tts-voice`). A media model without an LLM shows `media` as its quant and cannot be run or loaded: its engines start with its first media request.
+
+When the server runs on this machine, Ctrl+W also offers the server's own settings: defaults for every model's settings (a model that states a setting keeps it), the local API key, the GPUs (which ones, their priority, backend, link speed and split) and the environment variables the server keeps in its own settings file; the dialog lists the server's defaults. xOllama takes these only from its own machine, so they are not offered for a remote server.
+
+osync runs `xollama tweak model <model>` (or `tweak server`, `tweak envs`, `tweak show ...`) on the console against the server manage shows, including a remote one. The questions, the explanations and the consistency checks are xOllama's own, and so is the list of settings, so it always matches the xOllama version. This needs the `xollama` CLI on this machine: on PATH, or set `OSYNC_XOLLAMA_CLI` to its path. Only the xOllama settings layer changes: weights, template, system prompt and parameters stay as they are. See [xOllama's tweak documentation](https://github.com/mann1x/xollama/blob/main/docs/xollama/tweak.mdx).
 
 **Sort Modes:**
 - Name+ (ascending), Name- (descending)
@@ -1490,6 +1501,25 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.3
+
+**New**
+- **xOllama media models** (image generation and editing, speech, transcription, video; xOllama settings schema v7): `osync ls` shows a KIND column when a model has media engines and filters with `--kind llm|embed|image|stt|tts|video`; `osync show` lists a remote model's xOllama settings, media engines included (a speech model's extra voices and voice map as `name=value` pairs); `osync ps` and `monitor` show a media engine's context as `media`; `manage` shows the same KIND column (a media model's quant reads `media`), and Ctrl+W offers the media engines (`--image --stt --tts --video`) and, for a speech model, a voice picker that lists the model's voices (`/api/xollama/media/voices`) and sets the default one (`--tts-voice`). A media model without an LLM is refused by `run` and `load` (also in `manage`) with the reason (its engines start with its first media request) and skipped by `bench` and `qc`. Copies keep the media components (`application/vnd.xollama.media` layers), also when the model is recreated on the destination
+- **Load and chat errors from the server are shown as the server words them** ("the opencoti engine does not offer ..., update the engine", "media component ... is missing from the store; pull the model again") instead of an HTTP status
+- **Copies keep `CAPABILITY` lines** (Ollama v0.35.1 Modelfiles) when the model is recreated on the destination, and the copy check compares them; `decision` counts as an LLM capability
+- **`manage` tweak follows xOllama's new settings**: Ctrl+W adds the engine policies (KV residency, rolling window, fit, VRAM target, MTP policy), the drafter's speculative type, and "show what the model runs with" (`xollama tweak show model`: each setting marked as the model's own or the server's default). For a server on this machine it also offers the server's own settings: defaults for every model and the API key (`tweak server`), the GPUs (`tweak server gpu`), environment variables kept by the server (`tweak envs`) and `tweak show server`, and the dialog lists the server's defaults next to the model's settings. xOllama accepts those changes only from its own machine, so they are not offered for a remote server. Needs an xOllama with `tweak server` (after v0.34.4-xollama.2); an older one reports the unknown command
+
+**Fixes**
+- **The copy relay can no longer be used to reach the destination server's API**: a crafted digest (`../pull`) made osync forward a request to any `/api/*` endpoint of the destination (pull, create, copy, push), which in a remote-to-local copy exposed a local server that listens only on localhost. Digests must now be `sha256:` and 64 hex digits
+- **The relay answers only the source and destination servers** (`OSYNC_RELAY_ALLOW_ANY=1` lifts this), listens only on the address it advertises instead of every interface, and uses a longer random name. A refused connection is named in the error when the push fails
+- **The relay keeps the first manifest it receives**: a different manifest is refused, so the model being copied cannot be swapped before the destination installs it. Manifests are limited to 4 MiB, uploads and connections are capped, and a connection that sends no request is closed after 30 seconds
+- **Warning for a cloud API key on the command line** (`@provider:token/model` in `--judge`/`--judgebest`): it stays in the shell history and the process list; the environment variables are safer. Keys were never written to logs or result files
+- **`osync rm` removes local models again when osync cannot see the server's models directory**: local removal scanned the models directory and ran the `ollama`/`xollama` CLI for each model, so it failed with "No models found" or "models directory not found" whenever `OLLAMA_MODELS` was not set for osync (Ollama running as a service, a user install on Linux, macOS, an xOllama with its own store) or the CLI was not on PATH, while `ls` and `manage` still showed the models. It now asks the local server through its API (`/api/tags`, `/api/delete`), like a remote removal. `manage` sends `model` instead of the deprecated `name` when deleting
+- **`osync ls` lists the local server's models, not files on disk**: it read the models directory osync guessed (`OLLAMA_MODELS`/`XOLLAMA_MODELS`, else `/usr/share/ollama/.ollama/models` on Linux), which can belong to another server than the one osync uses (Ollama and xOllama side by side), so `ls` showed models that `rm` then could not find and ignored `XOLLAMA_HOST`/`OLLAMA_HOST`. It now asks the local server (`/api/tags`), like `rm` and `manage`; when nothing matches, the message names the server
+- **`manage` tweak: flag values with spaces reach xOllama intact**: typed flags were joined into one command line, so `--council-instructions="be brief"` or a quoted `@C:\my dir\file` was split apart. Each flag is now passed as its own argument, quotes keep a value together, and an unclosed quote is refused in the dialog
+- **`manage` tweak lists the server's defaults when the server has an API key**: osync now sends the key the xollama CLI uses (`XOLLAMA_API_KEY`, else `~/.ollama/xollama-api-key`); before, the defaults were silently missing
+- **`manage` tweak refuses flags for the "show" options**: `xollama tweak show` takes none and failed with "unknown flag"
 
 v1.4.2
 

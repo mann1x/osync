@@ -1230,7 +1230,7 @@ public class PsMonitorUI
                     sizeStr = $"[green]{FormatBytes(model.Size)}[/]";
                 }
 
-                var ctx = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
+                var ctx = model.ContextLength > 0 ? model.ContextLength.ToString() : model.Details?.Format == "media" ? "media" : "N/A";
                 var until = FormatUntil(model.ExpiresAt);
 
                 modelTable.AddRow(

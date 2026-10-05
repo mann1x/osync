@@ -35,6 +35,9 @@ namespace osync
 
         [ArgDescription("Sort by creation time, oldest first"), ArgShortcut("--timeasc")]
         public bool SortByTimeAsc { get; set; }
+
+        [ArgDescription("Only models of this kind: llm, embed, image, stt, tts, video (xOllama media engines)"), ArgShortcut("--kind")]
+        public string Kind { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]

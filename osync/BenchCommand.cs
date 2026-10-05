@@ -1062,6 +1062,13 @@ Always respond in valid JSON format: {""Answer"": ""YES"" or ""NO"", ""Reason"":
                 return;
             }
 
+            // A media model (xOllama image/speech/transcription/video engines, no LLM) answers chat with an error
+            if (await XOllamaMedia.CannotChatReasonAsync(_httpClient, _baseUrl, quantTag) is { } mediaOnly)
+            {
+                Log($"[yellow]Skipping: {Markup.Escape(mediaOnly)}[/]");
+                return;
+            }
+
             Log($"\n[bold]Testing {quantTag}[/]");
 
             try

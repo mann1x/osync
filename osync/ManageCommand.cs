@@ -33,6 +33,12 @@ namespace osync
         public string Family { get; set; } = "";
         public string ParameterSize { get; set; } = "";
 
+        // What the model is (llm, embed, image, stt, tts, video): from /api/tags capabilities, or the local manifest
+        public List<string> Kinds { get; set; } = new();
+        public bool IsMediaOnly => XOllamaMedia.IsMediaOnly(Kinds);
+        public bool HasMedia => Kinds.Any(XOllamaMedia.IsMediaKind);
+        public string KindsText => string.Join(",", Kinds);
+
         // Modelfile parameters
         public int? NumCtx { get; set; }
         public string? Stop { get; set; }
@@ -156,6 +162,7 @@ namespace osync
         private int _paramsColumnWidth = 6;
         private int _quantColumnWidth = 6;
         private int _familyColumnWidth = 6;
+        private int _kindColumnWidth;   // 0: no column (no model has a media kind)
         private int _modifiedColumnWidth = 3;
         private int _idColumnWidth = 12;
         private string _serverLabel = "";
@@ -614,6 +621,10 @@ namespace osync
             _paramsColumnWidth = Math.Max(_allModels.Select(m => m.ParameterSize.Length).DefaultIfEmpty(0).Max(), 6);
             _quantColumnWidth = Math.Max(_allModels.Select(m => string.IsNullOrEmpty(m.Quantization) ? 7 : m.Quantization.Length).DefaultIfEmpty(0).Max(), 6);
             _familyColumnWidth = Math.Max(_allModels.Select(m => m.Family.Length).DefaultIfEmpty(0).Max(), 6);
+            // The kind column, like osync ls, only when a model has media engines (xOllama)
+            _kindColumnWidth = _allModels.Any(m => m.HasMedia)
+                ? Math.Max(_allModels.Select(m => m.KindsText.Length).DefaultIfEmpty(0).Max(), 4)
+                : 0;
             _modifiedColumnWidth = Math.Max(_allModels.Select(m => m.ModifiedFormatted.Length).DefaultIfEmpty(0).Max(), 3);
             _idColumnWidth = 12; // ID is always 12 characters from digest (same as ollama ls)
 
@@ -632,6 +643,8 @@ namespace osync
                     _paramsColumnWidth = Math.Max(3, (int)(_paramsColumnWidth * scaleFactor));
                     _quantColumnWidth = Math.Max(4, (int)(_quantColumnWidth * scaleFactor));
                     _familyColumnWidth = Math.Max(4, (int)(_familyColumnWidth * scaleFactor));
+                    if (_kindColumnWidth > 0)
+                        _kindColumnWidth = Math.Max(3, (int)(_kindColumnWidth * scaleFactor));
                     _modifiedColumnWidth = Math.Max(2, (int)(_modifiedColumnWidth * scaleFactor));
                     _idColumnWidth = Math.Max(6, (int)(_idColumnWidth * scaleFactor));
                 }
@@ -643,7 +656,8 @@ namespace osync
 
         /// <summary>Width of the data columns after the name, including the separating spaces.</summary>
         private int ColumnsWidth() =>
-            _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth + _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth + 6;
+            _sizeColumnWidth + _paramsColumnWidth + _quantColumnWidth + _familyColumnWidth + _modifiedColumnWidth + _idColumnWidth + 6 +
+            (_kindColumnWidth > 0 ? _kindColumnWidth + 1 : 0);
 
         private int NameWidth(int width) => Math.Max(20, width - PrefixWidth - ColumnsWidth());
 
@@ -696,6 +710,7 @@ namespace osync
                             var fileInfo = new FileInfo(tagFile);
                             long totalSize = 0;
                             string modelId = "";
+                            var kinds = new List<string>();
 
                             try
                             {
@@ -703,6 +718,7 @@ namespace osync
                                 if (manifest?.layers != null)
                                 {
                                     totalSize = manifest.layers.Sum(l => l.size);
+                                    kinds = _program.LocalModelKinds(manifest.layers);
                                 }
 
                                 // Compute SHA256 of manifest file content (same as ollama ls)
@@ -719,7 +735,8 @@ namespace osync
                                 Size = totalSize,
                                 SizeFormatted = FormatSize(totalSize),
                                 ModifiedAt = fileInfo.LastWriteTime,
-                                ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime)
+                                ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime),
+                                Kinds = kinds
                             });
                         }
                     }
@@ -774,7 +791,8 @@ namespace osync
                             ModifiedFormatted = GetTimeAgo(model.modified_at),
                             Quantization = model.details?.quantization_level ?? "",
                             Family = model.details?.family ?? "",
-                            ParameterSize = model.details?.parameter_size ?? ""
+                            ParameterSize = model.details?.parameter_size ?? "",
+                            Kinds = OsyncProgram.RemoteModelKinds(model)
                         });
                     }
                 }
@@ -1038,6 +1056,7 @@ namespace osync
                        Fit("PARAMS", _paramsColumnWidth) + " " +
                        Fit("QUANT", _quantColumnWidth) + " " +
                        Fit("FAMILY", _familyColumnWidth) + " " +
+                       (_kindColumnWidth > 0 ? Fit("KIND", _kindColumnWidth) + " " : "") +
                        Fit("AGE", _modifiedColumnWidth) + " " +
                        Fit("ID", _idColumnWidth);
             _header.Set(new[] { new SegmentBar.Segment(text, C(t.Muted), true) }, Array.Empty<SegmentBar.Segment>(), C(t.Background));
@@ -1069,7 +1088,7 @@ namespace osync
             "  L  load into memory                             K  unload from memory\n" +
             "  X  loaded models (ps)                           O  sort order\n" +
             "  T  theme (saved in the settings file)           E  settings: server, colors\n" +
-            "  W  tweak: xOllama settings of the model (xOllama servers, needs the xollama CLI)\n" +
+            "  W  tweak: xOllama settings of the model, or of a server on this machine (xollama CLI)\n" +
             "  Q  quit\n" +
             "\n" +
             "In the list: [X] = selected, " + LoadedMarker + " = loaded in memory.";
@@ -1604,7 +1623,7 @@ namespace osync
 
                 var deleteMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
                 {
-                    Content = new StringContent(JsonSerializer.Serialize(new { name = model.Name }), Encoding.UTF8, "application/json")
+                    Content = new StringContent(JsonSerializer.Serialize(new { model = model.Name }), Encoding.UTF8, "application/json")
                 };
                 response = httpClient.SendAsync(deleteMessage).Result;
                 response.EnsureSuccessStatusCode();
@@ -1623,6 +1642,11 @@ namespace osync
         {
             var model = CurrentModel();
             if (model == null) return;
+            if (XOllamaMedia.CannotChatReason(model.Name, model.Kinds) is { } noChat)
+            {
+                ShowError(noChat + ".");
+                return;
+            }
 
             var dialog = NewDialog($"Run/Chat - {model.Name}", 76);
             const int fieldX = 28;
@@ -1779,7 +1803,7 @@ namespace osync
                     {
                         var requestMessage = new HttpRequestMessage(HttpMethod.Delete, "/api/delete")
                         {
-                            Content = new StringContent(JsonSerializer.Serialize(new { name = model.Name }), Encoding.UTF8, "application/json")
+                            Content = new StringContent(JsonSerializer.Serialize(new { model = model.Name }), Encoding.UTF8, "application/json")
                         };
                         var response = httpClient.SendAsync(requestMessage).Result;
                         response.EnsureSuccessStatusCode();
@@ -1927,6 +1951,12 @@ namespace osync
             var model = CurrentModel();
             var app = _app;
             if (model == null || app == null) return;
+            if (XOllamaMedia.CannotChatReason(model.Name, model.Kinds) is { } noChat)
+            {
+                // A media model's engines start on their first request; there is no LLM to load
+                ShowError(noChat + ".");
+                return;
+            }
 
             var serverUrl = ServerUrl;
             SetStatus($"Loading {model.Name}...");
@@ -1945,7 +1975,8 @@ namespace osync
                     var preloadRequest = new { model = model.Name, messages = Array.Empty<object>(), keep_alive = "5m", stream = false };
                     var response = httpClient.PostAsync("/api/chat", new StringContent(
                         JsonSerializer.Serialize(preloadRequest), Encoding.UTF8, "application/json")).Result;
-                    response.EnsureSuccessStatusCode();
+                    // The server's own error says what is wrong (and what to do), not just the status code
+                    XOllamaMedia.EnsureSuccessAsync(response).GetAwaiter().GetResult();
                     response.Content.ReadAsStringAsync().Wait();
                 }
                 catch (Exception ex)
@@ -2083,6 +2114,8 @@ namespace osync
                 lines.Add($"Parameters: {model.ParameterSize}");
             if (!string.IsNullOrEmpty(model.Quantization))
                 lines.Add($"Quantization: {model.Quantization}");
+            if (model.Kinds.Count > 0)
+                lines.Add($"Kind: {model.KindsText}" + (model.IsMediaOnly ? " (media model: no chat)" : ""));
             if (model.IsLoaded)
                 lines.Add("Status: LOADED IN MEMORY");
             lines.Add("");
@@ -2117,42 +2150,58 @@ namespace osync
 
         private bool IsXOllamaServer => OllamaServer.GetFlavor(ServerUrl) == ServerFlavor.XOllama;
 
-        // Action: xOllama settings of the model(s), with `xollama tweak model` on the console
+        // Action: xOllama settings of the model(s), and of the server when it runs on this machine, with
+        // `xollama tweak` on the console
         private void ExecuteTweak()
         {
+            if (_app == null) return;
             var models = TargetModels(out bool isBatch);
-            if (models.Count == 0 || _app == null) return;
-
             var url = ServerUrl;
+            var local = XOllamaTweak.IsOnThisMachine(url);
+            if (models.Count == 0 && !local) return;
+
             if (!IsXOllamaServer)
             {
-                ShowInfo("Tweak", $"Tweak changes xOllama's own model settings,\nand {new Uri(url).Authority} is not an xOllama server.");
+                ShowInfo("Tweak", $"Tweak changes xOllama's own settings,\nand {new Uri(url).Authority} is not an xOllama server.");
                 return;
             }
             var cli = OllamaServer.XOllamaCli;
             if (cli == null)
             {
-                ShowError("Tweak runs the xollama CLI (xollama tweak model), which is not on PATH.\n" +
+                ShowError("Tweak runs the xollama CLI (xollama tweak), which is not on PATH.\n" +
                           "Install xOllama on this machine, or set OSYNC_XOLLAMA_CLI to its path.");
                 return;
             }
 
-            var dialog = NewDialog(isBatch ? $"Tweak - {models.Count} models" : $"Tweak - {models[0].Name}", 78);
+            // The model options (none without a model), then the server's own: xOllama takes changes to those
+            // only from its own machine
+            // A speech model also gets the voice picker, after the model options (so they keep their places)
+            var voiceScope = models.Count == 1 && !isBatch && models[0].Kinds.Contains("tts") ? XOllamaTweak.Scopes.Length : -1;
+            var scopes = (models.Count > 0 ? XOllamaTweak.Scopes : Array.Empty<XOllamaTweak.Scope>())
+                .Concat(voiceScope >= 0 ? new[] { XOllamaTweak.VoiceScope } : Array.Empty<XOllamaTweak.Scope>())
+                .Concat(local ? XOllamaTweak.ServerScopes : Array.Empty<XOllamaTweak.Scope>())
+                .ToArray();
+            var clearScope = models.Count > 0 ? XOllamaTweak.ClearScope : -1;
+
+            var title = models.Count == 0 ? $"Tweak - {new Uri(url).Authority}"
+                : isBatch ? $"Tweak - {models.Count} models" : $"Tweak - {models[0].Name}";
+            var dialog = NewDialog(title, 82);
+            // Rows left for the current settings: the options, the flags, the buttons and the borders take the
+            // rest; a block (heading, rows, blank line) is left out when not even one row of it fits
+            var room = _app.Screen.Height - scopes.Length - 8;
             int y = 0;
-            if (!isBatch)
+            if (models.Count > 0 && !isBatch && room >= 3)
             {
                 FetchExtendedInfo(models[0]);
                 var current = models[0].XOllamaSettings is { Count: > 0 } rows
                     ? XOllamaTweak.Describe(rows, 40).ToList()
-                    : new List<string> { "none: the server's environment decides" };
-                const int shown = 6;
-                dialog.Add(NewLabel("xOllama settings now:", 0, y++));
-                foreach (var line in current.Take(shown))
-                    dialog.Add(NewLabel("  " + line, 0, y++));
-                if (current.Count > shown)
-                    dialog.Add(NewLabel($"  ... and {current.Count - shown} more (model details show them all)", 0, y++));
-                y++;
+                    : new List<string> { local ? "none: the server's defaults and environment decide" : "none: the server decides" };
+                y = AddSettingRows(dialog, "xOllama settings now:", current, Math.Min(6, room - 3), y,
+                    "model details show them all");
             }
+            if (local && room - y >= 3 && XOllamaTweak.FetchServerDefaults(url) is { Count: > 0 } defaults)
+                y = AddSettingRows(dialog, "Server defaults (for what a model leaves unset):",
+                    XOllamaTweak.Describe(defaults, 40).ToList(), Math.Min(4, room - y - 3), y, "tweak show server lists them all");
 
             dialog.Add(NewLabel("Settings to change:", 0, y++));
             var selector = new OptionSelector
@@ -2161,19 +2210,35 @@ namespace osync
                 Y = y,
                 TabBehavior = TabBehavior.NoStop,
                 HotKeySpecifier = NoHotKey,
-                Labels = XOllamaTweak.Scopes.Select(s => s.Label).ToArray(),
+                Labels = scopes.Select(s => s.Label).ToArray(),
                 Value = 0
             };
             dialog.Add(selector);
-            y += XOllamaTweak.Scopes.Length + 1;
+            y += scopes.Length + 1;
             dialog.Add(NewLabel("Flags (optional; a flag with a value, --kv-v=q8_0, is set without asking):", 0, y++));
             var flagsField = NewField("", 0, y);
             dialog.Add(flagsField);
             dialog.Validate = () =>
             {
-                if (selector.Value == XOllamaTweak.ClearScope && !string.IsNullOrWhiteSpace(flagsField.Text))
+                if (string.IsNullOrWhiteSpace(flagsField.Text) || selector.Value is not int chosen) return true;
+                if (chosen == clearScope)
                 {
                     ShowError("Removing the settings cannot be combined with flags that set one.");
+                    return false;
+                }
+                if (chosen == voiceScope)
+                {
+                    ShowError("The voice is picked from a list: leave the flags empty.");
+                    return false;
+                }
+                if (XOllamaTweak.IsShowScope(scopes[chosen]))
+                {
+                    ShowError("Showing the settings takes no flags: leave the field empty.");
+                    return false;
+                }
+                if (XOllamaTweak.SplitFlags(flagsField.Text) == null)
+                {
+                    ShowError("A quote in the flags is not closed.");
                     return false;
                 }
                 return true;
@@ -2183,31 +2248,136 @@ namespace osync
             selector.SetFocus();
             FocusSelected(selector);
 
-            if (RunDialog(dialog) != 1 || selector.Value is not int scope) return;
+            if (RunDialog(dialog) != 1 || selector.Value is not int index) return;
+            var scope = scopes[index];
             var extra = flagsField.Text.Trim();
+            if (index == voiceScope)
+            {
+                PickVoice(models[0], cli, url);
+                return;
+            }
 
-            if (scope == XOllamaTweak.ClearScope)
+            if (index == clearScope)
             {
                 var what = isBatch ? $"{models.Count} models" : $"'{models[0].Name}'";
                 // Enter presses the last button: keep Cancel there
                 if (MessageBox.ErrorQuery(_app, "Remove xOllama settings",
-                        $"Remove the xOllama settings of {what}?\nThe server's environment then decides every setting.",
+                        $"Remove the xOllama settings of {what}?\nThe server's defaults and environment then decide every setting.",
                         "Remove", "Cancel") != 0)
                     return;
             }
 
             RequestConsoleAction(token =>
             {
+                if (!scope.PerModel)
+                {
+                    Out.StatusLine($"\nxollama tweak {scope.Command} on {url}");
+                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(scope, null, extra));
+                    if (code != 0)
+                        Out.Failure($"xollama tweak {scope.Command} exited with code {code}");
+                    return null;
+                }
                 foreach (var model in models)
                 {
                     if (token.IsCancellationRequested) break;
-                    Out.StatusLine($"\nxollama tweak model '{model.Name}' on {url}");
-                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(model.Name, XOllamaTweak.Scopes[scope].Flags, extra));
+                    Out.StatusLine($"\nxollama tweak {scope.Command} '{model.Name}' on {url}");
+                    var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(scope, model.Name, extra));
                     if (code != 0)
                         Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
                 }
                 return models[0].Name;
             });
+        }
+
+        /// <summary>
+        /// The voice picker of a speech model: asks the server for the model's voices (it starts the speech engine,
+        /// so off the UI thread), lists them, and sets the chosen one as the default with `xollama tweak --tts-voice`.
+        /// </summary>
+        private void PickVoice(ManageModelInfo model, string cli, string url)
+        {
+            var app = _app;
+            if (app == null) return;
+            SetStatus($"Asking for the voices of {model.Name} (this starts its speech engine)...");
+            Task.Run(async () =>
+            {
+                XOllamaMedia.VoiceList? voices = null;
+                string? error = null;
+                try
+                {
+                    voices = await XOllamaMedia.FetchVoicesAsync(url, model.Name, XOllamaTweak.ApiKey());
+                }
+                catch (Exception ex)
+                {
+                    error = ex.InnerException?.Message ?? ex.Message;
+                }
+
+                try
+                {
+                    app.Invoke(() =>
+                    {
+                        if (_app != app) return;   // the session has ended meanwhile
+                        SetStatus("");
+                        if (error != null)
+                            ShowError($"Could not list the voices of {model.Name}: {error}");
+                        else if (voices!.Voices.Count == 0)
+                            ShowInfo("Voices", $"{model.Name} lists no voices.");
+                        else
+                            ShowVoicePicker(model, voices, cli, url);
+                    });
+                }
+                catch
+                {
+                    // The session ended (and the application was disposed) meanwhile
+                }
+            });
+        }
+
+        private void ShowVoicePicker(ManageModelInfo model, XOllamaMedia.VoiceList voices, string cli, string url)
+        {
+            var labels = new ObservableCollection<string>(voices.Voices.Select(v => XOllamaMedia.VoiceLabel(v, voices.Default)));
+            var dialog = NewDialog($"Default voice - {model.Name}", 60);
+            var screenHeight = _app?.Screen.Height ?? 24;
+            var listHeight = Math.Clamp(screenHeight - 8, 3, labels.Count);
+            var list = new ListView
+            {
+                X = 0,
+                Y = 0,
+                Width = Dim.Fill(),
+                Height = listHeight,
+                KeystrokeNavigator = null,
+                HotKeySpecifier = NoHotKey
+            };
+            list.SetSource(labels);
+            var current = voices.Voices.ToList().FindIndex(v => v.Id == voices.Default);
+            list.SelectedItem = Math.Max(0, current);
+            list.FrameChanged += (_, _) => list.EnsureSelectedItemVisible();
+            dialog.Add(list);
+            dialog.AddButton(NewButton("Cancel"));
+            dialog.AddButton(NewButton("Set"));
+            list.SetFocus();
+
+            if (RunDialog(dialog) != 1 || list.SelectedItem is not int index || index < 0 || index >= voices.Voices.Count)
+                return;
+            var voice = voices.Voices[index].Id;
+            RequestConsoleAction(_ =>
+            {
+                Out.StatusLine($"\nxollama tweak model '{model.Name}' --tts-voice={voice} on {url}");
+                var code = XOllamaTweak.Run(cli, url, XOllamaTweak.Arguments(model.Name, "", $"--tts-voice={voice}"));
+                if (code != 0)
+                    Out.Failure($"xollama tweak of '{model.Name}' exited with code {code}");
+                return model.Name;
+            });
+        }
+
+        /// <summary>A heading and up to <paramref name="shown"/> setting rows of the tweak dialog; returns the next row.</summary>
+        private static int AddSettingRows(Dialog dialog, string heading, List<string> lines, int shown, int y, string more)
+        {
+            dialog.Add(NewLabel(heading, 0, y++));
+            foreach (var line in lines.Take(shown))
+                dialog.Add(NewLabel("  " + line, 0, y++));
+            if (lines.Count > shown)
+                dialog.Add(NewLabel($"  ... and {lines.Count - shown} more ({more})", 0, y++));
+            return y + 1;
         }
 
         // Action: choose the theme (live preview; the choice is saved in the settings file)
@@ -2558,7 +2728,8 @@ namespace osync
                 Rgb Fg(Rgb color) => selected ? t.SelectionText : color;
 
                 var nameWidth = o.NameWidth(width);
-                var quant = string.IsNullOrEmpty(model.Quantization) ? "unknown" : model.Quantization;
+                // A media model (xOllama engines, no LLM) has no weights to quantize
+                var quant = !string.IsNullOrEmpty(model.Quantization) ? model.Quantization : model.IsMediaOnly ? "media" : "unknown";
                 var id = model.ShortId.Length > 12 ? model.ShortId[..12] : model.ShortId;
 
                 var segments = new (string Text, Rgb Fg, TextStyle Style)[]
@@ -2570,6 +2741,7 @@ namespace osync
                     (Fit(model.ParameterSize, o._paramsColumnWidth) + " ", Fg(t.Params), TextStyle.None),
                     (Fit(quant, o._quantColumnWidth) + " ", Fg(string.IsNullOrEmpty(model.Quantization) ? t.Muted : t.Quant), TextStyle.None),
                     (Fit(model.Family, o._familyColumnWidth) + " ", Fg(t.Family), TextStyle.None),
+                    (o._kindColumnWidth > 0 ? Fit(model.KindsText, o._kindColumnWidth) + " " : "", Fg(model.HasMedia ? t.Family : t.Muted), TextStyle.None),
                     (Fit(model.ModifiedFormatted, o._modifiedColumnWidth) + " ", Fg(t.Muted), TextStyle.None),
                     (Fit(id, o._idColumnWidth), Fg(t.Id), TextStyle.None)
                 };

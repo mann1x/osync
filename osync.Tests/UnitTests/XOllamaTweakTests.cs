@@ -56,13 +56,151 @@ public class XOllamaTweakTests
     [InlineData("", " --kv-k=q8_0 --kv-v=q8_0 ", "tweak model qwen3:8b --kv-k=q8_0 --kv-v=q8_0")]
     [InlineData("--dca", "--dca-chunk=32768", "tweak model qwen3:8b --dca --dca-chunk=32768")]
     public void Arguments_ScopeThenTypedFlags(string scope, string? extra, string expected) =>
-        XOllamaTweak.Arguments("qwen3:8b", scope, extra).Should().Be(expected);
+        string.Join(" ", XOllamaTweak.Arguments("qwen3:8b", scope, extra)).Should().Be(expected);
 
     [Fact]
     public void Scopes_EndWithClear()
     {
         XOllamaTweak.Scopes[0].Flags.Should().BeEmpty("the first option walks every setting");
         XOllamaTweak.Scopes[XOllamaTweak.ClearScope].Flags.Should().Be("--clear");
+    }
+
+    [Fact]
+    public void Scopes_OfferTheEnginePolicies()
+    {
+        XOllamaTweak.Scopes.Select(s => s.Flags).Should().Contain(
+            "--kv-residency --kv-rolling-window --fit --vram-target --mtp-policy");
+        string.Join(" ", XOllamaTweak.Arguments(XOllamaTweak.Scopes[8], "qwen3:8b", null))
+            .Should().Be("tweak model qwen3:8b --kv-residency --kv-rolling-window --fit --vram-target --mtp-policy");
+    }
+
+    [Fact]
+    public void ShowModelScope_RunsTweakShowModel()
+    {
+        var show = XOllamaTweak.Scopes.Single(s => s.Command == "show model");
+        XOllamaTweak.Arguments(show, "qwen3:8b", null).Should().Equal("tweak", "show", "model", "qwen3:8b");
+        XOllamaTweak.IsShowScope(show).Should().BeTrue();
+        XOllamaTweak.IsShowScope(XOllamaTweak.Scopes[0]).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(0, null, "tweak server")]
+    [InlineData(0, "--slots", "tweak server --slots")]
+    [InlineData(1, "0000:01:00.0 --priority 10", "tweak server gpu 0000:01:00.0 --priority 10")]
+    [InlineData(2, "--unset OLLAMA_KV_CACHE_TYPE", "tweak envs --unset OLLAMA_KV_CACHE_TYPE")]
+    [InlineData(3, null, "tweak show server")]
+    public void ServerScopes_RunOnce_WithoutAModel(int index, string? extra, string expected)
+    {
+        var scope = XOllamaTweak.ServerScopes[index];
+        scope.PerModel.Should().BeFalse();
+        string.Join(" ", XOllamaTweak.Arguments(scope, "qwen3:8b", extra)).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Arguments_QuotedValueStaysOneArgument()
+    {
+        XOllamaTweak.Arguments("qwen3:8b", "--council", "--council-instructions=\"be brief\" '@C:\\my dir\\charter.md' --kv-k=q8_0")
+            .Should().Equal("tweak", "model", "qwen3:8b", "--council",
+                "--council-instructions=be brief", @"@C:\my dir\charter.md", "--kv-k=q8_0");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("   ")]
+    public void SplitFlags_NothingTyped_GivesNoArguments(string? flags) =>
+        XOllamaTweak.SplitFlags(flags).Should().BeEmpty();
+
+    [Theory]
+    [InlineData(@"--council-charter=""say \""hi\""""", @"--council-charter=say ""hi""")]
+    [InlineData(@"--dca-chunk=32768", "--dca-chunk=32768")]
+    [InlineData(@"--council-instructions=""""", "--council-instructions=")]
+    public void SplitFlags_HandlesQuotes(string flags, string expected) =>
+        XOllamaTweak.SplitFlags(flags).Should().Equal(expected);
+
+    [Theory]
+    [InlineData("--council-instructions=\"be brief")]
+    [InlineData("'@C:\\dir")]
+    public void SplitFlags_UnclosedQuote_IsNull(string flags) =>
+        XOllamaTweak.SplitFlags(flags).Should().BeNull();
+
+    [Fact]
+    public void Flatten_SchemaV6Keys()
+    {
+        using var doc = JsonDocument.Parse("""{"version":6,"kv":{"rolling_window":"256"},"fit":{"enabled":false}}""");
+        XOllamaTweak.Flatten(doc.RootElement).Should().Equal(("kv.rolling_window", "256"), ("fit.enabled", "off"));
+    }
+
+    [Fact]
+    public void Flatten_SchemaV7Media_VoicesAsOneSortedRow()
+    {
+        using var doc = JsonDocument.Parse("""
+            {"version":7,"media":{"tts":{"engine":"outetts","model":"sha256:aa",
+             "voices":{"narrator":"sha256:n1","host":"sha256:h1"},"voice_map":{"nova":"af_bella","alloy":"af_heart"},
+             "defaults":{"voice":"host","speed":1.25},"fixed":["voice"]}}}
+            """);
+        XOllamaTweak.Flatten(doc.RootElement).Should().Equal(
+            ("media.tts.engine", "outetts"), ("media.tts.model", "sha256:aa"),
+            ("media.tts.voices", "host=sha256:h1,narrator=sha256:n1"),
+            ("media.tts.voice_map", "alloy=af_heart,nova=af_bella"),
+            ("media.tts.defaults.voice", "host"), ("media.tts.defaults.speed", "1.25"),
+            ("media.tts.fixed", "voice"));
+    }
+
+    [Fact]
+    public void Scopes_OfferTheMediaEngines() =>
+        XOllamaTweak.Scopes.Select(s => s.Flags).Should().Contain("--image --stt --tts --video");
+
+    [Fact]
+    public void VoiceScope_SetsTheDefaultVoice()
+    {
+        XOllamaTweak.Scopes.Should().NotContain(XOllamaTweak.VoiceScope, "it is offered only for one speech model");
+        XOllamaTweak.Arguments("mannix/outetts:0.3", "", "--tts-voice=narrator")
+            .Should().Equal("tweak", "model", "mannix/outetts:0.3", "--tts-voice=narrator");
+    }
+
+    [Fact]
+    public void ApiKey_EnvironmentFirst_ThenTheKeyFile()
+    {
+        var file = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(file, "  file-key\n");
+            XOllamaTweak.ApiKey("env-key", file).Should().Be("env-key");
+            XOllamaTweak.ApiKey("", file).Should().Be("file-key");
+            File.WriteAllText(file, "");
+            XOllamaTweak.ApiKey("", file).Should().BeNull();
+            XOllamaTweak.ApiKey("", file + ".missing").Should().BeNull();
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [Theory]
+    [InlineData("http://localhost:22434", true)]
+    [InlineData("http://127.0.0.1:22434", true)]
+    [InlineData("http://[::1]:22434", true)]
+    [InlineData("http://0.0.0.0:22434", true)]
+    [InlineData("http://192.168.1.10:22434", false)]
+    [InlineData("http://gpu.example.com:22434", false)]
+    [InlineData("not a url", false)]
+    public void IsOnThisMachine_OnlyLoopback(string url, bool expected) =>
+        XOllamaTweak.IsOnThisMachine(url).Should().Be(expected);
+
+    [Fact]
+    public void ServerDefaults_FlattensTheDefaultsOfASettingsAnswer()
+    {
+        using var doc = JsonDocument.Parse("""{"path":"/root/.ollama/xollama-settings.json","envs":[],"defaults":{"version":6,"kv":{"k":"q8_0","v":"q8_0","rolling_window":"on"},"fit":{"vram_target_mib":20000}}}""");
+        XOllamaTweak.ServerDefaults(doc.RootElement).Should().Equal(
+            ("kv.k", "q8_0"), ("kv.v", "q8_0"), ("kv.rolling_window", "on"), ("fit.vram_target_mib", "20000"));
+    }
+
+    [Fact]
+    public void ServerDefaults_NoneStated_GivesNoRows()
+    {
+        using var doc = JsonDocument.Parse("""{"path":"x","envs":[]}""");
+        XOllamaTweak.ServerDefaults(doc.RootElement).Should().BeEmpty();
     }
 
     [Theory]

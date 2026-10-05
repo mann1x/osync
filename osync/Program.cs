@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.4.2";
+        public static string AppVersion = "1.4.3";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -150,7 +150,7 @@ namespace osync
             else if (args.SortByTime) sortMode = "time_desc";
             else if (args.SortByTimeAsc) sortMode = "time_asc";
 
-            ActionList(args.Pattern, args.Destination, sortMode);
+            ActionList(args.Pattern, args.Destination, sortMode, args.Kind);
         }
 
         [ArgActionMethod, ArgDescription("Remove models matching pattern locally or on remote server (aliases: rm, delete, del)"), ArgShortcut("rm"), ArgShortcut("delete"), ArgShortcut("del")]
@@ -221,6 +221,12 @@ namespace osync
             if (!modelName.Contains(':'))
             {
                 modelName += ":latest";
+            }
+
+            if (await XOllamaMedia.CannotChatReasonAsync(client, ollamaHost, modelName) is { } cannotChat)
+            {
+                Out.Error(cannotChat);
+                System.Environment.Exit(1);
             }
 
             try
@@ -329,7 +335,9 @@ namespace osync
                         vramUsage = FormatBytes(model.SizeVram);
                     }
 
-                    var context = model.ContextLength > 0 ? model.ContextLength.ToString() : "N/A";
+                    // An xOllama media engine (image, speech, transcription, video) has no context
+                    var context = model.ContextLength > 0 ? model.ContextLength.ToString()
+                        : model.Details?.Format == "media" ? "media" : "N/A";
                     var until = FormatUntil(model.ExpiresAt);
 
                     // Partly offloaded to the CPU: warning color; fully in VRAM: success color
@@ -1155,6 +1163,13 @@ namespace osync
                 modelName += ":latest";
             }
 
+            if (await XOllamaMedia.CannotChatReasonAsync(client, ollamaHost, modelName) is { } mediaOnly)
+            {
+                // Its engines start with the first media request (/v1/images, /v1/audio, /v1/videos), not with a prompt
+                Out.Error($"{mediaOnly}; its engines start with its first media request");
+                System.Environment.Exit(1);
+            }
+
             try
             {
                 Out.StatusLine($"Loading model '{modelName}' into memory...");
@@ -1186,7 +1201,8 @@ namespace osync
                 };
 
                 var response = await httpClient.SendAsync(requestMessage);
-                response.EnsureSuccessStatusCode();
+                // The server's own error ("... update the engine", "... pull the model again") says what to do
+                await XOllamaMedia.EnsureSuccessAsync(response);
 
                 // Parse the response to get load_duration
                 var responseContent = await response.Content.ReadAsStringAsync();
@@ -1242,8 +1258,7 @@ namespace osync
                 }
                 else if (ex.StatusCode.HasValue)
                 {
-                    Out.Error($"Request failed with status {(int)ex.StatusCode.Value} ({ex.StatusCode.Value})");
-                    Console.WriteLine($"Details: {ex.Message}");
+                    Out.Error($"Could not load '{modelName}' (HTTP {(int)ex.StatusCode.Value}): {ex.Message}");
                 }
                 else
                 {
@@ -4210,9 +4225,16 @@ namespace osync
             }
         }
 
-        public void ActionList(string? Pattern, string Destination, string sortMode = "name")
+        public void ActionList(string? Pattern, string Destination, string sortMode = "name", string? kind = null)
         {
             Init();
+
+            kind = string.IsNullOrWhiteSpace(kind) ? null : kind.Trim().ToLowerInvariant();
+            if (kind != null && !XOllamaMedia.Kinds.Contains(kind))
+            {
+                Out.Error($"unknown kind '{kind}': use one of {string.Join(", ", XOllamaMedia.Kinds)}");
+                System.Environment.Exit(1);
+            }
 
             // If pattern looks like a URL or IP address, treat it as destination
             if (!string.IsNullOrEmpty(Pattern) && LooksLikeRemoteServer(Pattern))
@@ -4235,12 +4257,9 @@ namespace osync
 
             if (localList)
             {
-                if (!Directory.Exists(ollama_models))
-                {
-                    Out.Error($"ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
-                }
-                ListLocalModels(Pattern ?? "*", sortMode);
+                // From the server like rm: the models directory osync guesses may belong to another server
+                // (Ollama and xOllama side by side), so ls listed models rm could not find
+                ListRemoteModels(OllamaServer.LocalUrl, Pattern ?? "*", sortMode, kind, remote: false).GetAwaiter().GetResult();
             }
             else
             {
@@ -4250,7 +4269,7 @@ namespace osync
                 {
                     System.Environment.Exit(1);
                 }
-                ListRemoteModels(Destination, Pattern ?? "*", sortMode).GetAwaiter().GetResult();
+                ListRemoteModels(Destination, Pattern ?? "*", sortMode, kind).GetAwaiter().GetResult();
             }
         }
 
@@ -4293,98 +4312,32 @@ namespace osync
             return false;
         }
 
-        private void ListLocalModels(string pattern, string sortMode = "name")
+        /// <summary>
+        /// What a local model is, from its manifest: an LLM when it has GGUF weights, plus the media kinds its xOllama
+        /// settings state when it carries media layers (read from the settings blob).
+        /// </summary>
+        internal List<string> LocalModelKinds(List<Layer> layers)
         {
-            var models = new List<LocalModelInfo>();
-            string manifestsDir = Path.Combine(ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
+            var kinds = new List<string>();
+            if (layers.Any(l => l.mediaType == ModelRecreate.ModelLayer)) kinds.Add("llm");
+            if (!layers.Any(l => l.mediaType == XOllamaMedia.Layer)) return kinds;
+            var settings = layers.FirstOrDefault(l => l.mediaType == ModelRecreate.XOllamaLayer);
+            var path = settings != null && settings.digest.StartsWith("sha256:")
+                ? Path.Combine(ollama_models, "blobs", "sha256-" + settings.digest[7..])
+                : null;
+            try
             {
-                Console.WriteLine($"No local models found.");
-                return;
-            }
-
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-            {
-                string host = Path.GetFileName(hostDir);
-
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
+                if (path != null && System.IO.File.Exists(path))
                 {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                    {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                // Official library models: just "model:tag"
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                // User namespace models: "namespace/model:tag"
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                // Other registries: "host/namespace/model:tag"
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            if (MatchesPattern(fullModelName, pattern))
-                            {
-                                var fileInfo = new FileInfo(tagFile);
-                                long totalSize = 0;
-                                string modelId = "";
-
-                                try
-                                {
-                                    RootManifest? manifest = ManifestReader.Read<RootManifest>(tagFile);
-                                    if (manifest?.layers != null)
-                                    {
-                                        totalSize = manifest.layers.Sum(l => l.size);
-                                    }
-
-                                    // Compute SHA256 of manifest file content (same as ollama ls)
-                                    var manifestBytes = System.IO.File.ReadAllBytes(tagFile);
-                                    using var sha256 = System.Security.Cryptography.SHA256.Create();
-                                    var hashBytes = sha256.ComputeHash(manifestBytes);
-                                    var fullDigest = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
-                                    modelId = fullDigest.Substring(0, 12);
-                                }
-                                catch { }
-
-                                models.Add(new LocalModelInfo
-                                {
-                                    Name = fullModelName,
-                                    Id = modelId,
-                                    Size = totalSize,
-                                    ModifiedAt = fileInfo.LastWriteTime
-                                });
-                            }
-                        }
-                    }
+                    using var doc = JsonDocument.Parse(System.IO.File.ReadAllBytes(path));
+                    kinds.AddRange(XOllamaMedia.KindsOfSettings(doc.RootElement));
                 }
             }
-
-            if (models.Count == 0)
+            catch (Exception e) when (e is IOException or JsonException or UnauthorizedAccessException)
             {
-                Console.WriteLine($"No models found matching pattern: {pattern ?? "*"}");
-                return;
+                // the kinds stay unknown; the model still lists
             }
-
-            PrintModelTable(SortModels(models, sortMode));
+            return XOllamaMedia.Kinds.Where(kinds.Contains).ToList();
         }
 
         private List<LocalModelInfo> SortModels(List<LocalModelInfo> models, string sortMode)
@@ -4399,15 +4352,16 @@ namespace osync
             };
         }
 
-        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name")
+        private async Task ListRemoteModels(string serverUrl, string pattern, string sortMode = "name", string? kind = null, bool remote = true)
         {
+            string onServer = remote ? "" : $" on {serverUrl}";
             try
             {
                 HttpResponseMessage response = await client.GetAsync($"{serverUrl.TrimEnd('/')}/api/tags");
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from {(remote ? "remote" : "local")} server{onServer} (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4416,7 +4370,7 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Console.WriteLine("No models found on remote server.");
+                    Console.WriteLine(remote ? "No models found on remote server." : $"No local models found{onServer}.");
                     return;
                 }
 
@@ -4427,13 +4381,17 @@ namespace osync
                         Name = m.name,
                         Id = m.digest?.StartsWith("sha256:") == true ? m.digest.Substring(7, 12) : m.digest?.Substring(0, Math.Min(12, m.digest.Length)) ?? "",
                         Size = m.size,
-                        ModifiedAt = m.modified_at
+                        ModifiedAt = m.modified_at,
+                        Kinds = RemoteModelKinds(m)
                     })
+                    .Where(m => kind == null || m.Kinds.Contains(kind))
                     .ToList();
 
                 if (filteredModels.Count == 0)
                 {
-                    Console.WriteLine($"No models found matching pattern: {pattern ?? "*"}");
+                    Console.WriteLine(kind == null
+                        ? $"No models found matching pattern: {pattern ?? "*"}{onServer}"
+                        : $"No {kind} models found matching pattern: {pattern ?? "*"}{onServer}");
                     return;
                 }
 
@@ -4441,18 +4399,30 @@ namespace osync
             }
             catch (Exception e)
             {
-                Out.Error($"failed to list remote models: {e.Message}");
+                Out.Error($"failed to list {(remote ? "remote" : "local")} models{onServer}: {e.Message}");
                 System.Environment.Exit(1);
             }
         }
+
+        /// <summary>
+        /// What a model of /api/tags is: from its capabilities when the server lists them, otherwise an LLM when it has
+        /// a model format (a server that predates capabilities in /api/tags).
+        /// </summary>
+        internal static List<string> RemoteModelKinds(OllamaModel model) =>
+            model.capabilities is { Count: > 0 } capabilities
+                ? XOllamaMedia.KindsOf(capabilities)
+                : string.IsNullOrEmpty(model.details?.format) ? new List<string>() : new List<string> { "llm" };
 
         private void PrintModelTable(List<LocalModelInfo> models)
         {
             int nameWidth = Math.Max(50, models.Max(m => m.Name.Length) + 2);
             int idWidth = 16;
             int sizeWidth = 10;
+            // The KIND column appears only when a listed model has media engines, so plain lists keep their layout
+            bool showKinds = models.Any(m => m.Kinds.Any(XOllamaMedia.IsMediaKind));
+            int kindWidth = showKinds ? Math.Max(6, models.Max(m => string.Join(",", m.Kinds).Length) + 2) : 0;
 
-            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}MODIFIED"));
+            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)}{"ID".PadRight(idWidth)}{"SIZE".PadRight(sizeWidth)}{(showKinds ? "KIND".PadRight(kindWidth) : "")}MODIFIED"));
 
             foreach (var model in models)
             {
@@ -4463,6 +4433,7 @@ namespace osync
                     Out.Paint(model.Name.PadRight(nameWidth), p => p.Text) +
                     Out.Paint(model.Id.PadRight(idWidth), p => p.Id) +
                     Out.Paint(sizeStr.PadRight(sizeWidth), p => p.Size) +
+                    (showKinds ? Out.Paint(string.Join(",", model.Kinds).PadRight(kindWidth), p => p.Text) : "") +
                     Out.Muted(timeAgo));
             }
         }
@@ -4508,12 +4479,9 @@ namespace osync
 
             if (localRemove)
             {
-                if (!Directory.Exists(ollama_models))
-                {
-                    Out.Error($"ollama models directory not found at: {ollama_models}");
-                    System.Environment.Exit(1);
-                }
-                return RemoveLocalModels(Pattern);
+                // Through the server's API like a remote removal: scanning the models directory and running
+                // the ollama/xollama CLI failed whenever either was not where osync expected it
+                return RemoveRemoteModels(Pattern, OllamaServer.LocalUrl, remote: false).GetAwaiter().GetResult();
             }
             else
             {
@@ -4527,165 +4495,13 @@ namespace osync
             }
         }
 
-        private bool RemoveLocalModels(string pattern)
-        {
-            var modelsToRemove = new List<string>();
-            string manifestsDir = Path.Combine(ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
-            {
-                Out.Error($"No local models found.");
-                return false;
-            }
-
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-            {
-                string host = Path.GetFileName(hostDir);
-
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
-                {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                    {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            if (MatchesPattern(fullModelName, pattern))
-                            {
-                                modelsToRemove.Add(fullModelName);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (modelsToRemove.Count == 0)
-            {
-                // If no models found, pattern has no wildcards, and no tag specified, try with :latest
-                if (!pattern.Contains("*") && !pattern.Contains(":"))
-                {
-                    string latestPattern = $"{pattern}:latest";
-
-                    // Retry scan with :latest pattern
-                    foreach (string hostDir in Directory.GetDirectories(manifestsDir))
-                    {
-                        string host = Path.GetFileName(hostDir);
-                        foreach (string namespaceDir in Directory.GetDirectories(hostDir))
-                        {
-                            string ns = Path.GetFileName(namespaceDir);
-                            foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                            {
-                                string model = Path.GetFileName(modelDir);
-                                foreach (string tagFile in Directory.GetFiles(modelDir))
-                                {
-                                    string tag = Path.GetFileName(tagFile);
-                                    string fullModelName;
-                                    if (host == "registry.ollama.ai" && ns == "library")
-                                    {
-                                        fullModelName = $"{model}:{tag}";
-                                    }
-                                    else if (host == "registry.ollama.ai")
-                                    {
-                                        fullModelName = $"{ns}/{model}:{tag}";
-                                    }
-                                    else
-                                    {
-                                        fullModelName = $"{host}/{ns}/{model}:{tag}";
-                                    }
-
-                                    if (MatchesPattern(fullModelName, latestPattern))
-                                    {
-                                        modelsToRemove.Add(fullModelName);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (modelsToRemove.Count == 0)
-                    {
-                        Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
-                        return false;
-                    }
-                }
-                else
-                {
-                    Out.Error($"No models found matching pattern: {pattern}");
-                    return false;
-                }
-            }
-
-            Console.WriteLine($"Removing {modelsToRemove.Count} model(s)...");
-            int failures = 0;
-
-            foreach (var modelName in modelsToRemove)
-            {
-                try
-                {
-                    // Use ollama rm command to properly remove the model
-                    var p = new Process();
-                    p.StartInfo.FileName = OllamaServer.CliName;
-                    OllamaServer.ApplyCliEnvironment(p.StartInfo);
-                    p.StartInfo.Arguments = $"rm {modelName}";
-                    p.StartInfo.CreateNoWindow = true;
-                    p.StartInfo.UseShellExecute = false;
-                    p.StartInfo.RedirectStandardOutput = true;
-                    p.StartInfo.RedirectStandardError = true;
-
-                    p.Start();
-                    // Read and discard stdout/stderr to prevent ANSI codes leaking to console
-                    p.StandardOutput.ReadToEnd();
-                    string error = p.StandardError.ReadToEnd();
-                    p.WaitForExit();
-
-                    if (p.ExitCode == 0)
-                    {
-                        System.Console.WriteLine($"{Out.Paint("deleted", p => p.Success, bold: true)} '{Out.Paint(modelName, p => p.Text, bold: true)}'");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"failed to delete '{modelName}': {error}");
-                        failures++;
-                    }
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"Error deleting '{modelName}': {e.Message}");
-                    failures++;
-                }
-            }
-
-            return failures == 0;
-        }
-
-        private async Task<bool> RemoveRemoteModels(string pattern, string destination)
+        private async Task<bool> RemoveRemoteModels(string pattern, string destination, bool remote = true)
         {
             // Create dedicated HttpClient with BaseAddress
             using var remoteClient = new HttpClient() { Timeout = TimeSpan.FromMinutes(5) };
             remoteClient.BaseAddress = new Uri(destination);
+            // Name the local server in errors: osync may resolve a different one than the user expects (Ollama and xOllama side by side)
+            string onServer = remote ? "" : $" on {destination}";
 
             try
             {
@@ -4694,7 +4510,7 @@ namespace osync
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    Out.Error($"failed to get models from remote server (HTTP {(int)response.StatusCode})");
+                    Out.Error($"failed to get models from {(remote ? "remote" : "local")} server (HTTP {(int)response.StatusCode})");
                     System.Environment.Exit(1);
                 }
 
@@ -4703,7 +4519,7 @@ namespace osync
 
                 if (modelsResponse?.models == null || modelsResponse.models.Count == 0)
                 {
-                    Out.Error($"No models found on remote server.");
+                    Out.Error(remote ? "No models found on remote server." : $"No models found matching pattern: {pattern}{onServer}");
                     return false;
                 }
 
@@ -4725,18 +4541,18 @@ namespace osync
 
                         if (modelsToRemove.Count == 0)
                         {
-                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}')");
+                            Out.Error($"No models found matching pattern: {pattern} (tried '{pattern}' and '{latestPattern}'){onServer}");
                             return false;
                         }
                     }
                     else
                     {
-                        Out.Error($"No models found matching pattern: {pattern}");
+                        Out.Error($"No models found matching pattern: {pattern}{onServer}");
                         return false;
                     }
                 }
 
-                Console.WriteLine($"Removing {modelsToRemove.Count} model(s) from remote server...");
+                Console.WriteLine(remote ? $"Removing {modelsToRemove.Count} model(s) from remote server..." : $"Removing {modelsToRemove.Count} model(s) from {destination}...");
                 int failures = 0;
 
                 foreach (var modelName in modelsToRemove)
@@ -4778,7 +4594,7 @@ namespace osync
             }
             catch (Exception e)
             {
-                Out.Error($"failed to remove remote models: {e.Message}");
+                Out.Error($"failed to remove {(remote ? "remote" : "local")} models: {e.Message}");
                 System.Environment.Exit(1);
                 return false;
             }
@@ -5483,6 +5299,15 @@ namespace osync
 
                 if (root.TryGetProperty("capabilities", out var caps) && caps.ValueKind == JsonValueKind.Array)
                     PrintShowSection("Capabilities", caps.EnumerateArray().Select(c => (c.GetString() ?? "", "")));
+
+                // xOllama's own settings, media engines included (schema v7 media.* rows), as `xollama show` lists them
+                if (root.TryGetProperty("xollama", out var xollama) && xollama.ValueKind == JsonValueKind.Object)
+                    PrintShowSection("xOllama", XOllamaTweak.Flatten(xollama).Select(r =>
+                    {
+                        // long values (council prompts) shortened unless --verbose
+                        var value = r.Value.ReplaceLineEndings(" ");
+                        return (r.Path, !verbose && value.Length > 80 ? value[..77] + "..." : value);
+                    }));
 
                 if (root.TryGetProperty("projector_info", out var projector) && projector.ValueKind == JsonValueKind.Object)
                 {

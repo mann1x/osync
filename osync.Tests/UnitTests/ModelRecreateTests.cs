@@ -101,6 +101,45 @@ public class ModelRecreateTests
         act.Should().Throw<NotSupportedException>().WithMessage("*vnd.ollama.image.tensor*");
     }
 
+    [Fact]
+    public void BuildCreateRequest_MediaTemplate_SendsItsSettingsAndNoFiles()
+    {
+        const string tts = "sha256:8888888888888888888888888888888888888888888888888888888888888888";
+        const string vocoder = "sha256:9999999999999999999999999999999999999999999999999999999999999999";
+        var settings = """{"version":7,"media":{"tts":{"engine":"outetts","model":"TTS","vocoder":"VOC"}}}"""
+            .Replace("TTS", tts).Replace("VOC", vocoder);
+        var manifest = Manifest((XOllamaMedia.Layer, tts), (XOllamaMedia.Layer, vocoder), (ModelRecreate.XOllamaLayer, XOllama));
+
+        var request = ModelRecreate.BuildCreateRequest("mannix/outetts:0.3", manifest,
+            d => d == XOllama ? Encoding.UTF8.GetBytes(settings) : null, show: null);
+
+        request.Should().NotContainKey("files", "a media template has no GGUF");
+        ((JsonElement)request["xollama"]).GetRawText().Should().Be(settings);
+        ModelRecreate.IsFileLayer(XOllamaMedia.Layer).Should().BeTrue("media blobs are uploaded before the create");
+        ModelRecreate.InlineBlobs(manifest, long.MaxValue).Should().NotContain(new[] { tts, vocoder });
+    }
+
+    [Fact]
+    public void BuildCreateRequest_MediaLayersWithoutSettings_AreRefused()
+    {
+        var manifest = Manifest((XOllamaMedia.Layer, Weights));
+
+        var act = () => ModelRecreate.BuildCreateRequest("m:latest", manifest, _ => null, show: null);
+
+        act.Should().Throw<NotSupportedException>().WithMessage("*media*");
+    }
+
+    [Fact]
+    public void BuildCreateRequest_SendsTheStatedCapabilityLines()
+    {
+        var show = ShowWithModelfile("FROM /m/blobs/sha256-11\nCAPABILITY tools\nCAPABILITY decision\nCAPABILITY speech\n");
+
+        var request = ModelRecreate.BuildCreateRequest("m:latest", Manifest((ModelRecreate.ModelLayer, Weights)), _ => null, show);
+
+        request["capabilities"].Should().BeEquivalentTo(new List<string> { "tools", "decision" }, o => o.WithStrictOrdering(),
+            "media kinds are derived from the settings, never stated");
+    }
+
     private static JsonElement ShowWithModelfile(string modelfile, string extra = "") =>
         Json($$"""{"modelfile":{{JsonSerializer.Serialize(modelfile)}}{{extra}}}""");
 
