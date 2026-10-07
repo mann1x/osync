@@ -1502,6 +1502,15 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.4.4
+
+**Fixed**
+- **Ollama and xOllama 0.40**: uploading a local model (`osync cp model server/...`), `osync update` of local models and `manage` on the local models found nothing ("model not found"): 0.40 keeps its manifests in the models directory's new `manifests-v2/` folder. osync now reads both layouts, the new one first, as the server does
+- **Models with one build per runner** (0.40 manifest lists: a ggml, llama.cpp or MLX build under one tag): a copy between two 0.40 servers keeps the list byte for byte; an upload, a recreate or a copy to a server older than 0.40 installs one build (ggml, else llama.cpp), and the output says which. Before, the destination could not pull the list from the relay and the recreate failed
+
+**CI**
+- Integration tests run against Ollama v0.40.0 and xOllama v0.40.0-rc.1.xollama; the daily compatibility check only tests releases newer than the pinned ones
+
 v1.4.3
 
 **New**

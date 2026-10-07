@@ -152,6 +152,35 @@ Feature: Copy models (cp)
     And the output contains "recreated from its manifest, verified"
     And the model "{dst}" on remote1 has the same layers as "{src}" on local
 
+  # Ollama/xOllama 0.40+: a tag can hold one build per runner (a manifest list). Between two such servers the list
+  # is copied as is; an upload, a recreate or an older destination gets one build (ggml, else llamacpp).
+  @remote1 @remote2 @stores
+  Scenario: Copying a model with one build per runner keeps its manifest list
+    Given a test model "child" on remote1
+    And a model "src" with one build per runner of "child" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}"
+    Then the command succeeds
+    And the output contains "through the relay, verified"
+    And the model "{dst}" on remote2 has the same manifest as "{src}" on remote1
+
+  @remote1 @remote2 @stores
+  Scenario: Recreating a model with one build per runner installs its build
+    Given a test model "child" on remote1
+    And a model "src" with one build per runner of "child" on remote1
+    When I run osync "cp {remote1}/{src} {remote2}/{dst}" with OSYNC_RELAY_INSTALL set to "create"
+    Then the command succeeds
+    And the output contains "recreated from its manifest, verified"
+    And the model "{dst}" on remote2 has the same layers as "{src}" on remote1
+
+  @local @remote1 @stores
+  Scenario: Uploading a model with one build per runner copies its build
+    Given a test model "child" on local
+    And a model "src" with one build per runner of "child" on local
+    When I run osync "cp {src} {remote1}/{dst}"
+    Then the command succeeds
+    And the output contains "one build per runner"
+    And the model "{dst}" on remote1 has the same layers as "{src}" on local
+
   # Interoperability: remote1/remote2 run one flavor (Ollama or xOllama), peer the other.
   @remote1 @peer @stores
   Scenario: Copy to a server of the other flavor keeps every layer

@@ -665,82 +665,46 @@ namespace osync
         private void FetchLocalModels()
         {
             _allModels = new List<ManageModelInfo>();
-            string manifestsDir = Path.Combine(_program.ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
+            if (!Directory.Exists(_program.ollama_models))
             {
                 return;
             }
 
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
+            // Every host (registry.ollama.ai, hf.co, ...) in both store layouts (see ModelStore)
+            foreach (var (name, tagFile) in ModelStore.EnumerateManifests(_program.ollama_models))
             {
-                string host = Path.GetFileName(hostDir);
+                var fileInfo = new FileInfo(tagFile);
+                long totalSize = 0;
+                string modelId = "";
+                var kinds = new List<string>();
 
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
+                try
                 {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
+                    // A manifest list (one build per runner) is sized and classified by the build a copy takes
+                    var manifest = JsonSerializer.Deserialize<RootManifest>(ModelStore.ReadModelManifest(_program.ollama_models, tagFile, out _));
+                    if (manifest?.layers != null)
                     {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            var fileInfo = new FileInfo(tagFile);
-                            long totalSize = 0;
-                            string modelId = "";
-                            var kinds = new List<string>();
-
-                            try
-                            {
-                                var manifest = ManifestReader.Read<RootManifest>(tagFile);
-                                if (manifest?.layers != null)
-                                {
-                                    totalSize = manifest.layers.Sum(l => l.size);
-                                    kinds = _program.LocalModelKinds(manifest.layers);
-                                }
-
-                                // Compute SHA256 of manifest file content (same as ollama ls)
-                                var hashBytes = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(tagFile));
-                                modelId = Convert.ToHexString(hashBytes).ToLowerInvariant()[..12];
-                            }
-                            catch { }
-
-                            _allModels.Add(new ManageModelInfo
-                            {
-                                Name = fullModelName,
-                                ShortId = modelId,
-                                FullDigest = modelId,
-                                Size = totalSize,
-                                SizeFormatted = FormatSize(totalSize),
-                                ModifiedAt = fileInfo.LastWriteTime,
-                                ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime),
-                                Kinds = kinds
-                            });
-                        }
+                        totalSize = manifest.layers.Sum(l => l.size);
+                        kinds = _program.LocalModelKinds(manifest.layers);
                     }
+
+                    // Compute SHA256 of manifest file content (same as ollama ls)
+                    var hashBytes = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(tagFile));
+                    modelId = Convert.ToHexString(hashBytes).ToLowerInvariant()[..12];
                 }
+                catch { }
+
+                _allModels.Add(new ManageModelInfo
+                {
+                    Name = name.Display,
+                    ShortId = modelId,
+                    FullDigest = modelId,
+                    Size = totalSize,
+                    SizeFormatted = FormatSize(totalSize),
+                    ModifiedAt = fileInfo.LastWriteTime,
+                    ModifiedFormatted = GetTimeAgo(fileInfo.LastWriteTime),
+                    Kinds = kinds
+                });
             }
         }
 

@@ -62,6 +62,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `QcScoring.cs` - Score calculation logic for QC results
 - `OllamaModels.cs` - Ollama API data models
 - `ThrottledStream.cs` - Bandwidth limiting for transfers
+- `ModelStore.cs` - the on-disk model store: manifest paths in the `manifests-v2/` (0.40+) and legacy `manifests/` layouts, manifest lists (one build per runner) and the child a copy takes; use it instead of building `manifests/...` paths
 - `ModelRecreate.cs` - `/api/create` body that rebuilds a model from its manifest byte for byte (copy fallback, local→remote upload) and the modelfile comparison that verifies a copy
 - `CloudProviders/` - Cloud AI provider implementations for judge models
 

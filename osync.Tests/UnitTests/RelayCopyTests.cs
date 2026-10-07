@@ -70,4 +70,18 @@ public class OllamaServerTests
         port.Should().BeGreaterThan(1024);
         relay.ModelName().Should().StartWith($"127.0.0.1:{port}/osync/relay-");
     }
+
+    [Theory]
+    [InlineData("0.40.0", true)]
+    [InlineData("0.40.0-rc.1.xollama", true)]
+    [InlineData("0.41.2", true)]
+    [InlineData("1.0.0", true)]
+    [InlineData("0.0.0", true)]
+    [InlineData("unknown", true)]
+    [InlineData("0.35.1-xollama.4", false)]
+    [InlineData("0.34.4", false)]
+    public void SupportsManifestLists_From040(string version, bool expected)
+    {
+        RelayCopy.SupportsManifestLists(version).Should().Be(expected);
+    }
 }
