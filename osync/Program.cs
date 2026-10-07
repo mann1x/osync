@@ -2568,20 +2568,6 @@ namespace osync
             }
         }
         
-        public static string ModelBase(string modelName)
-        {
-            string[] parts = modelName.Split('/');
-
-            if (modelName.Contains("/"))
-            {
-                return parts[0];
-            }
-            else
-            {
-                return "";
-            }
-        }
-
         /// <summary>
         /// Parse a remote URL into server URL and model name components.
         /// Model name may be empty if the URL doesn't contain one.
@@ -2864,93 +2850,40 @@ namespace osync
                 System.Environment.Exit(1);
             }
 
-            string modelBase = ModelBase(Source);
-
-            string modelDir;
             string blobDir = $"{ollama_models}{separator}blobs";
-            string manifest_file = Source;
-            if (!Source.Contains(":"))
-            {
-                manifest_file = $"{manifest_file}{separator}latest";
-            }
-            else
-            {
-                manifest_file = Source.Replace(":", separator);
-            }
 
-            // Convert forward slashes to platform separator for path construction
-            manifest_file = manifest_file.Replace("/", separator);
-
-            if (modelBase == "hub")
+            // The manifest is in manifests-v2/ (Ollama/xOllama 0.40+) or manifests/ (older servers): see ModelStore
+            string? modelDir = ModelStore.FindManifest(ollama_models, Source);
+            if (modelDir == null)
             {
-                modelDir = Path.Combine(ollama_models, "manifests", manifest_file);
+                Out.Error(ModelStore.Parse(Source) is { } parsed && !Source.EndsWith($":{parsed.Tag}")
+                    ? $"model '{Source}' not found (tried '{Source}' and '{Source}:latest')"
+                    : $"model '{Source}' not found in {ollama_models}");
+                System.Environment.Exit(1);
+                return;
             }
-            else if (modelBase == "hf.co")
-            {
-                // HuggingFace models are stored directly under manifests/hf.co/... (not under registry.ollama.ai)
-                modelDir = Path.Combine(ollama_models, "manifests", manifest_file);
-            }
-            else if (modelBase == "")
-            {
-                modelDir = Path.Combine(ollama_models, "manifests", "registry.ollama.ai", "library", manifest_file);
-            }
-            else
-            {
-                modelDir = Path.Combine(ollama_models, "manifests", "registry.ollama.ai", manifest_file);
-            }
-
-            if (!System.IO.File.Exists(modelDir))
-            {
-                // If model not found and no tag specified, try with :latest
-                if (!Source.Contains(":"))
-                {
-                    string latestSource = $"{Source}:latest";
-                    string latestManifestFile = latestSource.Replace(":", separator).Replace("/", separator);
-                    string latestModelDir;
-
-                    if (modelBase == "hub")
-                    {
-                        latestModelDir = Path.Combine(ollama_models, "manifests", latestManifestFile);
-                    }
-                    else if (modelBase == "hf.co")
-                    {
-                        latestModelDir = Path.Combine(ollama_models, "manifests", latestManifestFile);
-                    }
-                    else if (modelBase == "")
-                    {
-                        latestModelDir = Path.Combine(ollama_models, "manifests", "registry.ollama.ai", "library", latestManifestFile);
-                    }
-                    else
-                    {
-                        latestModelDir = Path.Combine(ollama_models, "manifests", "registry.ollama.ai", latestManifestFile);
-                    }
-
-                    if (System.IO.File.Exists(latestModelDir))
-                    {
-                        // Found with :latest tag, update variables
-                        Source = latestSource;
-                        manifest_file = latestManifestFile;
-                        modelDir = latestModelDir;
-                    }
-                    else
-                    {
-                        Out.Error($"model '{Source}' not found (tried '{Source}' and '{latestSource}')");
-                        System.Environment.Exit(1);
-                    }
-                }
-                else
-                {
-                    Out.Error($"model '{Source}' not found at: {modelDir}");
-                    System.Environment.Exit(1);
-                }
-            }
+            if (ModelStore.Parse(Source) is { } name && !Source.EndsWith($":{name.Tag}"))
+                Source = $"{Source}:{name.Tag}";
 
             Out.StatusLine($"Copying model '{Source}' to '{destModel}' on {destServer}...");
 
             // The manifest and every blob are in the local models directory: the model is recreated on the destination
             // from them verbatim (weights by digest; template, parameters, renderer, xOllama settings, ... inline)
-            byte[] manifestBytes = System.IO.File.ReadAllBytes(modelDir);
-            RootManifest? manifest = ManifestReader.Read<RootManifest>(modelDir);
+            byte[] manifestBytes;
+            try
+            {
+                manifestBytes = ModelStore.ReadModelManifest(ollama_models, modelDir, out var runner);
+                if (runner != null)
+                    Console.WriteLine($"'{Source}' has one build per runner: copying its {runner} build.");
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
+            {
+                Out.Error($"cannot read the manifest of '{Source}': {e.Message}");
+                System.Environment.Exit(1);
+                return;
+            }
+            RootManifest? manifest = null;
+            try { manifest = JsonSerializer.Deserialize<RootManifest>(manifestBytes); } catch (JsonException) { }
             if (manifest?.layers == null)
             {
                 Out.Error("Invalid manifest file");
@@ -5373,56 +5306,19 @@ namespace osync
         private bool UpdateLocalModels(string pattern)
         {
             var modelsToUpdate = new List<string>();
-            string manifestsDir = Path.Combine(ollama_models, "manifests");
-
-            if (!Directory.Exists(manifestsDir))
+            if (!Directory.Exists(Path.Combine(ollama_models, ModelStore.V2Dir)) && !Directory.Exists(Path.Combine(ollama_models, ModelStore.LegacyDir)))
             {
                 Out.Error($"No local models found.");
                 // Nothing to update is only an error when a specific model/pattern was asked for
                 return pattern == "*";
             }
 
-            // Scan all hosts (registry.ollama.ai, hf.co, hub, etc.)
-            foreach (string hostDir in Directory.GetDirectories(manifestsDir))
+            // Every host (registry.ollama.ai, hf.co, ...) in both store layouts (see ModelStore)
+            foreach (var (name, _) in ModelStore.EnumerateManifests(ollama_models))
             {
-                string host = Path.GetFileName(hostDir);
-
-                // Scan all namespaces within each host
-                foreach (string namespaceDir in Directory.GetDirectories(hostDir))
+                if (MatchesPattern(name.Display, pattern))
                 {
-                    string ns = Path.GetFileName(namespaceDir);
-
-                    // Scan all models within each namespace
-                    foreach (string modelDir in Directory.GetDirectories(namespaceDir))
-                    {
-                        string model = Path.GetFileName(modelDir);
-
-                        // Tags are files directly in the model directory
-                        foreach (string tagFile in Directory.GetFiles(modelDir))
-                        {
-                            string tag = Path.GetFileName(tagFile);
-
-                            // Build display name based on host/namespace
-                            string fullModelName;
-                            if (host == "registry.ollama.ai" && ns == "library")
-                            {
-                                fullModelName = $"{model}:{tag}";
-                            }
-                            else if (host == "registry.ollama.ai")
-                            {
-                                fullModelName = $"{ns}/{model}:{tag}";
-                            }
-                            else
-                            {
-                                fullModelName = $"{host}/{ns}/{model}:{tag}";
-                            }
-
-                            if (MatchesPattern(fullModelName, pattern))
-                            {
-                                modelsToUpdate.Add(fullModelName);
-                            }
-                        }
-                    }
+                    modelsToUpdate.Add(name.Display);
                 }
             }
 
@@ -7581,22 +7477,6 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         }
     }
 
-    public static class ManifestReader
-    {
-        public static T? Read<T>(string filePath)
-        {
-            try
-            {
-                string text = System.IO.File.ReadAllText(filePath);
-                return JsonSerializer.Deserialize<T>(text);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error parsing the manifest file: " + ex.Message);
-                return default;
-            }
-        }
-    }
     public static class StatusReader
     {
         public static T? Read<T>(string statusline)

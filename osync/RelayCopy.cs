@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace osync
 {
@@ -101,7 +102,8 @@ namespace osync
             await PushAsync(sourceServer, tempName, relay);
             if (relay.Manifest == null)
                 throw new InvalidOperationException("the source server did not push a manifest");
-            var manifest = relay.Manifest;
+            var listChild = await ManifestListChildAsync(sourceServer, tempName, relay);
+            var manifest = listChild?.Manifest ?? relay.Manifest;
 
             Console.WriteLine($"Installing '{destModel}' on {destServer}...");
             string method;
@@ -110,6 +112,9 @@ namespace osync
                 // OSYNC_RELAY_INSTALL=create skips the manifest pull (e.g. for destinations that cannot reach this machine)
                 if (string.Equals(Environment.GetEnvironmentVariable("OSYNC_RELAY_INSTALL"), "create", StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("OSYNC_RELAY_INSTALL=create");
+                // A server older than 0.40 stores a manifest list it cannot read: it gets one build, recreated
+                if (listChild != null && await ServerVersionAsync(destServer) is { } version && !SupportsManifestLists(version))
+                    throw new InvalidOperationException($"version {version} predates models with one build per runner");
                 await PostAsync(destServer, "/api/pull", new { model = tempName, insecure = true, stream = false });
                 await PostAsync(destServer, "/api/copy", new { source = tempName, destination = destModel });
                 method = "through the relay";
@@ -122,7 +127,9 @@ namespace osync
                     Console.WriteLine("The destination cannot store a manifest from the relay (Windows does not allow ':' in folder names).");
                 else
                     Out.Warning($"the destination could not install the manifest from the relay ({ex.Message}).");
-                Console.WriteLine("Recreating the model from its manifest on the destination...");
+                Console.WriteLine(listChild is { } child
+                    ? $"Recreating the model's {child.Runner} build on the destination (the model has one build per runner)..."
+                    : "Recreating the model from its manifest on the destination...");
                 await FetchSmallBlobsAsync(sourceServer, tempName, relay, manifest);
                 var request = ModelRecreate.BuildCreateRequest(destModel, manifest,
                     digest => relay.SmallBlobs.TryGetValue(digest, out var data) ? data : null, sourceShow.RootElement);
@@ -137,6 +144,59 @@ namespace osync
             Console.WriteLine($"Transferred {relay.Transferred.Count} blob(s), {relay.Skipped.Count} already present on the destination");
             await VerifyAsync(sourceShow.RootElement, destServer, destModel);
             return $"{method}, verified";
+        }
+
+        /// <summary>
+        /// For a manifest list (Ollama/xOllama 0.40+: one build per runner) the child manifest a recreate installs (see
+        /// <see cref="ModelStore.SelectChild"/>); null for a plain manifest. The destination's pull of the list reads the
+        /// child manifests from the relay: those the destination already had were skipped by the push, so the source
+        /// pushes again and the relay asks for exactly those.
+        /// </summary>
+        private static async Task<(byte[] Manifest, string Runner)?> ManifestListChildAsync(string sourceServer, string tempName, RegistryRelay relay)
+        {
+            if (JsonNode.Parse(relay.Manifest!) is not JsonObject list ||
+                (string?)list["mediaType"] != ModelStore.ManifestListMediaType)
+                return null;
+
+            var children = list["manifests"] is JsonArray array
+                ? array.Select(c => (string?)c?["digest"]).OfType<string>().ToList()
+                : [];
+            foreach (var digest in children.Where(d => !relay.SmallBlobs.ContainsKey(d)))
+                relay.ForceUpload[digest] = true;
+            if (!relay.ForceUpload.IsEmpty)
+                await PushAsync(sourceServer, tempName, relay);
+            relay.ForceUpload.Clear();
+
+            var child = ModelStore.SelectChild(list) ?? throw new InvalidOperationException("the source pushed an empty manifest list");
+            return relay.SmallBlobs.TryGetValue(child.Digest, out var data)
+                ? (data, child.Runner)
+                : throw new InvalidOperationException($"the source did not push the {child.Runner} build's manifest");
+        }
+
+        /// <summary>
+        /// Whether a server of this version (/api/version: "0.40.0", "0.40.0-rc.1.xollama", "0.35.1-xollama.4") reads manifest
+        /// lists: 0.40 and later. A version that does not parse (a dev build's "0.0.0", a fork's scheme) is assumed to.
+        /// </summary>
+        internal static bool SupportsManifestLists(string version)
+        {
+            var parts = version.TrimStart('v').Split('.', '-', '+');
+            if (parts.Length < 2 || !int.TryParse(parts[0], out var major) || !int.TryParse(parts[1], out var minor) ||
+                (major == 0 && minor == 0))
+                return true;
+            return major > 0 || minor >= 40;
+        }
+
+        private static async Task<string?> ServerVersionAsync(string server)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(await Http.GetStringAsync($"{server}/api/version"));
+                return doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() : null;
+            }
+            catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException)
+            {
+                return null;
+            }
         }
 
         /// <summary>

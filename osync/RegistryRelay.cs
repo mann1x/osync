@@ -18,7 +18,8 @@ namespace osync
     /// destination can pull it back (it finds every blob locally and only installs the manifest).
     ///
     /// Implements just what Ollama's push/pull clients use: HEAD blob, POST upload, PATCH chunk,
-    /// PUT upload completion, PUT/GET/HEAD manifest. Every response closes the connection.
+    /// PUT upload completion, PUT/GET/HEAD manifest, and GET blob for the small blobs it relayed (the child manifests a
+    /// 0.40+ server pulls for a manifest list). Every response closes the connection.
     /// Requests for any repository other than <see cref="Repository"/> are rejected, and so are connections from
     /// anything but the source and destination servers (OSYNC_RELAY_ALLOW_ANY=1 lifts this, e.g. behind NAT); digests
     /// must be sha256:&lt;64 hex&gt; (they become part of the destination's URL), and once a manifest is stored a
@@ -68,6 +69,9 @@ namespace osync
         public ConcurrentDictionary<string, byte[]> SmallBlobs { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public const int SmallBlobLimit = 1024 * 1024;
+
+        /// <summary>Sizes of the blobs the destination accepted through the relay, by digest.</summary>
+        public ConcurrentDictionary<string, long> BlobSizes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Digests the relay asks the source to upload even when the destination already has them, so that their
@@ -297,6 +301,11 @@ namespace osync
                     await BlobExistsAsync(stream, digest);
                     return;
                 }
+                if (req.Method == "GET")
+                {
+                    await GetBlobAsync(stream, digest);
+                    return;
+                }
             }
             else if (rest.StartsWith("manifests/", StringComparison.Ordinal))
             {
@@ -329,7 +338,10 @@ namespace osync
             if (exists && !ForceUpload.ContainsKey(digest))
             {
                 Skipped.Add(digest);
-                await WriteResponseAsync(stream, 200, "OK", new() { ["Docker-Content-Digest"] = digest });
+                // A pull of a manifest list (Ollama 0.40+) sizes the child manifest from this answer and downloads it
+                // unless the destination has a blob of that size
+                long? size = BlobSizes.TryGetValue(digest, out var known) ? known : null;
+                await WriteResponseAsync(stream, 200, "OK", new() { ["Docker-Content-Digest"] = digest }, contentLength: size);
             }
             else
             {
@@ -337,6 +349,18 @@ namespace osync
                 lock (_lock) _pendingDigest = digest;
                 await WriteResponseAsync(stream, 404, "Not Found");
             }
+        }
+
+        /// <summary>GET blob: only the small blobs that went through the relay (a manifest list's child manifests).</summary>
+        private async Task GetBlobAsync(NetworkStream stream, string digest)
+        {
+            if (!IsValidDigest(digest) || !SmallBlobs.TryGetValue(digest, out var data))
+            {
+                await WriteResponseAsync(stream, 404, "Not Found");
+                return;
+            }
+            await WriteResponseAsync(stream, 200, "OK", new() { ["Docker-Content-Digest"] = digest },
+                body: data, contentType: "application/octet-stream");
         }
 
         private async Task StartUploadAsync(HttpRequest req, NetworkStream stream)
@@ -501,14 +525,16 @@ namespace osync
         };
 
         private static async Task WriteResponseAsync(NetworkStream stream, int status, string reason,
-            Dictionary<string, string>? headers = null, byte[]? body = null, string? contentType = null, bool headOnly = false)
+            Dictionary<string, string>? headers = null, byte[]? body = null, string? contentType = null, bool headOnly = false,
+            long? contentLength = null)
         {
             var sb = new StringBuilder();
             sb.Append("HTTP/1.1 ").Append(status).Append(' ').Append(reason).Append("\r\n");
             sb.Append("Connection: close\r\n");
             sb.Append("Docker-Distribution-API-Version: registry/2.0\r\n");
             if (contentType != null) sb.Append("Content-Type: ").Append(contentType).Append("\r\n");
-            sb.Append("Content-Length: ").Append(body?.Length ?? 0).Append("\r\n");
+            // contentLength: the size of a resource a HEAD answer describes without a body
+            sb.Append("Content-Length: ").Append(contentLength ?? body?.Length ?? 0).Append("\r\n");
             if (headers != null)
                 foreach (var (name, value) in headers)
                     sb.Append(name).Append(": ").Append(value).Append("\r\n");
@@ -618,6 +644,7 @@ namespace osync
                     throw new InvalidOperationException($"destination rejected blob {Digest}: {(int)response.StatusCode} {text}".Trim());
                 }
 
+                relay.BlobSizes[Digest!] = Received;
                 if (_copy != null)
                 {
                     var data = _copy.ToArray();

@@ -106,6 +106,19 @@ public class RegistryRelayTests
         status.Should().Be(404);
     }
 
+    [Fact]
+    public async Task GetBlob_ServesOnlyBlobsTheRelayForwarded()
+    {
+        await using var relay = RegistryRelay.Start(NoServer, NoServer, 0, 0);
+        var data = Encoding.UTF8.GetBytes("{\"schemaVersion\":2}");
+        var digest = "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)).ToLowerInvariant();
+        relay.SmallBlobs[digest] = data;
+
+        (await SendAsync(relay, "GET", $"/v2/{relay.Repository}/blobs/{digest}")).Should().Be(200);
+        (await SendAsync(relay, "GET", $"/v2/{relay.Repository}/blobs/sha256:{new string('0', 64)}")).Should().Be(404);
+        (await SendAsync(relay, "GET", $"/v2/{relay.Repository}/blobs/..%2F..%2Fapi%2Ftags")).Should().Be(404);
+    }
+
     private static async Task<string> StartUploadAsync(RegistryRelay relay)
     {
         var (status, headers) = await SendRawAsync(relay, "POST", $"/v2/{relay.Repository}/blobs/uploads/", null);

@@ -100,11 +100,12 @@ jobs:
           chmod +x ~/srv/peer/xollama
 
       # xOllama ships a bare Linux binary; its llama.cpp runtime is upstream Ollama's of the base version
-      # (the fork's release process pins them to the same llama.cpp).
+      # (the fork's release process pins them to the same llama.cpp): v0.35.1-xollama.4 and v0.40.0-rc.1.xollama
+      # run on Ollama v0.35.1's and v0.40.0's.
       - name: Install xOllama ${{ steps.ver.outputs.version }} (CPU)
         if: inputs.server == 'xollama' && steps.server-cache.outputs.cache-hit != 'true'
         run: |
-          v="${{ steps.ver.outputs.version }}"; base="${v%-xollama.*}"
+          v="${{ steps.ver.outputs.version }}"; base="${v%%-*}"
           mkdir -p ~/srv/bin
           cd ~/srv
           curl -fsSL --retry 5 -o bin/xollama "https://github.com/mann1x/xollama/releases/download/$v/xollama-linux-amd64"

@@ -112,6 +112,26 @@ public sealed class OllamaApi
             throw new InvalidOperationException($"Creating test model {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
     }
 
+    /// <summary>The server's /api/version.</summary>
+    public async Task<string> VersionAsync()
+    {
+        using var doc = JsonDocument.Parse(await Http.GetStringAsync($"{BaseUrl}/api/version"));
+        return doc.RootElement.GetProperty("version").GetString() ?? "";
+    }
+
+    /// <summary>
+    /// Creates <paramref name="model"/> as a manifest list (one build per runner, Ollama/xOllama 0.40+) of local models,
+    /// the way `ollama create --list` does.
+    /// </summary>
+    public async Task CreateManifestListAsync(string model, params string[] children)
+    {
+        var body = new { model = WithTag(model), list = children.Select(WithTag).ToArray(), stream = false };
+        using var resp = await Http.PostAsJsonAsync($"{BaseUrl}/api/create", body);
+        var text = await resp.Content.ReadAsStringAsync();
+        if (!resp.IsSuccessStatusCode || text.Contains("\"error\""))
+            throw new InvalidOperationException($"Creating manifest list {model} on {BaseUrl} failed: {(int)resp.StatusCode} {text}");
+    }
+
     /// <summary>
     /// Replaces the xOllama config of <paramref name="model"/> (xOllama only): a create from the model itself with
     /// the "xollama" field, which is what `xollama tweak model` sends.

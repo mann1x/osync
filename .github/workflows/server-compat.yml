@@ -46,7 +46,9 @@ jobs:
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
           echo "$SERVER tested: $tested, latest stable: ${latest:-none}" >> "$GITHUB_STEP_SUMMARY"
           run=false
-          if [ -n "$latest" ] && [ "$latest" != "$tested" ]; then
+          # Only a release newer than the tested one (CI may pin a pre-release ahead of the latest stable)
+          newest="$(printf '%s\n%s\n' "$tested" "$latest" | sort -V | tail -n1)"
+          if [ -n "$latest" ] && [ "$latest" != "$tested" ] && [ "$newest" = "$latest" ]; then
             run=true
             if gh pr list --state open --head "ci/$SERVER-$latest" --json number --jq '.[0].number' | grep -q .; then
               echo "Bump PR for $latest already open" >> "$GITHUB_STEP_SUMMARY"; run=false
