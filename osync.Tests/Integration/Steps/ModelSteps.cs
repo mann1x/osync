@@ -35,6 +35,17 @@ public sealed class ModelSteps
         await ScenarioState.Api(server).CreateFromTestModelAsync(name, asset, renderer);
     }
 
+    /// <summary>A manifest list (one build per runner) of models already on the server; skipped before 0.40.</summary>
+    [Given("a model {string} with one build per runner of {string} on {word}")]
+    public async Task GivenAManifestListOn(string model, string child, string server)
+    {
+        var api = ScenarioState.Api(server);
+        var version = await api.VersionAsync();
+        if (!RelayCopy.SupportsManifestLists(version))
+            _runtime.TestIgnore($"{server} runs {version}: one build per runner needs 0.40 or later");
+        await api.CreateManifestListAsync(_state.Resolve(AsPlaceholder(model)), _state.Resolve(AsPlaceholder(child)));
+    }
+
     /// <summary>"alpha" -> "{alpha}", "alpha:v1" -> "{alpha}:v1"; text that already has placeholders is kept.</summary>
     private static string AsPlaceholder(string model)
     {
@@ -186,15 +197,27 @@ public sealed class ModelSteps
         copy.Should().Equal(orig, "the copy should have the source's config and layers, byte for byte");
     }
 
+    /// <summary>The named manifests (read from the servers' models directories, see @stores) are the same bytes.</summary>
+    [Then("the model {string} on {word} has the same manifest as {string} on {word}")]
+    public void ThenTheModelHasTheSameManifestAs(string model, string server, string original, string originalServer)
+    {
+        ManifestBytes(server, _state.Resolve(model)).Should().Equal(ManifestBytes(originalServer, _state.Resolve(original)),
+            "the copy should have the source's manifest, byte for byte, after:\n{0}", _state.LastResult);
+    }
+
+    private static byte[] ManifestBytes(string server, string model)
+    {
+        var store = TestEnvironment.StoreDir(server) ?? throw new InvalidOperationException($"No models directory for {server}");
+        var path = ModelStore.FindManifest(store, model) ?? throw new FileNotFoundException($"No manifest for '{model}' in {store}");
+        return File.ReadAllBytes(path);
+    }
+
     private static List<string> ManifestDigests(string server, string model)
     {
         var store = TestEnvironment.StoreDir(server) ?? throw new InvalidOperationException($"No models directory for {server}");
-        var colon = model.LastIndexOf(':');
-        var (name, tag) = colon > model.LastIndexOf('/') ? (model[..colon], model[(colon + 1)..]) : (model, "latest");
-        var path = name.Contains('/')
-            ? Path.Combine(store, "manifests", "registry.ollama.ai", name, tag)
-            : Path.Combine(store, "manifests", "registry.ollama.ai", "library", name, tag);
-        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        // manifests-v2/ on 0.40+, manifests/ on older servers; a manifest list is compared by the build a copy takes
+        var path = ModelStore.FindManifest(store, model) ?? throw new FileNotFoundException($"No manifest for '{model}' in {store}");
+        using var doc = JsonDocument.Parse(ModelStore.ReadModelManifest(store, path, out _));
         var root = doc.RootElement;
         return root.GetProperty("layers").EnumerateArray()
             .Select(l => $"{l.GetProperty("mediaType").GetString()} {l.GetProperty("digest").GetString()}")
