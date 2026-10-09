@@ -152,129 +152,7 @@ public class BrailleGraph
     /// <param name="expectedDataPoints">Expected data points for full history (0 = no scaling)</param>
     public string[] Render(int targetWidthChars, int expectedDataPoints)
     {
-        lock (_lock)
-        {
-            var lines = new string[_heightChars];
-            var dataArray = _data.ToArray();
-
-            // Use target width for rendering
-            int renderWidthChars = Math.Max(1, targetWidthChars);
-            int pixelWidth = renderWidthChars * 2;
-            int pixelHeight = _heightChars * 4;
-
-            if (dataArray.Length == 0)
-            {
-                // Return empty graph at target width
-                var emptyLine = new string(BrailleBase, renderWidthChars);
-                for (int i = 0; i < _heightChars; i++)
-                    lines[i] = $"[dim]{emptyLine}[/]";
-                return lines;
-            }
-
-            // Calculate value range
-            double range = _maxValue - _minValue;
-            if (range < 0.001) range = 1;
-
-            // Create pixel buffer and color buffer at render width
-            var pixels = new bool[pixelWidth, pixelHeight];
-            var pixelColors = new string?[pixelWidth];
-
-            // Calculate scaling factor
-            // If expectedDataPoints > 0, scale so that expectedDataPoints would fill the entire width
-            // Otherwise, 1 data point = 1 pixel
-            double pixelsPerDataPoint;
-            if (expectedDataPoints > 0)
-            {
-                // Scale so the expected data points fill the entire width
-                pixelsPerDataPoint = (double)pixelWidth / expectedDataPoints;
-            }
-            else
-            {
-                pixelsPerDataPoint = 1.0;
-            }
-
-            // Calculate how much width our actual data will occupy
-            double dataPixelWidth = dataArray.Length * pixelsPerDataPoint;
-
-            // Start position - right-aligned
-            // If we have less data than expected, it won't fill the full width (which is correct)
-            double startX = pixelWidth - dataPixelWidth;
-
-            for (int i = 0; i < dataArray.Length; i++)
-            {
-                var (value, color) = dataArray[i];
-
-                // Calculate the pixel range this data point covers
-                double xStart = startX + i * pixelsPerDataPoint;
-                double xEnd = startX + (i + 1) * pixelsPerDataPoint;
-
-                // Clamp to valid pixel range
-                int xStartInt = Math.Max(0, (int)Math.Floor(xStart));
-                int xEndInt = Math.Min(pixelWidth, (int)Math.Ceiling(xEnd));
-
-                // Y position (0 = top, pixelHeight-1 = bottom)
-                double normalized = (value - _minValue) / range;
-                normalized = Math.Clamp(normalized, 0, 1);
-                int y = pixelHeight - 1 - (int)(normalized * (pixelHeight - 1));
-                y = Math.Clamp(y, 0, pixelHeight - 1);
-
-                // Fill all pixels that this data point covers
-                for (int x = xStartInt; x < xEndInt; x++)
-                {
-                    pixelColors[x] = color;
-                    // Fill column from bottom to data point (area graph style)
-                    for (int fillY = y; fillY < pixelHeight; fillY++)
-                    {
-                        pixels[x, fillY] = true;
-                    }
-                }
-            }
-
-            // Convert pixel buffer to braille characters with colors
-            for (int row = 0; row < _heightChars; row++)
-            {
-                var sb = new StringBuilder();
-                for (int col = 0; col < renderWidthChars; col++)
-                {
-                    int charValue = 0;
-                    bool hasAnyPixel = false;
-
-                    // Map 2x4 pixel block to braille dots
-                    for (int dx = 0; dx < 2; dx++)
-                    {
-                        for (int dy = 0; dy < 4; dy++)
-                        {
-                            int px = col * 2 + dx;
-                            int py = row * 4 + dy;
-                            if (px < pixelWidth && py < pixelHeight && pixels[px, py])
-                            {
-                                charValue += DotValues[dx, dy];
-                                hasAnyPixel = true;
-                            }
-                        }
-                    }
-
-                    // Get the color for this character (prefer left pixel's color)
-                    int leftPx = col * 2;
-                    int rightPx = col * 2 + 1;
-                    string? charColor = null;
-                    if (leftPx < pixelWidth)
-                        charColor = pixelColors[leftPx];
-                    // If left pixel has no color or empty color, try right pixel
-                    if (string.IsNullOrEmpty(charColor) && rightPx < pixelWidth)
-                        charColor = pixelColors[rightPx];
-
-                    char brailleChar = (char)(BrailleBase + charValue);
-                    if (hasAnyPixel && !string.IsNullOrEmpty(charColor))
-                        sb.Append($"[{charColor}]{brailleChar}[/]");
-                    else
-                        sb.Append($"[dim]{brailleChar}[/]");
-                }
-                lines[row] = sb.ToString();
-            }
-
-            return lines;
-        }
+        return Render(targetWidthChars, expectedDataPoints, _heightChars);
     }
 
     /// <summary>
@@ -285,6 +163,14 @@ public class BrailleGraph
     /// <param name="expectedDataPoints">Expected data points for full history (0 = no scaling)</param>
     /// <param name="heightChars">Height in characters (overrides construction height)</param>
     public string[] Render(int targetWidthChars, int expectedDataPoints, int heightChars)
+    {
+        return Render(targetWidthChars, expectedDataPoints, heightChars, GraphGlyphs.Current);
+    }
+
+    /// <summary>
+    /// Renders the graph with the given glyph style (braille dots or block elements).
+    /// </summary>
+    public string[] Render(int targetWidthChars, int expectedDataPoints, int heightChars, GraphStyle style)
     {
         lock (_lock)
         {
@@ -300,7 +186,7 @@ public class BrailleGraph
             if (dataArray.Length == 0)
             {
                 // Return empty graph at target width
-                var emptyLine = new string(BrailleBase, renderWidthChars);
+                var emptyLine = EmptyLine(renderWidthChars, style);
                 for (int i = 0; i < heightChars; i++)
                     lines[i] = $"[dim]{emptyLine}[/]";
                 return lines;
@@ -367,23 +253,7 @@ public class BrailleGraph
                 var sb = new StringBuilder();
                 for (int col = 0; col < renderWidthChars; col++)
                 {
-                    int charValue = 0;
-                    bool hasAnyPixel = false;
-
-                    // Map 2x4 pixel block to braille dots
-                    for (int dx = 0; dx < 2; dx++)
-                    {
-                        for (int dy = 0; dy < 4; dy++)
-                        {
-                            int px = col * 2 + dx;
-                            int py = row * 4 + dy;
-                            if (px < pixelWidth && py < pixelHeight && pixels[px, py])
-                            {
-                                charValue += DotValues[dx, dy];
-                                hasAnyPixel = true;
-                            }
-                        }
-                    }
+                    char glyph = CellGlyph(pixels, col, row, pixelWidth, pixelHeight, style, out bool hasAnyPixel);
 
                     // Get the color for this character (prefer left pixel's color)
                     int leftPx = col * 2;
@@ -394,19 +264,56 @@ public class BrailleGraph
                     if (string.IsNullOrEmpty(charColor) && rightPx < pixelWidth)
                         charColor = pixelColors[rightPx];
 
-                    char brailleChar = (char)(BrailleBase + charValue);
                     if (hasAnyPixel && !string.IsNullOrEmpty(charColor))
-                        sb.Append($"[{charColor}]{brailleChar}[/]");
+                        sb.Append($"[{charColor}]{glyph}[/]");
                     else if (hasAnyPixel)
-                        sb.Append(brailleChar);
+                        sb.Append(glyph);
                     else
-                        sb.Append($"[dim]{brailleChar}[/]");
+                        sb.Append($"[dim]{glyph}[/]");
                 }
                 lines[row] = sb.ToString();
             }
 
             return lines;
         }
+    }
+
+    /// <summary>
+    /// A line of empty cells: blank braille in braille style, spaces in block style.
+    /// </summary>
+    public static string EmptyLine(int widthChars, GraphStyle style)
+    {
+        return new string(style == GraphStyle.Blocks ? ' ' : BrailleBase, Math.Max(0, widthChars));
+    }
+
+    /// <summary>
+    /// Glyph for one character cell, covering 2x4 pixels.
+    /// Braille maps each pixel to a dot; blocks only have a top and a bottom half
+    /// (full, lower and upper half block, which every console font has, CP437 included).
+    /// </summary>
+    private static char CellGlyph(bool[,] pixels, int col, int row, int pixelWidth, int pixelHeight, GraphStyle style, out bool hasAnyPixel)
+    {
+        int charValue = 0;
+        bool top = false, bottom = false;
+
+        for (int dx = 0; dx < 2; dx++)
+        {
+            for (int dy = 0; dy < 4; dy++)
+            {
+                int px = col * 2 + dx;
+                int py = row * 4 + dy;
+                if (px < pixelWidth && py < pixelHeight && pixels[px, py])
+                {
+                    charValue += DotValues[dx, dy];
+                    if (dy < 2) top = true; else bottom = true;
+                }
+            }
+        }
+
+        hasAnyPixel = charValue != 0;
+        if (style == GraphStyle.Braille)
+            return (char)(BrailleBase + charValue);
+        return top && bottom ? '█' : bottom ? '▄' : top ? '▀' : ' ';
     }
 
     /// <summary>
@@ -425,7 +332,7 @@ public class BrailleGraph
         var lines = Render();
         if (row >= 0 && row < lines.Length)
             return lines[row];
-        return new string(BrailleBase, _widthChars);
+        return EmptyLine(_widthChars, GraphGlyphs.Current);
     }
 
     /// <summary>
