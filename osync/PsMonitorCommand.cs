@@ -928,7 +928,7 @@ public class PsMonitorUI
     private string[] RenderEmptyBrailleLines(int targetWidthChars, int heightChars)
     {
         var result = new string[heightChars];
-        var emptyLine = new string('\u2800', targetWidthChars);
+        var emptyLine = BrailleGraph.EmptyLine(targetWidthChars, GraphGlyphs.Current);
         for (int i = 0; i < heightChars; i++)
         {
             result[i] = $"[dim]{emptyLine}[/]";

@@ -166,8 +166,6 @@ public class NvidiaGpuProvider : IGpuProvider
             var output = process.StandardOutput.ReadToEnd();
             process.WaitForExit(5000);
 
-            // Parse CUDA version from header line like:
-            // "| NVIDIA-SMI 591.74    Driver Version: 591.74    CUDA Version: 13.1  |"
             ParseVersionsFromOutput(output);
         }
         catch { }
@@ -175,27 +173,31 @@ public class NvidiaGpuProvider : IGpuProvider
 
     private void ParseVersionsFromOutput(string output)
     {
+        var (cuda, driver) = ParseNvidiaSmiVersions(output);
+        if (!string.IsNullOrEmpty(cuda))
+            SdkVersion = cuda;
+        if (!string.IsNullOrEmpty(driver) && string.IsNullOrEmpty(DriverVersion))
+            DriverVersion = driver;
+    }
+
+    /// <summary>
+    /// CUDA and driver versions from the header of the default nvidia-smi output:
+    /// "| NVIDIA-SMI 591.74    Driver Version: 591.74    CUDA Version: 13.1  |" (older drivers) or
+    /// "| NVIDIA-SMI 617.42    KMD Version: 617.42    CUDA UMD Version: 13.4  |" (newer drivers,
+    /// where "Driver Version" and "CUDA Version" are deprecated).
+    /// </summary>
+    internal static (string Cuda, string Driver) ParseNvidiaSmiVersions(string output)
+    {
         foreach (var line in output.Split('\n'))
         {
-            // Look for the header line with CUDA Version
-            if (line.Contains("CUDA Version:"))
-            {
-                // Extract CUDA version using regex
-                var cudaMatch = System.Text.RegularExpressions.Regex.Match(line, @"CUDA Version:\s*(\d+\.?\d*)");
-                if (cudaMatch.Success)
-                {
-                    SdkVersion = cudaMatch.Groups[1].Value;
-                }
+            var cudaMatch = System.Text.RegularExpressions.Regex.Match(line, @"CUDA(?:\s+UMD)?\s+Version:\s*(\d+(?:\.\d+)*)");
+            if (!cudaMatch.Success)
+                continue;
 
-                // Also try to get driver version from the same line
-                var driverMatch = System.Text.RegularExpressions.Regex.Match(line, @"Driver Version:\s*(\d+\.?\d*\.?\d*)");
-                if (driverMatch.Success && string.IsNullOrEmpty(DriverVersion))
-                {
-                    DriverVersion = driverMatch.Groups[1].Value;
-                }
-                break;
-            }
+            var driverMatch = System.Text.RegularExpressions.Regex.Match(line, @"(?:Driver|KMD)\s+Version:\s*(\d+(?:\.\d+)*)");
+            return (cudaMatch.Groups[1].Value, driverMatch.Success ? driverMatch.Groups[1].Value : "");
         }
+        return ("", "");
     }
 
     public async Task<List<GpuMetrics>> GetMetricsAsync()

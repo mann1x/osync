@@ -563,7 +563,7 @@ osync psmonitor -d http://192.168.0.100:11434
 
 **Features:**
 
-- Real-time GPU utilization graphs with braille characters
+- Real-time GPU utilization graphs with braille characters (half blocks in the classic Windows console)
 - CPU usage history graph
 - Color-coded metrics (green < 50%, yellow 50-80%, red > 80%)
 - GPU metrics: utilization, VRAM, temperature, power, clocks
@@ -579,23 +579,12 @@ osync psmonitor -d http://192.168.0.100:11434
 - **↑/↓** - Adjust refresh interval (+/- 1 second)
 - **Ctrl+C** - Exit
 
-**Windows Terminal Font Requirements:**
+**Graph characters:**
 
-The monitor uses Unicode braille characters (U+2800-U+28FF) for graphs. On Windows, you need a font that supports these characters:
+The graphs use Unicode braille characters (U+2800-U+28FF). The classic Windows console (conhost, e.g. Command Prompt started outside Windows Terminal) has no font fallback and its default fonts (Consolas, Lucida Console) have no braille, so there the graphs are drawn with half blocks (`█ ▄`), which every console font has. Braille is used on Linux and macOS, in Windows Terminal, VS Code, ConEmu, WezTerm, Alacritty and mintty, and in a classic console whose font has braille (Cascadia, DejaVu Sans Mono, Iosevka).
 
-- **Recommended fonts:**
-  - Cascadia Code / Cascadia Mono (included with Windows Terminal)
-  - DejaVu Sans Mono
-  - Consolas (partial support)
-  - NSimSun
-
-- **To change font in Windows Terminal:**
-  1. Open Windows Terminal settings (Ctrl+,)
-  2. Select your profile (e.g., "Command Prompt" or "PowerShell")
-  3. Go to "Appearance" → "Font face"
-  4. Select "Cascadia Code" or "Cascadia Mono"
-
-- **Note:** CMD with default raster fonts will show "?" for braille characters. Use Windows Terminal for best results.
+- `OSYNC_GRAPH=braille` or `OSYNC_GRAPH=blocks` forces one or the other
+- For the finer braille graphs in a classic console, switch its font to Cascadia Mono (window menu → Properties → Font) or run osync in Windows Terminal
 
 #### Load (`load`)
 
@@ -1501,6 +1490,12 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.5
+
+**Fixed**
+- **`psmonitor` graphs in the classic Windows console** (Command Prompt / conhost) showed rows of boxes: its fonts have no braille. There the graphs are now drawn with half blocks; braille stays everywhere else. `OSYNC_GRAPH=braille|blocks` forces either
+- **`psmonitor` showed no CUDA version with newer NVIDIA drivers** (617.42 and later): `nvidia-smi` names the fields `KMD Version` and `CUDA UMD Version`; both the new and the old names are read
 
 v1.4.4
 
