@@ -90,4 +90,19 @@ public class OsyncSettingsTests : IDisposable
             Environment.SetEnvironmentVariable("OSYNC_CONFIG_DIR", previous);
         }
     }
+
+    [Fact]
+    public void InstallChoices_RoundTrip()
+    {
+        var settings = new OsyncSettings();
+        settings.Install.Completion = false;
+        settings.Install.Directory = "/home/u/.local/bin";
+        settings.Save(SettingsPath);
+
+        var loaded = OsyncSettings.Load(SettingsPath);
+
+        loaded.Install.Completion.Should().BeFalse();
+        loaded.Install.Directory.Should().Be("/home/u/.local/bin");
+        OsyncSettings.Load(Path.Combine(_dir, "missing.json")).Install.Completion.Should().BeNull("not asked yet");
+    }
 }

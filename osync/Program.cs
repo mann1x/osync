@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.4.5";
+        public static string AppVersion = "1.4.6";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -129,7 +129,42 @@ namespace osync
 
         public static string GetFullVersion()
         {
-            return $"v{AppVersion} ({GetBuildVersion()})";
+            return $"{RunningReleaseVersion} ({GetBuildVersion()})";
+        }
+
+        /// <summary>
+        /// Release tag the binary was published as (v1.4.6, or v1.4.6-dev.93 for a dev pre-release), embedded by CI
+        /// (OsyncReleaseTag in osync.csproj); null for local builds.
+        /// </summary>
+        public static string? ReleaseTag
+        {
+            get
+            {
+                var tag = typeof(OsyncProgram).Assembly
+                    .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                    .OfType<System.Reflection.AssemblyMetadataAttribute>()
+                    .FirstOrDefault(a => a.Key == "ReleaseTag")?.Value;
+                return string.IsNullOrWhiteSpace(tag) ? null : tag.Trim();
+            }
+        }
+
+        /// <summary>Version of this binary: its release tag, else <see cref="AppVersion"/>.</summary>
+        internal static ReleaseVersion RunningReleaseVersion =>
+            ReleaseVersion.TryParse(ReleaseTag, out var tagged) ? tagged
+            : ReleaseVersion.TryParse(AppVersion, out var app) ? app : new ReleaseVersion(0, 0, 0, null);
+
+        /// <summary>Where `osync install` puts osync: ~/.osync on Windows, ~/.local/bin on Linux and macOS.</summary>
+        public static string InstallDirectory => OperatingSystem.IsWindows()
+            ? Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".osync")
+            : Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".local", "bin");
+
+        /// <summary>The running osync executable, or null when it runs through the dotnet host (osync.dll).</summary>
+        public static string? RunningBinaryPath()
+        {
+            var path = System.Environment.ProcessPath;
+            if (string.IsNullOrEmpty(path) || Path.GetFileNameWithoutExtension(path).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                return null;
+            return path;
         }
 
         [HelpHook, ArgShortcut("-?"), ArgShortcut("-h"), ArgDescription("Shows this help")]
@@ -1550,9 +1585,16 @@ namespace osync
         }
 
         [ArgActionMethod, ArgDescription("Install osync to user directory, add to PATH, and optionally configure shell completion")]
-        public void Install()
+        public void Install(InstallArgs args)
         {
-            ActionInstall();
+            ActionInstall(args.Yes);
+        }
+
+        [ArgActionMethod, ArgDescription("Check GitHub for a newer osync and upgrade the installed (or running) binary")]
+        public void Upgrade(UpgradeArgs args)
+        {
+            var code = new UpgradeCommand(System.Console.In, System.Console.Out).Run(args.Yes, args.Check, args.Pre);
+            if (code != 0) System.Environment.Exit(code);
         }
 
         [ArgActionMethod, ArgDescription("Settings: local server, server aliases, manage and shell themes (osync setup [server|alias|manage|shell|show])")]
@@ -1849,7 +1891,7 @@ namespace osync
 
                 // Parse version and build from output like "osync v1.2.6 (b20260110-1156)"
                 // Use specific pattern to avoid matching IP addresses
-                var match = System.Text.RegularExpressions.Regex.Match(output, @"osync\s+v?(\d+\.\d+\.\d+)\s*\((b\d{8}-\d{4})\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var match = System.Text.RegularExpressions.Regex.Match(output, @"osync\s+v?(\d+\.\d+\.\d+)(?:-[0-9A-Za-z.-]+)?\s*\((b\d{8}-\d{4})\)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (match.Success)
                 {
                     return (match.Groups[1].Value, match.Groups[2].Value);
@@ -5611,7 +5653,8 @@ namespace osync
 
         }
 
-        public void ActionInstall()
+        /// <param name="yes">-y: no questions; each one takes the choice made at the previous install (yes when there is none)</param>
+        public void ActionInstall(bool yes = false)
         {
             Init();
 
@@ -5629,15 +5672,11 @@ namespace osync
             string currentExePath = Path.Combine(currentExeDir, exeName);
 
             // Determine installation directory
-            string installDir;
-            if (isWindows)
-            {
-                installDir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".osync");
-            }
-            else // Linux or macOS
-            {
-                installDir = Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".local", "bin");
-            }
+            string installDir = InstallDirectory;
+
+            // An earlier install: its choices are the defaults (recorded in the settings, or found on disk for
+            // installs made before osync recorded them)
+            bool installedBefore = System.IO.File.Exists(Path.Combine(installDir, exeName));
 
             // Create installation directory if it doesn't exist
             if (!Directory.Exists(installDir))
@@ -5662,7 +5701,10 @@ namespace osync
             try
             {
                 // Check if we're already running from the install directory
-                if (Path.GetFullPath(currentExeDir).Equals(Path.GetFullPath(installDir), StringComparison.OrdinalIgnoreCase))
+                // (AppContext.BaseDirectory ends with a separator: without trimming it the paths never matched, and
+                // the installed binary was copied over itself, which fails while it runs)
+                if (Path.TrimEndingDirectorySeparator(Path.GetFullPath(currentExeDir)).Equals(
+                        Path.TrimEndingDirectorySeparator(Path.GetFullPath(installDir)), StringComparison.OrdinalIgnoreCase))
                 {
                     Out.Success($"osync is already installed in: {installDir}");
                 }
@@ -5752,7 +5794,7 @@ namespace osync
             {
                 var settings = OsyncSettings.Current;
                 if (ServerSetup.AutoConfigure(settings, System.Console.In, System.Console.Out, ServerSetup.ProbeServer,
-                        System.Environment.GetEnvironmentVariable, interactive: !System.Console.IsInputRedirected))
+                        System.Environment.GetEnvironmentVariable, interactive: !yes && !System.Console.IsInputRedirected))
                 {
                     try
                     {
@@ -5795,10 +5837,22 @@ namespace osync
 
             if (completionAvailable)
             {
-                Console.Write("Would you like to install shell completion? (y/n): ");
-                string? response = Console.ReadLine()?.Trim().ToLower();
+                bool? previous = OsyncSettings.Current.Install.Completion ?? (installedBefore ? IsTabCompletionInstalledAnywhere() : null);
+                bool install;
+                if (yes)
+                {
+                    install = previous ?? true;
+                    if (install)
+                        Console.WriteLine($"Shell completion: installing{(previous == true ? " (as at the previous install)" : "")}");
+                }
+                else
+                {
+                    install = UpgradeCommand.AskYesNo(System.Console.In, System.Console.Out,
+                        "Would you like to install shell completion?", defaultYes: previous ?? false) == true;
+                }
+                RecordInstallChoice(installDir, install);
 
-                if (response == "y" || response == "yes")
+                if (install)
                 {
                     Console.WriteLine("");
                     if (isWindows)
@@ -5852,6 +5906,27 @@ namespace osync
                 Console.WriteLine("  2. Verify installation: osync --help");
             }
         }
+
+        /// <summary>Saves the install choices in the settings, so that `osync upgrade` and `osync install -y` repeat them.</summary>
+        private static void RecordInstallChoice(string installDir, bool completion)
+        {
+            var settings = OsyncSettings.Current;
+            if (settings.Install.Completion == completion && settings.Install.Directory == installDir) return;
+            settings.Install.Completion = completion;
+            settings.Install.Directory = installDir;
+            try
+            {
+                settings.SaveAsCurrent();
+            }
+            catch (Exception ex)
+            {
+                Out.Warning($"could not save the install choices to {OsyncSettings.FilePath}: {ex.Message}");
+            }
+        }
+
+        /// <summary>Whether osync's tab completion is installed for any shell osync supports.</summary>
+        internal bool IsTabCompletionInstalledAnywhere() =>
+            new[] { "bash", "zsh", "PowerShell" }.Any(shell => CheckTabCompletionStatus(shell).installed);
 
         private bool AddToPath(string directory, bool isWindows, bool isLinux, bool isMacOS)
         {
@@ -6032,6 +6107,8 @@ namespace osync
                     Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".local/share/bash-completion/completions/osync"),
                     Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), ".bash_completion.d/osync")
                 };
+                // A reinstall (osync upgrade) updates the script where it already is, not a second copy elsewhere
+                possiblePaths = possiblePaths.OrderBy(p => System.IO.File.Exists(p) ? 0 : 1).ToArray();
 
                 // Try to write to system location first, then user locations
                 foreach (var path in possiblePaths)
@@ -7009,6 +7086,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             System.Console.WriteLine("  bench            Run context length benchmarks");
             System.Console.WriteLine("  benchview        View benchmark results");
             System.Console.WriteLine("  install          Install osync to user directory");
+            System.Console.WriteLine("  upgrade          Upgrade osync to the latest GitHub release");
             System.Console.WriteLine("  showversion, -v  Show version information");
             System.Console.WriteLine("");
             System.Console.WriteLine("Use 'osync <command> -h' for detailed help on a specific command.");
@@ -7020,6 +7098,9 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             {
                 // Configure terminal/console capabilities early, before any Spectre.Console output
                 ConfigureTerminalCapabilities();
+
+                // Windows: the binary an upgrade renamed aside (osync.exe.old)
+                UpgradeCommand.CleanupPreviousBinary();
 
                 // PowerArgs help/usage rendering hangs when the console width is 0 (redirected output on Linux/macOS)
                 SafeConsoleProvider.Install();

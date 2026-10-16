@@ -37,6 +37,12 @@ Feature: CLI basics
 
   # Regression: help rendering used to loop forever when the console width is 0
   # (output redirected on Linux/macOS), so "<command> -h" and missing-argument errors hung.
+  @registry
+  Scenario: upgrade --check reports the current and the latest version without changing anything
+    When I run osync "upgrade --check"
+    Then the command succeeds
+    And the output contains "Current version: v"
+
   Scenario Outline: Command help exits (<command>)
     When I run osync "<command> -h"
     Then the command succeeds
@@ -47,3 +53,4 @@ Feature: CLI basics
       | cp      | osync Copy <Source>      |
       | ls      | osync List [<Pattern>]   |
       | load    | osync Load <ModelName>   |
+      | upgrade | osync Upgrade            |

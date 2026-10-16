@@ -445,6 +445,26 @@ namespace osync
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
+    public class InstallArgs
+    {
+        [ArgDescription("No questions: repeat the choices of the previous install (yes when there is none)"), ArgShortcut("-y")]
+        public bool Yes { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
+    public class UpgradeArgs
+    {
+        [ArgDescription("Upgrade without asking; the install is repeated with the choices of the previous install"), ArgShortcut("-y")]
+        public bool Yes { get; set; }
+
+        [ArgDescription("Only check for a new version"), ArgShortcut("--check")]
+        public bool Check { get; set; }
+
+        [ArgDescription("Include dev pre-releases (the default when this osync is a pre-release)"), ArgShortcut("--pre")]
+        public bool Pre { get; set; }
+    }
+
+    [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
     public class SetupArgs
     {
         [ArgPosition(1), ArgDescription("Section: server, alias, manage, shell or show (none: summary and menu)")]

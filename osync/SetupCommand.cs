@@ -656,6 +656,9 @@ namespace osync
                 _program.InstallPowerShellCompletion();
             else
                 _program.InstallBashCompletion();
+            // Remembered for `osync upgrade`, which reinstalls it with the new version's commands
+            Settings.Install.Completion = true;
+            try { Settings.SaveAsCurrent(); } catch { }
             return 0;
         }
 

@@ -152,7 +152,7 @@ jobs:
       - name: Publish self-contained single file
         shell: bash
         run: |
-          dotnet publish osync/osync.csproj -c Release -r ${{ matrix.rid }} -p:DebugType=None -o "out/${{ matrix.rid }}"
+          dotnet publish osync/osync.csproj -c Release -r ${{ matrix.rid }} -p:DebugType=None -p:OsyncReleaseTag=${{ needs.release-plan.outputs.tag }} -o "out/${{ matrix.rid }}"
           mkdir -p dist
           cp "out/${{ matrix.rid }}/${{ matrix.file }}" "dist/${{ matrix.asset }}"
           ls -la dist
