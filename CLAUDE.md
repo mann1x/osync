@@ -42,6 +42,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - **Manage** - Full-screen TUI using Terminal.Gui 2
 - **Qc** - Quantization comparison with test suites
 - **QcView** - Quantization comparison test results viewer
+- **Upgrade** - Checks the GitHub releases and replaces the binary (`UpgradeCommand.cs`); an installed osync re-runs the new binary's `install` with the choices recorded in the settings' `install` section
 
 ### Key Files
 
