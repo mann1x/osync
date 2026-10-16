@@ -89,6 +89,9 @@ namespace osync
             return releases;
         }
 
+        /// <summary>Pre-releases are considered with --pre or when the running osync is itself a pre-release.</summary>
+        public static bool IncludePreReleases(bool preFlag, ReleaseVersion running) => preFlag || running.IsPreRelease;
+
         /// <summary>The newest release; pre-releases only when <paramref name="includePreReleases"/>.</summary>
         public static ReleaseInfo? Newest(IEnumerable<ReleaseInfo> releases, bool includePreReleases) =>
             releases.Where(r => includePreReleases || !r.PreRelease).OrderByDescending(r => r.Version).FirstOrDefault();
@@ -186,7 +189,10 @@ namespace osync
             if (target != null) _output.WriteLine($"{(systemWide ? "Installed" : "Binary")}: {target}");
             _output.WriteLine($"Current version: {(current?.ToString() ?? "unknown")}");
 
-            bool pre = includePre || current?.IsPreRelease == true;
+            // The channel follows the osync you run: a dev pre-release looks for pre-releases newer than the latest
+            // release too, a release only for releases (whatever the installed copy is)
+            bool pre = OsyncReleases.IncludePreReleases(includePre, OsyncProgram.RunningReleaseVersion);
+            _output.WriteLine($"Channel:         {(pre ? includePre ? "releases and pre-releases (--pre)" : "releases and pre-releases (this osync is a pre-release)" : "releases")}");
             List<ReleaseInfo> releases;
             try
             {
@@ -255,7 +261,7 @@ namespace osync
                 if (downloadedVersion == null)
                     throw new InvalidOperationException($"the downloaded {assetName} does not run on this machine");
 
-                Replace(downloaded, target);
+                Replace(downloaded, target, _output);
             }
             catch (Exception ex)
             {
@@ -379,13 +385,14 @@ namespace osync
         /// <summary>
         /// Puts the new binary in place. Unix: rename over the old one (a running binary keeps its inode).
         /// Windows: a running exe cannot be overwritten but can be renamed, so it is moved aside to osync.exe.old
-        /// (deleted by the next run) and the new one takes its name.
+        /// (deleted by the next run) and the new one takes its name. Each rename is retried for a while: right
+        /// after the download and the test run, an antivirus scan (or the indexer) can hold the file open.
         /// </summary>
-        internal static void Replace(string newBinary, string target)
+        internal static void Replace(string newBinary, string target, TextWriter? log = null)
         {
             if (!OperatingSystem.IsWindows())
             {
-                File.Move(newBinary, target, overwrite: true);
+                MoveWithRetry(newBinary, target, overwrite: true, log);
                 return;
             }
 
@@ -396,12 +403,12 @@ namespace osync
             bool movedAside = false;
             if (File.Exists(target))
             {
-                File.Move(target, old);
+                MoveWithRetry(target, old, overwrite: false, log);
                 movedAside = true;
             }
             try
             {
-                File.Move(newBinary, target);
+                MoveWithRetry(newBinary, target, overwrite: false, log);
             }
             catch
             {
@@ -409,6 +416,56 @@ namespace osync
                 throw;
             }
             if (movedAside) TryDelete(old);
+        }
+
+        /// <summary>
+        /// Renames <paramref name="from"/> to <paramref name="to"/>, retrying while the file is in use (sharing
+        /// violation) for up to <paramref name="attempts"/> × <paramref name="delayMs"/>; the final error names the file
+        /// and, on Windows, an osync process running from it.
+        /// </summary>
+        internal static void MoveWithRetry(string from, string to, bool overwrite, TextWriter? log,
+            int attempts = 60, int delayMs = 500, Action<string, string, bool>? move = null)
+        {
+            move ??= File.Move;
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    move(from, to, overwrite);
+                    return;
+                }
+                catch (IOException ex) when (ex is not FileNotFoundException && ex is not DirectoryNotFoundException)
+                {
+                    if (attempt >= attempts)
+                        throw new IOException($"cannot rename {from} to {Path.GetFileName(to)}: {ex.Message}{InUseHint(from)}", ex);
+                    if (attempt == 1)
+                        log?.WriteLine($"Waiting for {Path.GetFileName(from)} to be released ({ex.Message.TrimEnd('.')})...");
+                    Thread.Sleep(delayMs);
+                }
+            }
+        }
+
+        private static string InUseHint(string path)
+        {
+            try
+            {
+                var full = Path.GetFullPath(path);
+                foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path)))
+                {
+                    using (process)
+                    {
+                        string? file = null;
+                        try { file = process.MainModule?.FileName; } catch { }
+                        if (file != null && string.Equals(Path.GetFullPath(file), full, StringComparison.OrdinalIgnoreCase))
+                            return $" (osync is still running from it, process {process.Id}: close it and run the upgrade again)";
+                    }
+                }
+            }
+            catch
+            {
+                // process list not readable
+            }
+            return " (another program, such as an antivirus scan, has it open: run the upgrade again in a minute)";
         }
 
         private static void TryDelete(string path)
