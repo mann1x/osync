@@ -167,4 +167,61 @@ public class UpgradeTests
             Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Theory]
+    [InlineData(false, "v1.4.5", false)]
+    [InlineData(false, "v1.4.6-dev.131", true)]
+    [InlineData(true, "v1.4.5", true)]
+    public void Channel_FollowsTheRunningOsync(bool preFlag, string running, bool expected)
+    {
+        OsyncReleases.IncludePreReleases(preFlag, V(running)).Should().Be(expected);
+    }
+
+    [Fact]
+    public void Newest_DevChannelTakesAPreReleaseNewerThanTheLatestRelease()
+    {
+        var releases = OsyncReleases.Parse("""
+            [ { "tag_name": "v1.4.6-dev.131", "prerelease": true, "assets": [] },
+              { "tag_name": "v1.4.5", "prerelease": false, "assets": [] },
+              { "tag_name": "v1.4.4", "prerelease": false, "assets": [] } ]
+            """);
+
+        OsyncReleases.Newest(releases, OsyncReleases.IncludePreReleases(false, V("v1.4.6-dev.131")))!.Tag.Should().Be("v1.4.6-dev.131");
+        OsyncReleases.Newest(releases, OsyncReleases.IncludePreReleases(false, V("v1.4.4")))!.Tag.Should().Be("v1.4.5");
+    }
+
+    [Fact]
+    public void MoveWithRetry_WaitsWhileTheFileIsInUse()
+    {
+        int calls = 0;
+        var log = new StringWriter();
+
+        UpgradeCommand.MoveWithRetry("a", "b", overwrite: false, log, attempts: 5, delayMs: 1, move: (_, _, _) =>
+        {
+            if (++calls < 3) throw new IOException("The process cannot access the file because it is being used by another process.");
+        });
+
+        calls.Should().Be(3);
+        log.ToString().Should().Contain("Waiting for a to be released");
+    }
+
+    [Fact]
+    public void MoveWithRetry_GivesUpNamingTheFile()
+    {
+        var act = () => UpgradeCommand.MoveWithRetry("/x/osync.exe", "/x/osync.exe.old", overwrite: false, null, attempts: 2, delayMs: 1,
+            move: (_, _, _) => throw new IOException("in use"));
+
+        act.Should().Throw<IOException>().WithMessage("cannot rename /x/osync.exe to osync.exe.old: in use*");
+    }
+
+    [Fact]
+    public void MoveWithRetry_DoesNotRetryAMissingFile()
+    {
+        int calls = 0;
+        var act = () => UpgradeCommand.MoveWithRetry("a", "b", overwrite: false, null, attempts: 5, delayMs: 1,
+            move: (_, _, _) => { calls++; throw new FileNotFoundException("gone"); });
+
+        act.Should().Throw<FileNotFoundException>();
+        calls.Should().Be(1);
+    }
 }

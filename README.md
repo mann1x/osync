@@ -1377,8 +1377,8 @@ osync upgrade --pre      # also consider dev pre-releases
 
 - **Installed with `osync install`** (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS): the installed binary is upgraded, whichever osync you run, and the new version's `install` runs again with the choices made at install time: tab completion is reinstalled (with the new version's commands) only if it was installed before. Without `-y` each question is asked with the previous choice as its default; `-y` takes the previous choices (it never turns on what was declined). For installs made before osync recorded its choices, the completion files on disk tell
 - **Not installed**: the binary you run is replaced
-- Dev pre-releases are ignored unless the binary being upgraded is itself a pre-release, or with `--pre`
-- The download is checked against the release's size and SHA-256 and must run before it replaces the old binary. On Windows the running `osync.exe` cannot be overwritten: it is renamed to `osync.exe.old`, removed by the next run
+- The channel follows the osync you run: a dev pre-release also looks for pre-releases newer than the latest release, a release only for releases (`--pre` includes pre-releases anyway). Running a dev build upgrades an installed release to that channel too
+- The download is checked against the release's size and SHA-256 and must run before it replaces the old binary. On Windows the running `osync.exe` cannot be overwritten: it is renamed to `osync.exe.old`, removed by the next run. A file held open (an antivirus scanning the new binary, an osync still running from the install directory) is waited for; if it stays in use, the error names it
 - `GITHUB_TOKEN` (or `GH_TOKEN`), when set, is sent to the GitHub API against its anonymous rate limit
 
 ### Options
@@ -1512,7 +1512,7 @@ osync mv qwen2 qwen2-7b:dev
 v1.4.6
 
 **New**
-- **`osync upgrade`**: checks the GitHub releases for a newer osync, shows the current and the new version and asks before upgrading (`-y` to not ask, `--check` to only check, `--pre` for dev pre-releases, the default when running one). An installed osync is upgraded in place and its install is repeated with the choices made at install time (tab completion only if it was installed); otherwise the binary you run is replaced. The download is verified (size, SHA-256, it runs) before it replaces the old binary; on Windows the running exe is moved aside to `osync.exe.old`
+- **`osync upgrade`**: checks the GitHub releases for a newer osync, shows the current and the new version and asks before upgrading (`-y` to not ask, `--check` to only check, `--pre` for dev pre-releases, the default when the osync you run is one). An installed osync is upgraded in place and its install is repeated with the choices made at install time (tab completion only if it was installed); otherwise the binary you run is replaced. The download is verified (size, SHA-256, it runs) before it replaces the old binary; on Windows the running exe is moved aside to `osync.exe.old`, and a file still held by an antivirus scan is waited for
 - **`osync install` remembers its choices** in the settings file (`install` section) and `osync install -y` repeats them without asking. `osync setup shell completion` is remembered too. Release binaries know their release tag, so `osync -v` shows a dev pre-release as e.g. `v1.4.6-dev.120`
 
 **Fixed**
