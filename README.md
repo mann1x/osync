@@ -1362,6 +1362,24 @@ osync install
 - Adds install directory to PATH
 - Offers to configure tab completion for detected shell
 - Supports bash, zsh, and PowerShell
+- Remembers the choices (in the settings file) for `osync upgrade`; `osync install -y` asks nothing and repeats them (yes when there are none)
+
+#### Upgrade (`upgrade`)
+
+Check GitHub for a newer osync release and upgrade to it.
+
+```bash
+osync upgrade            # show the current and the new version, ask before upgrading
+osync upgrade --check    # only show whether a new version exists
+osync upgrade -y         # upgrade without asking
+osync upgrade --pre      # also consider dev pre-releases
+```
+
+- **Installed with `osync install`** (`~/.osync` on Windows, `~/.local/bin` on Linux/macOS): the installed binary is upgraded, whichever osync you run, and the new version's `install` runs again with the choices made at install time: tab completion is reinstalled (with the new version's commands) only if it was installed before. Without `-y` each question is asked with the previous choice as its default; `-y` takes the previous choices (it never turns on what was declined). For installs made before osync recorded its choices, the completion files on disk tell
+- **Not installed**: the binary you run is replaced
+- Dev pre-releases are ignored unless the binary being upgraded is itself a pre-release, or with `--pre`
+- The download is checked against the release's size and SHA-256 and must run before it replaces the old binary. On Windows the running `osync.exe` cannot be overwritten: it is renamed to `osync.exe.old`, removed by the next run
+- `GITHUB_TOKEN` (or `GH_TOKEN`), when set, is sent to the GitHub API against its anonymous rate limit
 
 ### Options
 
@@ -1490,6 +1508,16 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.6
+
+**New**
+- **`osync upgrade`**: checks the GitHub releases for a newer osync, shows the current and the new version and asks before upgrading (`-y` to not ask, `--check` to only check, `--pre` for dev pre-releases, the default when running one). An installed osync is upgraded in place and its install is repeated with the choices made at install time (tab completion only if it was installed); otherwise the binary you run is replaced. The download is verified (size, SHA-256, it runs) before it replaces the old binary; on Windows the running exe is moved aside to `osync.exe.old`
+- **`osync install` remembers its choices** in the settings file (`install` section) and `osync install -y` repeats them without asking. `osync setup shell completion` is remembered too. Release binaries know their release tag, so `osync -v` shows a dev pre-release as e.g. `v1.4.6-dev.120`
+
+**Fixed**
+- **`osync install` run from the installed binary failed** with "Text file busy" (Linux/macOS) or a file-in-use error (Windows): it did not recognise its own install directory and copied the binary over itself
+- **Reinstalling bash completion updates the existing script** instead of writing a second copy in another location
 
 v1.4.5
 

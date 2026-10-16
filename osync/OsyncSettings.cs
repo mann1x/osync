@@ -40,6 +40,9 @@ namespace osync
 
         public ShellSettings Shell { get; set; } = new();
 
+        /// <summary>Choices made by `osync install`, repeated by `osync upgrade`.</summary>
+        public InstallSettings Install { get; set; } = new();
+
         /// <summary>
         /// Server aliases: name → server URL (e.g. "gpu" → "http://192.168.1.10:11434"). An alias can be used wherever
         /// a server is expected: <c>-d gpu</c>, <c>osync cp model gpu/</c>, <c>osync cp gpu/model local-copy</c>.
@@ -83,6 +86,15 @@ namespace osync
             /// (with Ollama and xOllama side by side, the other one is always included).
             /// </summary>
             public List<string>? Servers { get; set; }
+        }
+
+        public sealed class InstallSettings
+        {
+            /// <summary>Directory osync was installed to.</summary>
+            public string? Directory { get; set; }
+
+            /// <summary>Whether tab completion was installed; null = not asked yet.</summary>
+            public bool? Completion { get; set; }
         }
 
         public sealed class ShellSettings
@@ -139,6 +151,7 @@ namespace osync
                 settings.Server ??= new ServerSettings();
                 settings.Manage ??= new ManageSettings();
                 settings.Shell ??= new ShellSettings();
+                settings.Install ??= new InstallSettings();
                 settings.Aliases = new Dictionary<string, string>(settings.Aliases ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
                 settings.ColorMode ??= "auto";
                 return settings;

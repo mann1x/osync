@@ -28,6 +28,9 @@
   </PropertyGroup>
   <ItemGroup>
     <AssemblyMetadata Include="BuildTimestamp" Value="$(OsyncBuildTimestamp)" />
+    <!-- Release tag (v1.4.6, v1.4.6-dev.93), set by CI when packaging a release: osync upgrade uses it to tell
+         a dev pre-release from a release -->
+    <AssemblyMetadata Include="ReleaseTag" Value="$(OsyncReleaseTag)" Condition="'$(OsyncReleaseTag)' != ''" />
   </ItemGroup>
 
   <ItemGroup>
