@@ -1509,6 +1509,11 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.4.7
+
+**Fixed**
+- **`osync show --modelfile` (and `--template`, `--system`, `--license`, `--parameters`) printed as a staircase in the Windows Command Prompt**, each line starting where the previous one ended: the console was left in a mode where a line break does not return to the first column. Local `osync show` (which runs `ollama show`) had the same problem. These section flags also no longer print the osync version on top, so the output is just the text and can be saved as a Modelfile
+
 v1.4.6
 
 **New**
