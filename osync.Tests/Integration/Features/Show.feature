@@ -14,6 +14,7 @@ Feature: Show model information (show)
     When I run osync "show {info} <flag>"
     Then the command succeeds
     And the output contains "<expected>"
+    And the output does not contain "osync v"
 
     Examples:
       | flag         | expected       |
@@ -56,3 +57,11 @@ Feature: Show model information (show)
     When I run osync "show {info} -d {remote1} --template"
     Then the command succeeds
     And the output contains "<|im_start|>"
+
+  @remote1
+  Scenario: Show the Modelfile of a remote model as plain text
+    Given a test model "info" on remote1
+    When I run osync "show {info} -d {remote1} --modelfile"
+    Then the command succeeds
+    And the output contains "FROM "
+    And the output does not contain "osync v"

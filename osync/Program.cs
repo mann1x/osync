@@ -124,6 +124,28 @@ namespace osync
             }
         }
 
+        /// <summary>
+        /// Whether the version banner goes on top of a command's output: not for the version command (it prints
+        /// the version itself) nor for `show` with a section flag, whose output is the raw text (a Modelfile, a
+        /// template) meant to be read or saved as is.
+        /// </summary>
+        public static bool ShowsStartupBanner(string[] args)
+        {
+            if (args.Length == 0) return true;
+            var command = args[0];
+            if (command.Equals("showversion", StringComparison.OrdinalIgnoreCase) ||
+                command.Equals("-v", StringComparison.OrdinalIgnoreCase) ||
+                command.Equals("version", StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (command.Equals("show", StringComparison.OrdinalIgnoreCase))
+            {
+                string[] sections = { "license", "modelfile", "parameters", "system", "template" };
+                return !args.Skip(1).Any(a => sections.Any(s =>
+                    a.Equals("--" + s, StringComparison.OrdinalIgnoreCase) || a.Equals("-" + s, StringComparison.OrdinalIgnoreCase)));
+            }
+            return true;
+        }
+
         /// <summary>"osync v1.2.3 (b20260101-1200)", colored in the shell theme.</summary>
         public static string VersionBanner() => $"{Out.Heading("osync")} {Out.Paint(GetFullVersion(), p => p.Size)}";
 
@@ -5249,7 +5271,8 @@ namespace osync
                 if (template) sections.Add(Text("template"));
                 if (sections.Count > 0)
                 {
-                    Console.WriteLine(string.Join("\n", sections.Select(t => t.TrimEnd())));
+                    // the server's text uses LF line breaks: write them as this OS's line ends
+                    Console.WriteLine(string.Join("\n", sections.Select(t => t.TrimEnd())).ReplaceLineEndings());
                     return;
                 }
 
@@ -7025,7 +7048,13 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 ColorSupport.ApplyToSpectre();
 
                 if (OperatingSystem.IsWindows())
+                {
+                    // Spectre.Console's detection enables VT processing with DISABLE_NEWLINE_AUTO_RETURN: run it
+                    // now, then give LF its carriage return back (Modelfiles and `ollama show` printed as a staircase)
+                    _ = AnsiConsole.Profile.Capabilities.Ansi;
+                    WindowsConsoleMode.RestoreNewlineAutoReturn();
                     return;
+                }
 
                 // The TERM the user had (TerminalInitializer replaces it with xterm-16color at startup so that
                 // console libraries do not query the terminal, which could hang over SSH/tmux)
@@ -7105,13 +7134,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 // PowerArgs help/usage rendering hangs when the console width is 0 (redirected output on Linux/macOS)
                 SafeConsoleProvider.Install();
 
-                // Skip startup banner for version command to avoid duplicate output
-                bool isVersionCommand = args.Length > 0 &&
-                    (args[0].Equals("showversion", StringComparison.OrdinalIgnoreCase) ||
-                     args[0].Equals("-v", StringComparison.OrdinalIgnoreCase) ||
-                     args[0].Equals("version", StringComparison.OrdinalIgnoreCase));
-
-                if (!isVersionCommand)
+                if (OsyncProgram.ShowsStartupBanner(args))
                 {
                     System.Console.WriteLine(OsyncProgram.VersionBanner());
                     System.Console.WriteLine();
