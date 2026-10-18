@@ -163,6 +163,10 @@ namespace osync
 
         [JsonPropertyName("context_length")]
         public int ContextLength { get; set; }
+
+        /// <summary>The runner serving it (Ollama 0.40+: llamacpp, ollama, mlx); empty on older servers.</summary>
+        [JsonPropertyName("runner")]
+        public string Runner { get; set; } = string.Empty;
     }
 
     public class ModelDetails

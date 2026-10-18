@@ -27,7 +27,7 @@ public enum GpuDisplayMode
 /// Spectre.Console-based monitoring UI for osync
 /// Inspired by nvitop
 /// </summary>
-public class PsMonitorUI
+public partial class PsMonitorUI
 {
     // Configuration
     private readonly string? _destination;
@@ -52,8 +52,9 @@ public class PsMonitorUI
     private int _lastOllamaSectionEndLine;
 
     // Collectors
-    private readonly GpuMonitor _gpuMonitor = new();
-    private readonly SystemMetricsCollector _systemMetrics = new();
+    // Local collectors exist only for a server on this machine: a remote server is shown from its own API alone
+    private readonly GpuMonitor _gpuMonitor = null!;
+    private readonly SystemMetricsCollector _systemMetrics = null!;
     private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
     // Data
@@ -83,6 +84,20 @@ public class PsMonitorUI
 
         // Resolve the server - same logic as Ps command
         _ollamaHost = OllamaServer.ResolveHost(destination);
+
+        // OSYNC_PSMONITOR_REMOTE=1 shows a server on this machine as a remote one (only what its API reports)
+        _remote = Environment.GetEnvironmentVariable("OSYNC_PSMONITOR_REMOTE") == "1" ||
+                  !RemoteServerMonitor.IsThisMachine(_ollamaHost);
+        if (_remote)
+        {
+            _remoteMonitor = new RemoteServerMonitor(_ollamaHost, XOllamaTweak.ApiKey());
+            InitRemoteGraphs();
+        }
+        else
+        {
+            _gpuMonitor = new GpuMonitor();
+            _systemMetrics = new SystemMetricsCollector();
+        }
 
         // Initialize graphs with enough capacity for max history
         // Using MaxStoredDataPoints as width to set internal buffer size
@@ -188,7 +203,7 @@ public class PsMonitorUI
             Console.CursorVisible = true;
             Console.TreatControlCAsInput = false;
             Console.Clear();
-            _systemMetrics.Dispose();
+            _systemMetrics?.Dispose();
         }
     }
 
@@ -293,6 +308,15 @@ public class PsMonitorUI
                 _needsRedraw = true;
                 break;
 
+            case ConsoleKey.I when _remote:
+                CycleRemoteGraph();
+                _needsRedraw = true;
+                break;
+
+            case ConsoleKey.R when _remote:
+                _remoteMonitor!.RefreshDevicesSoon();
+                break;
+
             case ConsoleKey.I:
                 // Cycle through GPU display modes
                 _gpuDisplayMode = _gpuDisplayMode switch
@@ -339,7 +363,12 @@ public class PsMonitorUI
                 "[yellow]P[/]            Pause/Resume updates\n" +
                 "[yellow]H[/]            Show this help\n" +
                 "[yellow]Left/Right[/]   Adjust graph history (+/- 1 min)\n" +
-                "[yellow]Up/Down[/]      Adjust refresh interval\n\n" +
+                "[yellow]Up/Down[/]      Adjust refresh interval\n" +
+                (_remote
+                    ? "[yellow]I[/]            Cycle the graph (VRAM, RAM, tok/s, busy slots)\n" +
+                      "[yellow]R[/]            Re-read the server's GPU list (xOllama)\n\n" +
+                      "[dim]Remote server: only what its API reports is shown, nothing from this machine.[/]\n\n"
+                    : "\n") +
                 "[dim]Press any key to continue...[/]"
             ))
             .Header("[bold]Help[/]")
@@ -351,6 +380,11 @@ public class PsMonitorUI
 
     private async Task CollectDataAsync()
     {
+        if (_remote)
+        {
+            await CollectRemoteDataAsync();
+            return;
+        }
         try
         {
             // Collect GPU metrics
@@ -535,6 +569,12 @@ public class PsMonitorUI
             // Use actual window width
             var width = Console.WindowWidth - 1;  // -1 to prevent line wrapping
             var height = Console.WindowHeight;
+
+            if (_remote)
+            {
+                RenderRemoteDisplay(width, height);
+                return;
+            }
 
             // Calculate optimal graph height based on available space
             _currentGraphHeight = CalculateOptimalGraphHeight(height);

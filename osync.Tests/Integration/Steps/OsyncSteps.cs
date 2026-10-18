@@ -62,6 +62,19 @@ public sealed class OsyncSteps
     [When("I open manage without host settings in a terminal and press {string}")]
     public Task WhenIOpenManageWithoutHostSettingsAndPress(string keys) => OpenManage("manage", keys, withHostSettings: false);
 
+    // The test servers all run on this machine: OSYNC_PSMONITOR_REMOTE=1 gives them the view of a remote server
+    [When("I open psmonitor on {word} as a remote server in a terminal and press {string}")]
+    public async Task WhenIOpenPsMonitorAsRemote(string server, string keys)
+    {
+        var environment = Env();
+        environment["OSYNC_PSMONITOR_REMOTE"] = "1";
+        var url = TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured");
+        var result = await OsyncCli.RunInTerminalAsync($"psmonitor -d {url} -L 1", TerminalKeys.Parse(_state.Resolve(keys)),
+            readyText: "Expires", environment: environment);
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
     private async Task OpenManage(string arguments, string keys, bool withHostSettings)
     {
         var result = await OsyncCli.RunInTerminalAsync(arguments, TerminalKeys.Parse(_state.Resolve(keys)),
