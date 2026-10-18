@@ -1509,6 +1509,11 @@ osync mv qwen2 qwen2-7b:dev
 
 ## Changelog
 
+v1.4.8
+
+**Fixed**
+- **`osync pull -d <server>` showed no progress**: the whole progress stream of the remote server was read before printing, so every line appeared at once when the pull had finished. Progress now shows as the server sends it. `osync update -d <server>` had the same problem. A remote pull or update that took over an hour also no longer times out
+
 v1.4.7
 
 **Fixed**

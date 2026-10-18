@@ -5065,7 +5065,9 @@ namespace osync
                     "application/json"
                 );
 
-                var response = await httpClient.PostAsync("api/pull", content);
+                // ResponseHeadersRead: PostAsync would buffer the whole progress stream and print it only at the end
+                using var pullMessage = new HttpRequestMessage(HttpMethod.Post, "api/pull") { Content = content };
+                using var response = await httpClient.SendAsync(pullMessage, HttpCompletionOption.ResponseHeadersRead);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -5566,7 +5568,9 @@ namespace osync
                     "application/json"
                 );
 
-                var response = await httpClient.PostAsync("api/pull", content);
+                // ResponseHeadersRead: PostAsync would buffer the whole progress stream and print it only at the end
+                using var pullMessage = new HttpRequestMessage(HttpMethod.Post, "api/pull") { Content = content };
+                using var response = await httpClient.SendAsync(pullMessage, HttpCompletionOption.ResponseHeadersRead);
 
                 if (!response.IsSuccessStatusCode)
                 {
