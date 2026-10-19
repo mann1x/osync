@@ -8,7 +8,7 @@ namespace osync
         [ArgRequired, ArgPosition(1), ArgDescription("Source model (e.g., llama3:latest or http://server:port/model:tag)")]
         public string Source { get; set; } = string.Empty;
 
-        [ArgRequired, ArgPosition(2), ArgDescription("Destination (e.g., newmodel:tag or http://server:port/model:tag)")]
+        [ArgPosition(2), ArgDescription("Destination (e.g., newmodel:tag or http://server:port/model:tag); omitted for a remote source: the local server, same name and tag")]
         public string Destination { get; set; } = string.Empty;
 
         [ArgDescription("Buffer size for remote-to-remote copy (default: 512MB, e.g., 1GB, 256MB)")]
