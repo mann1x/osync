@@ -36,6 +36,86 @@ public class RemoteMonitorTests
     public void ParseDevices_NoGpus() =>
         RemoteServerMonitor.ParseDevices(Json("""{"devices":[],"backends":["CPU"]}""")).Should().BeEmpty();
 
+    // GET /api/xollama/system (system_telemetry_v1): an NVIDIA GPU read through NVML with every field, an AMD one on
+    // Windows (D3DKMT: memory and utilization only) and a GPU the server does not use
+    private const string System = """
+        {"as_of":"2026-10-19T07:36:20.4+02:00","interval_ms":2000,
+         "host":{"os":"windows","arch":"amd64","hostname":"ELEVEN2GO","uptime_s":93784,"cpu_pct":null,"cpu_count":32,"load":null,
+                 "mem_total":54011219968,"mem_used":9019431936,"swap_total":36829011968,"swap_used":644245094},
+         "server":{"pid":1194811,"cpu_pct":103.8,"rss":4231260672,"procs":2,
+                   "children":[{"pid":1194900,"name":"opencoti-llamafile","model":"qwen3:4b","cpu_pct":99.9,"rss":4200000000}]},
+         "devices":[
+          {"pci_id":"0000:11:00.0","vendor":"nvidia","name":"NVIDIA GeForce RTX 3090","source":"nvml","backend":"CUDA","id":"0","engine":"opencoti",
+           "total_memory":25769803776,"free_memory":21242435584,"used_memory":4527368192,"util_pct":97,"mem_util_pct":61,"temp_c":64,
+           "power_w":214.7,"power_limit_w":390,"clock_mhz":1890,"clock_max_mhz":2130,"fan_pct":0,
+           "link":{"gen":1,"width":4,"max_gen":4,"max_width":16,"h2d_gbps":null,"d2h_gbps":null}},
+          {"pci_id":"0000:03:00.0","vendor":"amd","name":"AMD Radeon RX 9070 XT","source":"d3dkmt","backend":"Vulkan","id":"2","engine":"opencoti",
+           "total_memory":17095983104,"free_memory":16167993344,"used_memory":927989760,"util_pct":0,"mem_util_pct":null,"temp_c":null,
+           "power_w":null,"power_limit_w":null,"clock_mhz":null,"clock_max_mhz":null,"fan_pct":null,"link":null},
+          {"pci_id":"0000:7a:00.0","vendor":"intel","name":"Intel Arc A380","source":"sysfs",
+           "total_memory":null,"free_memory":null,"used_memory":null,"util_pct":null,"temp_c":null,"power_w":12.5,"clock_mhz":2000,"link":null}],
+         "models":[]}
+        """;
+
+    [Fact]
+    public void ParseSystem_HostServerAndDevices()
+    {
+        var system = RemoteServerMonitor.ParseSystem(Json(System))!;
+
+        system.AsOf.Should().Be(new DateTime(2026, 10, 19, 5, 36, 20, 400, DateTimeKind.Utc));
+        system.Host!.Hostname.Should().Be("ELEVEN2GO");
+        system.Host.CpuCount.Should().Be(32);
+        system.Host.MemUsed.Should().Be(9019431936UL);
+        system.Server!.CpuPct.Should().Be(103.8);
+        system.Server.Children.Should().ContainSingle().Which.Model.Should().Be("qwen3:4b");
+
+        var nvidia = system.Devices[0];
+        nvidia.Name.Should().Be("NVIDIA GeForce RTX 3090");
+        nvidia.UsedMemory.Should().Be(4527368192UL);
+        nvidia.Telemetry!.Source.Should().Be("nvml");
+        nvidia.Telemetry.PowerLimitW.Should().Be(390);
+        nvidia.Telemetry.FanPct.Should().Be(0);
+        (nvidia.Telemetry.LinkGen, nvidia.Telemetry.LinkWidth, nvidia.Telemetry.LinkMaxGen, nvidia.Telemetry.LinkMaxWidth)
+            .Should().Be((1, 4, 4, 16));
+    }
+
+    [Fact]
+    public void ParseSystem_WhatIsNotReadStaysNull()
+    {
+        var system = RemoteServerMonitor.ParseSystem(Json(System))!;
+
+        // a rate on the first poll after idle, and Windows' missing load average, are null: never 0
+        system.Host!.CpuPct.Should().BeNull();
+        system.Host.Load.Should().BeNull();
+
+        var amd = system.Devices[1].Telemetry!;
+        amd.UtilPct.Should().Be(0);
+        amd.TempC.Should().BeNull();
+        amd.PowerW.Should().BeNull();
+        amd.LinkGen.Should().BeNull();
+
+        var unused = system.Devices[2];
+        unused.Backend.Should().BeEmpty();
+        unused.TotalMemory.Should().BeNull();
+        unused.UsedMemory.Should().BeNull();
+        unused.Telemetry!.UtilPct.Should().BeNull();
+        unused.Telemetry.PowerW.Should().Be(12.5);
+    }
+
+    [Fact]
+    public void ParseDevices_HasNoTelemetry() =>
+        RemoteServerMonitor.ParseDevices(Json(Devices)).Should().OnlyContain(d => d.Telemetry == null);
+
+    [Fact]
+    public void HasFeature_SystemTelemetry()
+    {
+        RemoteServerMonitor.HasFeature(Json("""{"xollama":true,"features":["council","system_telemetry_v1"]}"""),
+            RemoteServerMonitor.SystemTelemetryFeature).Should().BeTrue();
+        RemoteServerMonitor.HasFeature(Json("""{"xollama":true,"features":["council"]}"""),
+            RemoteServerMonitor.SystemTelemetryFeature).Should().BeFalse();
+        RemoteServerMonitor.HasFeature(Json("""{"xollama":true}"""), RemoteServerMonitor.SystemTelemetryFeature).Should().BeFalse();
+    }
+
     [Fact]
     public void ParseEngineList_EngineAndReadable()
     {

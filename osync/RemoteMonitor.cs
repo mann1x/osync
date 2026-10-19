@@ -15,12 +15,39 @@ using static osync.OllamaServer;
 
 namespace osync;
 
-/// <summary>One GPU as a remote xOllama reports it (GET /api/xollama/devices).</summary>
+/// <summary>
+/// One GPU as a remote xOllama reports it (GET /api/xollama/devices, or /api/xollama/system with its telemetry).
+/// A memory figure the server did not report is null, never 0.
+/// </summary>
 internal sealed record RemoteDevice(string Backend, string Id, string PciId, string Name, bool Integrated,
-    ulong TotalMemory, ulong FreeMemory, string Engine)
+    ulong? TotalMemory, ulong? FreeMemory, string Engine)
 {
-    public ulong UsedMemory => TotalMemory > FreeMemory ? TotalMemory - FreeMemory : 0;
+    /// <summary>used_memory as the server reported it (system telemetry); else total − free.</summary>
+    public ulong? ReportedUsed { get; init; }
+    public ulong? UsedMemory => ReportedUsed ??
+        (TotalMemory is { } t && FreeMemory is { } f ? (t > f ? t - f : 0) : null);
+    public string Vendor { get; init; } = "";
+    /// <summary>Live readings from /api/xollama/system; null for a device from /api/xollama/devices.</summary>
+    public RemoteGpuTelemetry? Telemetry { get; init; }
 }
+
+/// <summary>A GPU's live readings (/api/xollama/system); null is a value the platform does not expose.</summary>
+internal sealed record RemoteGpuTelemetry(string Source, double? UtilPct, double? MemUtilPct, double? TempC,
+    double? PowerW, double? PowerLimitW, double? ClockMhz, double? ClockMaxMhz, double? FanPct,
+    int? LinkGen, int? LinkWidth, int? LinkMaxGen, int? LinkMaxWidth);
+
+/// <summary>The remote host as a whole (/api/xollama/system "host"); cpu_pct is of all cores (0–100).</summary>
+internal sealed record RemoteHost(string Os, string Arch, string Hostname, long? UptimeSeconds, double? CpuPct,
+    int? CpuCount, double[]? Load, ulong? MemTotal, ulong? MemUsed, ulong? SwapTotal, ulong? SwapUsed);
+
+/// <summary>A process of the server's tree; cpu_pct is of one core (four busy cores read 400).</summary>
+internal sealed record RemoteProcess(int? Pid, string Name, string Model, double? CpuPct, ulong? Rss);
+
+/// <summary>The server's process tree (/api/xollama/system "server").</summary>
+internal sealed record RemoteServerProcess(int? Pid, double? CpuPct, ulong? Rss, int? Procs, List<RemoteProcess> Children);
+
+/// <summary>GET /api/xollama/system: one cached snapshot of the host, the server's processes and every GPU.</summary>
+internal sealed record RemoteSystem(DateTime? AsOf, RemoteHost? Host, RemoteServerProcess? Server, List<RemoteDevice> Devices);
 
 /// <summary>
 /// What a remote xOllama's engine says about one loaded model; null fields were not answered. Tokens per second
@@ -48,6 +75,8 @@ internal sealed class RemoteSnapshot
     public bool? CloudDisabled { get; init; }
     public List<RemoteDevice>? Devices { get; init; }
     public DateTime? DevicesAsOf { get; init; }
+    /// <summary>The server's system telemetry; null when it has none (stock Ollama, xOllama without system_telemetry_v1).</summary>
+    public RemoteSystem? System { get; init; }
     public Dictionary<string, RemoteEngineStats> Engine { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -56,6 +85,9 @@ internal sealed class RemoteSnapshot
 /// connections are pooled and kept alive, /api/ps is the only request made on every tick, the rest is cached
 /// (version and cloud status once, stored models every minute) and xOllama's device list, which makes the server
 /// rediscover its GPUs, is refreshed at most once a minute in the background so a tick never waits for it.
+/// An xOllama with system telemetry (feature system_telemetry_v1) is read from /api/xollama/system instead: a
+/// snapshot the server caches and refreshes on its own timer, so it is read on every tick and the device list
+/// is never asked for.
 /// Per-model engine reads run in parallel (capped) and an endpoint the engine does not have is not asked again
 /// until the model reloads.
 /// </summary>
@@ -63,6 +95,7 @@ internal sealed class RemoteServerMonitor
 {
     public static readonly TimeSpan DevicesInterval = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan TagsInterval = TimeSpan.FromSeconds(60);
+    public const string SystemTelemetryFeature = "system_telemetry_v1";
     private const int MaxParallelEngineReads = 4;
 
     private static readonly HttpClient Http = new(new SocketsHttpHandler
@@ -81,6 +114,7 @@ internal sealed class RemoteServerMonitor
     private string _version = "";
     private bool? _cloudDisabled;
     private bool _identityRead;
+    private bool _telemetry;
 
     private int? _storedModels;
     private long? _storedBytes;
@@ -112,6 +146,11 @@ internal sealed class RemoteServerMonitor
             _flavor = GetFlavor(_url);
             _version = await ReadStringFieldAsync("api/version", "version", cancellationToken) ?? "";
             _cloudDisabled = await ReadCloudDisabledAsync(cancellationToken);
+            if (_flavor == ServerFlavor.XOllama)
+            {
+                using var identity = await GetJsonAsync("api/xollama", cancellationToken);
+                _telemetry = identity != null && HasFeature(identity.RootElement, SystemTelemetryFeature);
+            }
             _identityRead = _flavor != ServerFlavor.Unknown || _version.Length > 0;
         }
 
@@ -138,9 +177,21 @@ internal sealed class RemoteServerMonitor
         }
 
         var engine = new Dictionary<string, RemoteEngineStats>(StringComparer.OrdinalIgnoreCase);
+        RemoteSystem? system = null;
         if (_flavor == ServerFlavor.XOllama)
         {
-            StartDevicesRefreshIfDue();
+            if (_telemetry)
+            {
+                using var doc = await GetJsonAsync("api/xollama/system", cancellationToken);
+                system = doc != null ? ParseSystem(doc.RootElement) : null;
+                if (system != null)
+                {
+                    _devices = system.Devices;
+                    _devicesAsOf = system.AsOf ?? DateTime.UtcNow;
+                }
+            }
+            if (system == null)
+                StartDevicesRefreshIfDue();
             if (models.Count > 0)
                 engine = await ReadEngineStatsAsync(models, cancellationToken);
         }
@@ -157,6 +208,7 @@ internal sealed class RemoteServerMonitor
             CloudDisabled = _cloudDisabled,
             Devices = _devices,
             DevicesAsOf = _devicesAsOf,
+            System = system,
             Engine = engine,
         };
     }
@@ -352,16 +404,74 @@ internal sealed class RemoteServerMonitor
         var seenPci = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var d in devices.EnumerateArray())
         {
+            if (d.ValueKind != JsonValueKind.Object) continue;
             var pci = Str(d, "pci_id");
             if (pci.Length > 0 && !seenPci.Add(pci)) continue;
             result.Add(new RemoteDevice(Str(d, "backend"), Str(d, "id"), pci,
-                // "name" is the backend's device name (CUDA0, Vulkan1); "description" is the card
+                // devices: "name" is the backend's device name (CUDA0, Vulkan1) and "description" the card; system: "name" is the card
                 Str(d, "description") is { Length: > 0 } desc ? desc : Str(d, "name"),
                 d.TryGetProperty("integrated", out var i) && i.ValueKind == JsonValueKind.True,
-                U64(d, "total_memory"), U64(d, "free_memory"), Str(d, "engine")));
+                U64(d, "total_memory"), U64(d, "free_memory"), Str(d, "engine"))
+            {
+                ReportedUsed = U64(d, "used_memory"),
+                Vendor = Str(d, "vendor"),
+                Telemetry = d.TryGetProperty("source", out _) ? ParseTelemetry(d) : null,
+            });
         }
         return result;
     }
+
+    private static RemoteGpuTelemetry ParseTelemetry(JsonElement d)
+    {
+        var link = d.TryGetProperty("link", out var l) && l.ValueKind == JsonValueKind.Object ? l : default;
+        int? LinkInt(string name) => link.ValueKind == JsonValueKind.Object && Num(link, name) is { } v ? (int)v : null;
+        return new RemoteGpuTelemetry(Str(d, "source"), Num(d, "util_pct"), Num(d, "mem_util_pct"), Num(d, "temp_c"),
+            Num(d, "power_w"), Num(d, "power_limit_w"), Num(d, "clock_mhz"), Num(d, "clock_max_mhz"), Num(d, "fan_pct"),
+            LinkInt("gen"), LinkInt("width"), LinkInt("max_gen"), LinkInt("max_width"));
+    }
+
+    /// <summary>
+    /// GET /api/xollama/system (system_telemetry_v1). Every field the platform cannot read is null and stays null
+    /// here: nothing is defaulted to 0. Devices are every GPU the driver reports, one entry each; backend and engine
+    /// are empty for a GPU the server does not use.
+    /// </summary>
+    public static RemoteSystem? ParseSystem(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        DateTime? asOf = root.TryGetProperty("as_of", out var a) && a.ValueKind == JsonValueKind.String &&
+                         DateTimeOffset.TryParse(a.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var at)
+            ? at.UtcDateTime
+            : null;
+
+        RemoteHost? host = null;
+        if (root.TryGetProperty("host", out var h) && h.ValueKind == JsonValueKind.Object)
+        {
+            double[]? load = h.TryGetProperty("load", out var ld) && ld.ValueKind == JsonValueKind.Array
+                ? ld.EnumerateArray().Select(x => x.TryGetDouble(out var v) ? v : double.NaN).ToArray()
+                : null;
+            host = new RemoteHost(Str(h, "os"), Str(h, "arch"), Str(h, "hostname"), (long?)Num(h, "uptime_s"),
+                Num(h, "cpu_pct"), (int?)Num(h, "cpu_count"), load,
+                U64(h, "mem_total"), U64(h, "mem_used"), U64(h, "swap_total"), U64(h, "swap_used"));
+        }
+
+        RemoteServerProcess? server = null;
+        if (root.TryGetProperty("server", out var sv) && sv.ValueKind == JsonValueKind.Object)
+        {
+            var children = sv.TryGetProperty("children", out var ch) && ch.ValueKind == JsonValueKind.Array
+                ? ch.EnumerateArray().Where(c => c.ValueKind == JsonValueKind.Object)
+                    .Select(c => new RemoteProcess((int?)Num(c, "pid"), Str(c, "name"), Str(c, "model"), Num(c, "cpu_pct"), U64(c, "rss")))
+                    .ToList()
+                : new List<RemoteProcess>();
+            server = new RemoteServerProcess((int?)Num(sv, "pid"), Num(sv, "cpu_pct"), U64(sv, "rss"), (int?)Num(sv, "procs"), children);
+        }
+
+        return new RemoteSystem(asOf, host, server, ParseDevices(root));
+    }
+
+    /// <summary>Whether GET /api/xollama lists <paramref name="feature"/> in its "features".</summary>
+    public static bool HasFeature(JsonElement root, string feature) =>
+        root.ValueKind == JsonValueKind.Object && root.TryGetProperty("features", out var f) && f.ValueKind == JsonValueKind.Array &&
+        f.EnumerateArray().Any(x => x.ValueKind == JsonValueKind.String && x.GetString() == feature);
 
     /// <summary>GET /api/engine: loaded model → (engine actually serving it, readable).</summary>
     public static Dictionary<string, (string Engine, bool Readable)> ParseEngineList(JsonElement root)
@@ -491,8 +601,11 @@ internal sealed class RemoteServerMonitor
     private static string Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
 
-    private static ulong U64(JsonElement e, string name) =>
-        e.TryGetProperty(name, out var v) && v.TryGetUInt64(out var u) ? u : 0;
+    private static ulong? U64(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetUInt64(out var u) ? u : null;
+
+    private static double? Num(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) ? d : null;
 
     // ---- local or remote ----
 
