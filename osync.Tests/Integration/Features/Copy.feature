@@ -88,6 +88,33 @@ Feature: Copy models (cp)
     Then the command succeeds
     And the model "{dst}" on local is identical to "{src}" on remote1
 
+  # Regression: a source given as IP:port/model (no http://) was looked up as a local model name.
+  @remote1 @local
+  Scenario Outline: Download from a remote server given without a scheme (<format>)
+    Given a test model "src:v1" on remote1
+    When I run osync "cp <source> {dst}:v1"
+    Then the command succeeds
+    And the model "{dst}:v1" on local is identical to "{src}:v1" on remote1
+
+    Examples:
+      | format        | source                                   |
+      | IP and port   | 127.0.0.1:{remote1.port}/{src}:v1        |
+      | host and port | {remote1.hostport}/{src}:v1              |
+
+  @remote1 @local
+  Scenario: Download keeps the model name and tag when no destination is given
+    Given a test model "src:v1" on remote1
+    When I run osync "cp 127.0.0.1:{remote1.port}/{src}:v1"
+    Then the command succeeds
+    And the model "{src}:v1" on local is identical to "{src}:v1" on remote1
+
+  @local
+  Scenario: Copy of a local model without a destination is refused
+    Given a test model "src" on local
+    When I run osync "cp {src}"
+    Then the command fails
+    And the output contains "a destination is required"
+
   @remote1 @remote2
   Scenario: Copy a model between two remote servers
     Given a test model "src" on remote1

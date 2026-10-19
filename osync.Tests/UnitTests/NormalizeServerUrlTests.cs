@@ -18,4 +18,17 @@ public class NormalizeServerUrlTests
     {
         OsyncProgram.NormalizeServerUrl(input).Should().Be(expected);
     }
+
+    // A copy source is remote when it names a server, with or without http:// (192.168.1.5:22434/model:tag)
+    [Theory]
+    [InlineData("192.168.178.161:22434/mannix/gemma-4-20B-v9-agentic:mtp-a_ref-Q4_K_M", true)]
+    [InlineData("server.invalid:22434/qwen3:4b", true)]
+    [InlineData("http://server.invalid/qwen3:4b", true)]
+    [InlineData("mannix/gemma-4-20B-v9-agentic:mtp-a_ref-Q4_K_M", false)]
+    [InlineData("qwen3:4b", false)]
+    [InlineData("hf.co/org/model:Q4_K_M", false)]
+    public void LooksLikeRemoteServer_RecognizesServersWithoutScheme(string input, bool expected)
+    {
+        OsyncProgram.LooksLikeRemoteServer(input).Should().Be(expected);
+    }
 }

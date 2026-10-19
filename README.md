@@ -205,6 +205,8 @@ osync cp http://server1:11434/llama3 http://server2:11434/llama3-copy
 
 # Remote to local (download from a server to the local server)
 osync cp http://192.168.0.100:11434/my-finetune my-finetune
+osync cp 192.168.0.100:22434/my-finetune:q4 my-finetune:q4   # server without http://
+osync cp 192.168.0.100:22434/my-finetune:q4                  # no destination: same name and tag on the local server
 
 # With custom memory buffer size (default: 512MB)
 osync cp http://server1:11434/llama3 http://server2:11434/llama3 -BufferSize 256MB
@@ -223,6 +225,7 @@ osync cp llama3 http://192.168.0.100:11434 -bt 50MB
 - Simultaneous download and upload with backpressure control
 - Smart server detection: IP addresses, `hostname:port`, or `hostname/` auto-detected as remote servers
 - Uses source model name when destination server has no model specified
+- A remote source without a destination is copied to the local server under the same name and tag
 
 **Remote-to-remote and remote-to-local copies (push relay):**
 
@@ -1521,9 +1524,11 @@ osync mv qwen2 qwen2-7b:dev
 v1.4.8
 
 **New**
+- **`osync cp <server>/<model:tag>` without a destination** copies the model to the local server under the same name and tag
 - **`osync psmonitor -d <server>` shows a server on another machine as it is**: only what that server reports through its API, instead of this machine's GPUs, CPU and memory next to the server's models. For Ollama: the loaded models with quantization and runner, the memory they hold in and outside VRAM with a history graph, the response time and the stored models. For xOllama also its GPUs (VRAM used, total and free, read at most once a minute), and per model the engine serving it, its busy slots and tokens per second. Only the loaded models are read on every refresh; everything else is cached. An xOllama with system telemetry (0.40.4-xollama.5+) also shows its host (CPU, memory, swap, load), its own processes and each GPU's utilization, temperature, power, clock, fan and PCIe link, with graphs (`I`, `G` picks the GPU); what its platform cannot read shows as `-`, never as 0
 
 **Fixed**
+- **`osync cp 192.168.1.5:22434/model:tag local-name` said the model was not found**: a source server written without `http://` (IP or host with port, `localhost`) was taken for a local model name, so remote-to-local copies only worked with a full URL or an alias. The source is now recognized like the destination
 - **`osync pull -d <server>` showed no progress**: the whole progress stream of the remote server was read before printing, so every line appeared at once when the pull had finished. Progress now shows as the server sends it. `osync update -d <server>` had the same problem. A remote pull or update that took over an hour also no longer times out
 
 **CI**
