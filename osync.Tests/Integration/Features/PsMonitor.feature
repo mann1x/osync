@@ -17,3 +17,18 @@ Feature: psmonitor of a remote server
     And the output does not contain "GPU Status"
     And the output does not contain "SWP:"
     And the output does not contain "Ollama CPU"
+
+  # xOllama with system telemetry (system_telemetry_v1, 0.40.4-xollama.5+) also sends its host, its own
+  # processes and its GPUs: the System panel shows them, read from the server, never from this machine
+  @remote1 @xollama
+  Scenario: A remote xOllama shows its own host and server processes
+    Given a test model "runner" on remote1
+    And the model "{runner}" is loaded on remote1
+    When I open psmonitor on remote1 as a remote server in a terminal and press "wait:Q4_0 wait:procs text:q"
+    Then the command succeeds
+    And the output contains "System ──"
+    And the output contains "from the server"
+    And the output contains "procs"
+    And the output contains "runner:latest"
+    And the output does not contain "GPU Status"
+    And the output does not contain "SWP:"

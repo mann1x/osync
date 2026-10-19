@@ -317,6 +317,11 @@ public partial class PsMonitorUI
                 _remoteMonitor!.RefreshDevicesSoon();
                 break;
 
+            case ConsoleKey.G when _remote:
+                CycleRemoteGpu();
+                _needsRedraw = true;
+                break;
+
             case ConsoleKey.I:
                 // Cycle through GPU display modes
                 _gpuDisplayMode = _gpuDisplayMode switch
@@ -365,8 +370,10 @@ public partial class PsMonitorUI
                 "[yellow]Left/Right[/]   Adjust graph history (+/- 1 min)\n" +
                 "[yellow]Up/Down[/]      Adjust refresh interval\n" +
                 (_remote
-                    ? "[yellow]I[/]            Cycle the graph (VRAM, RAM, tok/s, busy slots)\n" +
-                      "[yellow]R[/]            Re-read the server's GPU list (xOllama)\n\n" +
+                    ? "[yellow]I[/]            Cycle the graph (VRAM, RAM, tok/s, busy slots; GPU, host and\n" +
+                      "             server graphs when xOllama sends system telemetry)\n" +
+                      "[yellow]G[/]            Pick the GPU the GPU graphs show\n" +
+                      "[yellow]R[/]            Re-read the server's GPU list (xOllama without telemetry)\n\n" +
                       "[dim]Remote server: only what its API reports is shown, nothing from this machine.[/]\n\n"
                     : "\n") +
                 "[dim]Press any key to continue...[/]"
