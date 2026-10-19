@@ -205,6 +205,8 @@ osync cp http://server1:11434/llama3 http://server2:11434/llama3-copy
 
 # Remote to local (download from a server to the local server)
 osync cp http://192.168.0.100:11434/my-finetune my-finetune
+osync cp 192.168.0.100:22434/my-finetune:q4 my-finetune:q4   # server without http://
+osync cp 192.168.0.100:22434/my-finetune:q4                  # no destination: same name and tag on the local server
 
 # With custom memory buffer size (default: 512MB)
 osync cp http://server1:11434/llama3 http://server2:11434/llama3 -BufferSize 256MB
@@ -223,6 +225,7 @@ osync cp llama3 http://192.168.0.100:11434 -bt 50MB
 - Simultaneous download and upload with backpressure control
 - Smart server detection: IP addresses, `hostname:port`, or `hostname/` auto-detected as remote servers
 - Uses source model name when destination server has no model specified
+- A remote source without a destination is copied to the local server under the same name and tag
 
 **Remote-to-remote and remote-to-local copies (push relay):**
 
@@ -551,13 +554,13 @@ osync psmonitor -Hi 1h30m       # 1 hour 30 minutes
 # Combined options
 osync psmonitor -L 2 -Hi 15     # 2s refresh, 15 minutes history
 
-# Monitor remote server (shows loaded models only, no GPU/system stats)
+# Monitor a server on another machine (only what its API reports, see below)
 osync psmonitor -d http://192.168.0.100:11434
 ```
 
 **Options:**
 
-- `-d <url>` - Remote server URL (default: local). Remote mode shows loaded models only, no GPU/system stats
+- `-d <url>` - Server URL or alias (default: local). A server on another machine is shown in remote mode
 - `-L <interval>` - Refresh interval (default: 5s). Supports: 5, 5s, 30s, 1m, 5m, 1h30m
 - `-Hi, --history <duration>` - Initial graph history duration (default: 5m). Plain integers are treated as minutes (e.g., -Hi 10 = 10 minutes). Supports: 1m, 30m, 1h, 1h30m
 
@@ -570,6 +573,15 @@ osync psmonitor -d http://192.168.0.100:11434
 - System metrics: CPU, RAM, Swap with progress bars
 - Loaded Ollama models with expiration times
 - NVIDIA driver and CUDA version display
+
+**Remote servers:**
+
+For a server on another machine, psmonitor shows only what that server reports through its API, never the GPUs, CPU or memory of the machine osync runs on. A server is local when its address is localhost, a loopback address or one of this machine's own addresses; `OSYNC_PSMONITOR_REMOTE=1` shows a local server in remote mode too.
+
+- **Ollama**: the loaded models (quantization, runner, size and how much of it is in VRAM, context, expiry), the memory they hold in VRAM and outside it with a history graph, the response time from here, and how many models the server stores. Ollama's API has no GPU or system statistics, so there are none
+- **xOllama** adds its GPUs (name, backend, engine, VRAM used, total and free; read at most once a minute, since the server looks its GPUs up again to answer, `R` re-reads them), and per loaded model the engine actually serving it, its busy slots and its generation speed (tokens per second). `I` cycles the graph through VRAM, memory outside VRAM, tokens per second and busy slots
+- **xOllama with system telemetry** (0.40.4-xollama.5 and later, feature `system_telemetry_v1`) also sends its host and its GPUs' live readings, read on every refresh from a snapshot the server keeps (cheap, no GPU lookup): a System panel with the host's CPU, memory, swap and load and the server's own processes (CPU, where 100% is one core, and memory, per engine serving a model), and per GPU its utilization, temperature, power and limit, clock, fan and PCIe link. A reading the server's platform does not expose is shown as `-`, never as 0 (on Windows, AMD and Intel GPUs report only memory and utilization). `I` adds graphs of the GPU's utilization, power and temperature, the host's CPU and memory and the server's CPU; `G` picks the GPU the GPU graphs show
+- Every request is cheap: only the loaded models are read on every refresh, over kept-alive connections; the version is read once, the stored models every minute, and an engine endpoint a model does not have is not asked again until it reloads. The xOllama API key (`XOLLAMA_API_KEY` or the key file) is sent to xOllama servers only
 
 **Interactive Controls:**
 - **Q / Esc** - Quit monitor
@@ -1508,6 +1520,19 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.8
+
+**New**
+- **`osync cp <server>/<model:tag>` without a destination** copies the model to the local server under the same name and tag
+- **`osync psmonitor -d <server>` shows a server on another machine as it is**: only what that server reports through its API, instead of this machine's GPUs, CPU and memory next to the server's models. For Ollama: the loaded models with quantization and runner, the memory they hold in and outside VRAM with a history graph, the response time and the stored models. For xOllama also its GPUs (VRAM used, total and free, read at most once a minute), and per model the engine serving it, its busy slots and tokens per second. Only the loaded models are read on every refresh; everything else is cached. An xOllama with system telemetry (0.40.4-xollama.5+) also shows its host (CPU, memory, swap, load), its own processes and each GPU's utilization, temperature, power, clock, fan and PCIe link, with graphs (`I`, `G` picks the GPU); what its platform cannot read shows as `-`, never as 0
+
+**Fixed**
+- **`osync cp 192.168.1.5:22434/model:tag local-name` said the model was not found**: a source server written without `http://` (IP or host with port, `localhost`) was taken for a local model name, so remote-to-local copies only worked with a full URL or an alias. The source is now recognized like the destination
+- **`osync pull -d <server>` showed no progress**: the whole progress stream of the remote server was read before printing, so every line appeared at once when the pull had finished. Progress now shows as the server sends it. `osync update -d <server>` had the same problem. A remote pull or update that took over an hour also no longer times out
+
+**CI**
+- Integration tests run against xOllama v0.40.4-xollama.5 (system telemetry)
 
 v1.4.7
 

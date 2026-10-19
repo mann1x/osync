@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.4.7";
+        public static string AppVersion = "1.4.8";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -2664,6 +2664,10 @@ namespace osync
             }
         }
 
+        /// <summary>Appends ":latest" to a model name without a tag.</summary>
+        private static string WithDefaultTag(string model) =>
+            model.Contains(':') ? model : $"{model}:latest";
+
         public void ActionCopy(string Source, string Destination, string? BufferSize = null, CancellationToken cancellationToken = default)
         {
             Init();
@@ -2676,9 +2680,24 @@ namespace osync
             // Detect if source and destination are remote or local
             // Use LooksLikeRemoteServer to detect IP addresses and hostnames without protocol
             // Server aliases from the settings file stand for their server URL
+            // A remote source is any server reference (URL, IP, host:port, alias), like the destination
             Source = ServerAliases.Expand(Source);
-            Destination = ServerAliases.Expand(Destination);
-            bool isSourceRemote = Source.StartsWith("http://") || Source.StartsWith("https://");
+            Destination = ServerAliases.Expand(Destination ?? string.Empty);
+            bool isSourceRemote = LooksLikeRemoteServer(Source);
+
+            if (string.IsNullOrWhiteSpace(Destination))
+            {
+                if (!isSourceRemote)
+                {
+                    Out.Error("a destination is required when copying a local model (only a remote source can omit it)");
+                    System.Environment.Exit(1);
+                }
+
+                // Remote source without destination: copy to the local server with the same name and tag
+                var (_, sourceModelName) = ParseRemoteSource(Source, requireModelName: true);
+                Destination = sourceModelName;
+            }
+
             bool isDestinationRemote = LooksLikeRemoteServer(Destination);
 
             if (isSourceRemote && isDestinationRemote)
@@ -2703,6 +2722,13 @@ namespace osync
             {
                 // Remote to Local copy
                 var (sourceServer, sourceModel) = ParseRemoteSource(Source, requireModelName: true);
+
+                if (string.Equals(sourceServer.TrimEnd('/'), NormalizeServerUrl(OllamaServer.LocalUrl), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(WithDefaultTag(sourceModel), WithDefaultTag(Destination), StringComparison.OrdinalIgnoreCase))
+                {
+                    Out.Error($"'{sourceModel}' on {sourceServer} is the local server's own model: give a different destination name");
+                    System.Environment.Exit(1);
+                }
 
                 Out.StatusLine($"Copying '{sourceModel}' from {sourceServer} to local '{Destination}'...");
                 if (!CopyBetweenServers(sourceServer, sourceModel, OllamaServer.LocalUrl, Destination, BufferSize))
@@ -5065,7 +5091,9 @@ namespace osync
                     "application/json"
                 );
 
-                var response = await httpClient.PostAsync("api/pull", content);
+                // ResponseHeadersRead: PostAsync would buffer the whole progress stream and print it only at the end
+                using var pullMessage = new HttpRequestMessage(HttpMethod.Post, "api/pull") { Content = content };
+                using var response = await httpClient.SendAsync(pullMessage, HttpCompletionOption.ResponseHeadersRead);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -5566,7 +5594,9 @@ namespace osync
                     "application/json"
                 );
 
-                var response = await httpClient.PostAsync("api/pull", content);
+                // ResponseHeadersRead: PostAsync would buffer the whole progress stream and print it only at the end
+                using var pullMessage = new HttpRequestMessage(HttpMethod.Post, "api/pull") { Content = content };
+                using var response = await httpClient.SendAsync(pullMessage, HttpCompletionOption.ResponseHeadersRead);
 
                 if (!response.IsSuccessStatusCode)
                 {
