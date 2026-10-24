@@ -58,7 +58,7 @@ public static class OsyncCli
             }
             catch { /* output unavailable */ }
             throw new TimeoutException($"osync {arguments} did not finish within {timeout ?? TimeSpan.FromMinutes(3)}" +
-                (output.Length > 0 ? $"; its output so far:\n{output}" : "; it printed nothing"));
+                (output.Length > 0 ? $"; its output so far:\n{output}" : "; it printed nothing") + DiskPressure());
         }
 
         return new OsyncResult(
@@ -67,6 +67,27 @@ public static class OsyncCli
             AnsiEscape.Replace(await stdout, ""),
             AnsiEscape.Replace(await stderr, ""),
             stopwatch.Elapsed);
+    }
+
+    /// <summary>
+    /// The machine's write-back state on Linux (dirty and in-flight page cache, I/O pressure), for a timeout: a
+    /// transfer that crawls at a few hundred KB/s with a large Dirty/Writeback is held back by a slow disk, not osync.
+    /// </summary>
+    internal static string DiskPressure()
+    {
+        if (!OperatingSystem.IsLinux()) return "";
+        try
+        {
+            var meminfo = File.ReadAllLines("/proc/meminfo")
+                .Where(l => l.StartsWith("Dirty:") || l.StartsWith("Writeback:") || l.StartsWith("MemAvailable:"))
+                .Select(l => Regex.Replace(l, @"\s+", " "));
+            var pressure = File.Exists("/proc/pressure/io") ? File.ReadAllText("/proc/pressure/io").Trim() : "n/a";
+            return $"\n--- disk ---\n{string.Join(", ", meminfo)}\nio pressure: {pressure.Replace("\n", "; ")}";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private static void ApplyEnvironment(ProcessStartInfo psi, bool withHostSettings, IReadOnlyDictionary<string, string>? environment)
