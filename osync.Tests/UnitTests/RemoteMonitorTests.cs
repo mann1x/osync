@@ -221,4 +221,22 @@ public class RemoteMonitorTests
         RemoteServerMonitor.ParseKvHost(Json("""{"models":[{"name":"a","size":1}]}""")).Should().BeNull();
         RemoteServerMonitor.ParseKvHost(Json("""{"host":{}}""")).Should().BeNull();
     }
+
+    // xOllama dev 06cb8676d, measured on a 3090 (qwen3:4b, 32k): an engaged window, a load that does not spill,
+    // a KVarN cache (no byte sizes) and a model that is not readable yet
+    [Fact]
+    public void ParseKvHost_XOllamaPayload()
+    {
+        var kv = RemoteServerMonitor.ParseKvHost(Json("""
+            {"models":[
+              {"name":"qwen3:4b","size":1,"size_vram":1,"kv":{"as_of":"2026-10-24T09:15:00Z","residency_mode":"auto","engaged":true,"kvarn":false,
+                "cells":32768,"window_cells":2560,"tail_cells":30208,"device_bytes":377634816,"host_bytes":4454645760}},
+              {"name":"small:latest","size":1,"size_vram":1,"kv":{"residency_mode":"auto","engaged":false,"kvarn":false,
+                "cells":32768,"window_cells":32768,"tail_cells":0,"device_bytes":null,"host_bytes":0}},
+              {"name":"kvarn:latest","size":1,"size_vram":1,"kv":{"residency_mode":"auto","engaged":true,"kvarn":true,"host_bytes":null}},
+              {"name":"loading:latest","size":1,"size_vram":1,"kv":null}]}
+            """));
+
+        kv.Should().BeEquivalentTo(new Dictionary<string, ulong> { ["qwen3:4b"] = 4454645760UL, ["small:latest"] = 0UL });
+    }
 }
