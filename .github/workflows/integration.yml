@@ -124,16 +124,20 @@ jobs:
       - name: Start servers
         run: |
           echo "$HOME/srv/bin" >> "$GITHUB_PATH"
+          # The model stores live in RAM (/dev/shm, a tmpfs): the runner's disk throttles writes at times, and an
+          # upload then crawls at a few hundred KB/s through the server's write-back (the 3-minute test timeout
+          # hit "Upload a local model to a remote server" and its siblings again and again)
+          stores=/dev/shm/osync-stores
           p=${{ steps.ver.outputs.port }}
           for s in "local $p" "remote1 $((p + 1))" "remote2 $((p + 2))"; do
             set -- $s
-            mkdir -p "$RUNNER_TEMP/$1/models"
-            env ${{ steps.ver.outputs.hostvar }}=127.0.0.1:$2 OLLAMA_MODELS="$RUNNER_TEMP/$1/models" \
+            mkdir -p "$stores/$1/models"
+            env ${{ steps.ver.outputs.hostvar }}=127.0.0.1:$2 OLLAMA_MODELS="$stores/$1/models" \
               nohup "$HOME/srv/bin/${{ inputs.server }}" serve > "$RUNNER_TEMP/server-$1.log" 2>&1 &
           done
           # The peer runs from ~/srv/peer (not on PATH); a stock Ollama there finds its runtime in ~/srv/lib
-          mkdir -p "$RUNNER_TEMP/peer/models"
-          env ${{ steps.ver.outputs.peerhostvar }}=127.0.0.1:${{ steps.ver.outputs.peerport }} OLLAMA_MODELS="$RUNNER_TEMP/peer/models" \
+          mkdir -p "$stores/peer/models"
+          env ${{ steps.ver.outputs.peerhostvar }}=127.0.0.1:${{ steps.ver.outputs.peerport }} OLLAMA_MODELS="$stores/peer/models" \
             nohup "$HOME/srv/peer/${{ steps.ver.outputs.peer }}" serve > "$RUNNER_TEMP/server-peer.log" 2>&1 &
           for port in $p $((p + 1)) $((p + 2)) ${{ steps.ver.outputs.peerport }}; do
             timeout 60 bash -c "until curl -fs localhost:$port/api/version; do sleep 1; done"; echo
@@ -142,10 +146,10 @@ jobs:
           echo "OSYNC_TEST_REMOTE1=http://localhost:$((p + 1))" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_REMOTE2=http://localhost:$((p + 2))" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_PEER=http://localhost:${{ steps.ver.outputs.peerport }}" >> "$GITHUB_ENV"
-          echo "OSYNC_TEST_MODELS_DIR=$RUNNER_TEMP/local/models" >> "$GITHUB_ENV"
-          echo "OSYNC_TEST_REMOTE1_MODELS_DIR=$RUNNER_TEMP/remote1/models" >> "$GITHUB_ENV"
-          echo "OSYNC_TEST_REMOTE2_MODELS_DIR=$RUNNER_TEMP/remote2/models" >> "$GITHUB_ENV"
-          echo "OSYNC_TEST_PEER_MODELS_DIR=$RUNNER_TEMP/peer/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_MODELS_DIR=$stores/local/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE1_MODELS_DIR=$stores/remote1/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_REMOTE2_MODELS_DIR=$stores/remote2/models" >> "$GITHUB_ENV"
+          echo "OSYNC_TEST_PEER_MODELS_DIR=$stores/peer/models" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_REGISTRY=1" >> "$GITHUB_ENV"
           echo "OSYNC_TEST_EXCLUSIVE=1" >> "$GITHUB_ENV"
 
