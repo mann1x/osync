@@ -18,26 +18,35 @@ public enum RemoteGraphMode
     GpuUtil,   // the selected GPU's utilization (xOllama system telemetry, as are the modes below)
     GpuPower,
     GpuTemp,
+    GpuVram,   // the selected GPU's memory in use
+    GpuClock,
+    GpuFan,
     HostCpu,   // the whole host's CPU
     HostMem,
-    ServerCpu  // the server's process tree, of one core
+    ServerCpu, // the server's process tree, of one core
+    ServerMem, // the server's process tree, resident memory
+    KvHost     // host RAM held by the KV rolling window of the loaded models (xOllama, kv_host_telemetry_v1)
 }
 
 /// <summary>
-/// psmonitor for a server on another machine: everything shown comes from that server's API (see
-/// <see cref="RemoteServerMonitor"/>); nothing is read from this machine, so there is no local GPU, CPU or memory panel.
+/// psmonitor's view, the same for every server: what the server's API reports (see <see cref="RemoteServerMonitor"/>).
+/// For a server on another machine that is all there is: nothing is read from this machine. For a server on this
+/// machine that sends no system telemetry (stock Ollama, an older xOllama), the System panel and the GPUs are read
+/// here instead (<see cref="LocalReadings"/>).
 /// </summary>
 public partial class PsMonitorUI
 {
     private readonly bool _remote;
-    private readonly RemoteServerMonitor? _remoteMonitor;
     private RemoteSnapshot? _remoteData;
+    private RemoteGraphMode? _secondGraphMode = RemoteGraphMode.ServerCpu;  // the graph under the main one (O cycles), when there is room
+    private string _gpuDriverInfo = "";
+    private readonly RateAverage _tpsAverage = new(TimeSpan.FromSeconds(30));
     private RemoteGraphMode _remoteGraphMode = RemoteGraphMode.Vram;
     private int _remoteGpu;  // index into the telemetry devices, for the GPU graphs (G cycles)
 
     private void InitRemoteGraphs()
     {
-        foreach (var key in new[] { "r_vram", "r_ram", "r_tps", "r_slots", "r_scpu" })
+        foreach (var key in new[] { "r_vram", "r_ram", "r_tps", "r_slots", "r_scpu", "r_smem", "r_kvhost" })
             _graphs[key] = new BrailleGraph(MaxStoredDataPoints / 2, _currentGraphHeight, 0, 100, autoScale: true);
         foreach (var key in new[] { "r_hcpu", "r_hmem" })
             _graphs[key] = new BrailleGraph(MaxStoredDataPoints / 2, _currentGraphHeight, 0, 100);
@@ -49,7 +58,7 @@ public partial class PsMonitorUI
     {
         var key = GpuGraphKey(device, mode);
         if (!_graphs.TryGetValue(key, out var graph))
-            _graphs[key] = graph = mode == RemoteGraphMode.GpuUtil
+            _graphs[key] = graph = mode is RemoteGraphMode.GpuUtil or RemoteGraphMode.GpuVram or RemoteGraphMode.GpuFan
                 ? new BrailleGraph(MaxStoredDataPoints / 2, _currentGraphHeight, 0, 100)
                 : new BrailleGraph(MaxStoredDataPoints / 2, _currentGraphHeight, 0, 100, autoScale: true);
         return graph;
@@ -82,12 +91,19 @@ public partial class PsMonitorUI
         var modes = new List<RemoteGraphMode> { RemoteGraphMode.Vram, RemoteGraphMode.Ram };
         if (RemoteIsXOllama)
             modes.AddRange(new[] { RemoteGraphMode.Tokens, RemoteGraphMode.Slots });
+        if (_remoteData?.KvHostBytes is { Count: > 0 })
+            modes.Add(RemoteGraphMode.KvHost);
         if (TelemetryDevices.Count > 0)
-            modes.AddRange(new[] { RemoteGraphMode.GpuUtil, RemoteGraphMode.GpuPower, RemoteGraphMode.GpuTemp });
+        {
+            modes.AddRange(new[] { RemoteGraphMode.GpuUtil, RemoteGraphMode.GpuPower, RemoteGraphMode.GpuTemp, RemoteGraphMode.GpuVram });
+            // only the readings some GPU has
+            if (TelemetryDevices.Any(d => d.Telemetry!.ClockMhz != null)) modes.Add(RemoteGraphMode.GpuClock);
+            if (TelemetryDevices.Any(d => d.Telemetry!.FanPct != null)) modes.Add(RemoteGraphMode.GpuFan);
+        }
         if (_remoteData?.System?.Host != null)
             modes.AddRange(new[] { RemoteGraphMode.HostCpu, RemoteGraphMode.HostMem });
         if (_remoteData?.System?.Server != null)
-            modes.Add(RemoteGraphMode.ServerCpu);
+            modes.AddRange(new[] { RemoteGraphMode.ServerCpu, RemoteGraphMode.ServerMem });
         return modes;
     }
 
@@ -98,22 +114,40 @@ public partial class PsMonitorUI
         _remoteGraphMode = modes[(at + 1) % modes.Count];
     }
 
-    private async Task CollectRemoteDataAsync()
+    /// <summary>O: the second graph shows the server's CPU, then its memory, then nothing.</summary>
+    private void CycleSecondGraph() => _secondGraphMode = _secondGraphMode switch
+    {
+        RemoteGraphMode.ServerCpu => RemoteGraphMode.ServerMem,
+        RemoteGraphMode.ServerMem => null,
+        _ => RemoteGraphMode.ServerCpu
+    };
+
+    private async Task CollectServerDataAsync()
     {
         try
         {
-            var snapshot = await _remoteMonitor!.CollectAsync();
+            var snapshot = await _remoteMonitor.CollectAsync();
+            // A server on this machine without system telemetry: this machine's readings take its place
+            if (!_remote && snapshot.System == null)
+                snapshot = await WithLocalReadingsAsync(snapshot);
             _remoteData = snapshot;
             _ollamaConnected = snapshot.Connected;
             _ollamaVersion = snapshot.Version;
             _loadedModels = snapshot.Connected ? snapshot.Models : null;
-            if (!snapshot.Connected) return;
 
-            const double GiB = 1024.0 * 1024 * 1024;
-            _graphs["r_vram"].AddDataPoint(snapshot.Models.Sum(m => m.SizeVram) / GiB, "green");
-            _graphs["r_ram"].AddDataPoint(snapshot.Models.Sum(m => Math.Max(0, m.Size - m.SizeVram)) / GiB, "yellow");
-            _graphs["r_tps"].AddDataPoint(snapshot.Engine.Values.Sum(e => e.TokensPerSecond ?? 0), "aqua");
-            _graphs["r_slots"].AddDataPoint(snapshot.Engine.Values.Sum(e => e.SlotsBusy ?? 0), "orange1");
+            if (snapshot.Connected)
+            {
+                const double GiB = 1024.0 * 1024 * 1024;
+                _graphs["r_vram"].AddDataPoint(snapshot.Models.Sum(m => m.SizeVram) / GiB, "green");
+                _graphs["r_ram"].AddDataPoint(snapshot.Models.Sum(m => Math.Max(0, m.Size - m.SizeVram)) / GiB, "yellow");
+                var tokensPerSecond = snapshot.Engine.Values.Sum(e => e.TokensPerSecond ?? 0);
+                _graphs["r_tps"].AddDataPoint(tokensPerSecond, "aqua");
+                _tpsAverage.Add(DateTime.UtcNow, tokensPerSecond);
+                _graphs["r_slots"].AddDataPoint(snapshot.Engine.Values.Sum(e => e.SlotsBusy ?? 0), "orange1");
+                // Only the models whose engine reports its window: an unknown is never drawn as 0
+                if (snapshot.KvHostBytes is { Count: > 0 } kv)
+                    _graphs["r_kvhost"].AddDataPoint(kv.Values.Sum(b => (double)b) / GiB, "fuchsia");
+            }
 
             // Telemetry: a reading the server did not have (null) adds no point, it is never drawn as 0
             if (snapshot.System is { } system)
@@ -124,17 +158,39 @@ public partial class PsMonitorUI
                     if (t.UtilPct is { } util) GpuGraph(d, RemoteGraphMode.GpuUtil).AddDataPoint(util);
                     if (t.PowerW is { } power) GpuGraph(d, RemoteGraphMode.GpuPower).AddDataPoint(power, "orange1");
                     if (t.TempC is { } temp) GpuGraph(d, RemoteGraphMode.GpuTemp).AddDataPoint(temp, temp < 70 ? "green" : temp < 85 ? "yellow" : "red");
+                    if (d.TotalMemory is > 0 && d.UsedMemory is { } used) GpuGraph(d, RemoteGraphMode.GpuVram).AddDataPoint(used * 100.0 / d.TotalMemory.Value);
+                    if (t.ClockMhz is { } clock) GpuGraph(d, RemoteGraphMode.GpuClock).AddDataPoint(clock, "aqua");
+                    if (t.FanPct is { } fan) GpuGraph(d, RemoteGraphMode.GpuFan).AddDataPoint(fan);
                 }
                 if (system.Host?.CpuPct is { } cpu) _graphs["r_hcpu"].AddDataPoint(cpu);
-                if (system.Host is { MemTotal: > 0 } host && host.MemUsed is { } used)
-                    _graphs["r_hmem"].AddDataPoint(used * 100.0 / host.MemTotal.Value);
+                if (system.Host is { MemTotal: > 0 } host && host.MemUsed is { } memUsed)
+                    _graphs["r_hmem"].AddDataPoint(memUsed * 100.0 / host.MemTotal.Value);
                 if (system.Server?.CpuPct is { } scpu) _graphs["r_scpu"].AddDataPoint(scpu, "aqua");
+                if (system.Server?.Rss is { } rss) _graphs["r_smem"].AddDataPoint(rss / GiBf, "dodgerblue1");
             }
         }
         catch { }
     }
 
-    private void RenderRemoteDisplay(int width, int height)
+    /// <summary>The snapshot with this machine's CPU, memory, server processes and GPUs in place of the server's telemetry.</summary>
+    private async Task<RemoteSnapshot> WithLocalReadingsAsync(RemoteSnapshot snapshot)
+    {
+        _gpuMonitor ??= new GpuMonitor();
+        var gpus = await _gpuMonitor.CollectMetricsAsync();
+        var system = _systemMetrics != null ? await _systemMetrics.GetSystemMetricsAsync() : null;
+        var server = _systemMetrics?.GetOllamaMetrics();
+        if (_gpuMonitor.HasGpu && _gpuDriverInfo.Length == 0 && _gpuMonitor.DriverVersion.Length > 0)
+        {
+            _gpuDriverInfo = $"{_gpuMonitor.GetSmiToolName()} driver {_gpuMonitor.DriverVersion}" +
+                             (_gpuMonitor.SdkVersion.Length > 0 ? $" · {_gpuMonitor.GetSdkName()} {_gpuMonitor.SdkVersion}" : "");
+        }
+
+        var local = LocalReadings.Build(system, server, gpus, snapshot.Devices, Environment.ProcessorCount,
+            Environment.MachineName, Environment.TickCount64 / 1000);
+        return snapshot with { System = local, Devices = local.Devices, DevicesAsOf = local.AsOf, LocalReadings = true };
+    }
+
+    private void RenderFrame(int width, int height)
     {
         try
         {
@@ -143,10 +199,17 @@ public partial class PsMonitorUI
             var modelRows = Math.Max(1, _loadedModels?.Count ?? 1);
             var system = _remoteData?.System;
             var systemRows = system == null ? 0 : (system.Host != null ? 1 : 0) + (system.Server != null ? 1 : 0);
-            // System panel (2 + rows), devices table (4 + rows, when any), graph panel (graph + 3), models table
+            // System panel (2 + rows), devices table (4 + rows, when any), graph panels (graph + 3 each), models table
             // (2 title lines + 4 + rows), status bar
-            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + 3 + (2 + 4 + modelRows) + 1;
-            _currentGraphHeight = Math.Clamp(height - fixedHeight, MinGraphHeightChars, DefaultGraphHeightChars);
+            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + (2 + 4 + modelRows) + 1;
+            var room = height - fixedHeight;
+            // The second graph only when both keep at least 3 rows, and only with a reading to draw
+            var second = _secondGraphMode is { } sm && sm != _remoteGraphMode && RemoteGraphModes().Contains(sm) && room >= 2 * (3 + 3)
+                ? _secondGraphMode
+                : null;
+            _currentGraphHeight = second != null
+                ? Math.Clamp(room / 2 - 3, MinGraphHeightChars, DefaultGraphHeightChars)
+                : Math.Clamp(room - 3, MinGraphHeightChars, DefaultGraphHeightChars);
 
             // The frame is drawn off-screen and written line by line over the previous one: no cursor position is
             // read back from the terminal, and nothing flickers
@@ -164,7 +227,8 @@ public partial class PsMonitorUI
 
             if (systemRows > 0) RenderRemoteSystem(console, system!, width);
             if (deviceRows > 0) RenderRemoteDevices(console, devices!);
-            RenderRemoteGraph(console, width);
+            RenderRemoteGraph(console, width, _remoteGraphMode, main: true);
+            if (second is { } secondMode) RenderRemoteGraph(console, width, secondMode, main: false);
             RenderRemoteModels(console, width);
 
             var lines = frame.ToString().Replace("\r", "").Split('\n');
@@ -187,7 +251,7 @@ public partial class PsMonitorUI
         }
         catch (Exception ex)
         {
-            ShowError($"Remote: {ex.Message}");
+            ShowError(ex.Message);
         }
     }
 
@@ -254,9 +318,18 @@ public partial class PsMonitorUI
                 parts.Add($"[dim]{Markup.Escape(child.Model)}[/] {Reading(child.CpuPct, "F0", "%")} {Reading(child.Rss / GiBf, "F1", "G")}");
             lines.Add(FitParts(parts, width - 4));
         }
-        var age = system.AsOf is { } asOf ? Math.Max(0, (int)(DateTime.UtcNow - asOf).TotalSeconds) : 0;
+        string source;
+        if (_remoteData?.LocalReadings == true)
+        {
+            source = "this machine" + (_gpuDriverInfo.Length > 0 ? $" · {Markup.Escape(_gpuDriverInfo)}" : "");
+        }
+        else
+        {
+            var age = system.AsOf is { } asOf ? Math.Max(0, (int)(DateTime.UtcNow - asOf).TotalSeconds) : 0;
+            source = $"from the server, {age}s ago";
+        }
         console.Write(new Panel(new Markup(string.Join("\n", lines)))
-            .Header($"{header} ── [dim]from the server, {age}s ago[/]")
+            .Header($"{header} ── [dim]{source}[/]")
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.Blue)
             .Expand());
@@ -314,13 +387,14 @@ public partial class PsMonitorUI
         var index = 0;
         foreach (var d in devices)
         {
-            var used = d.Backend.Length > 0;  // a GPU the server does not use has no backend
+            // a GPU the server does not use has no backend; without the server's device list that is unknown
+            var used = d.Backend.Length > 0 || !d.BackendKnown;
             var name = Markup.Escape(d.Name) + (d.Integrated ? " [dim](integrated)[/]" : "") + (used ? "" : " [dim](not used)[/]");
             var row = new List<string>
             {
                 $"{index++}",
                 name,
-                Markup.Escape(used ? d.Backend : "-"),
+                Markup.Escape(d.Backend.Length > 0 ? d.Backend : "-"),
                 Markup.Escape(d.Engine.Length > 0 ? d.Engine : "-"),
                 UsageBar(d.UsedMemory, d.TotalMemory, live ? 10 : 20),
             };
@@ -350,7 +424,7 @@ public partial class PsMonitorUI
         console.Write(table);
     }
 
-    private void RenderRemoteGraph(IAnsiConsole console, int width)
+    private void RenderRemoteGraph(IAnsiConsole console, int width, RemoteGraphMode mode, bool main)
     {
         var graphWidthChars = Math.Max(40, width - 4);
         var expectedDataPoints = GetExpectedDataPoints();
@@ -358,7 +432,7 @@ public partial class PsMonitorUI
         var engine = _remoteData?.Engine ?? new Dictionary<string, RemoteEngineStats>();
 
         string key, label, value;
-        switch (_remoteGraphMode)
+        switch (mode)
         {
             case RemoteGraphMode.Ram:
                 key = "r_ram";
@@ -370,6 +444,8 @@ public partial class PsMonitorUI
                 label = "Generation speed";
                 var tps = engine.Values.Where(e => e.TokensPerSecond.HasValue).ToList();
                 value = tps.Count > 0 ? $"{tps.Sum(e => e.TokensPerSecond!.Value):F1} tok/s" : "n/a";
+                // the instant reading jumps; the average of the last 30 s while generating is the one to compare
+                if (_tpsAverage.Average is { } avg) value += $" · avg {avg:F1}";
                 break;
             case RemoteGraphMode.Slots:
                 key = "r_slots";
@@ -377,18 +453,23 @@ public partial class PsMonitorUI
                 var slots = engine.Values.Where(e => e.SlotsTotal.HasValue).ToList();
                 value = slots.Count > 0 ? $"{slots.Sum(e => e.SlotsBusy ?? 0)}/{slots.Sum(e => e.SlotsTotal!.Value)}" : "n/a";
                 break;
-            case RemoteGraphMode.GpuUtil or RemoteGraphMode.GpuPower or RemoteGraphMode.GpuTemp when SelectedRemoteGpu is { } gpu:
+            case RemoteGraphMode.GpuUtil or RemoteGraphMode.GpuPower or RemoteGraphMode.GpuTemp or RemoteGraphMode.GpuVram
+                or RemoteGraphMode.GpuClock or RemoteGraphMode.GpuFan when SelectedRemoteGpu is { } gpu:
                 var gpuIndex = _remoteData!.Devices!.IndexOf(gpu);
                 var t = gpu.Telemetry!;
-                (label, value) = _remoteGraphMode switch
+                (label, value) = mode switch
                 {
                     RemoteGraphMode.GpuUtil => ("Utilization", t.UtilPct is { } u ? $"{u:F0}%" : "n/a"),
                     RemoteGraphMode.GpuPower => ("Power", t.PowerW is { } w ? $"{w:F0} W" : "n/a"),
+                    RemoteGraphMode.GpuVram => ("VRAM used", gpu.UsedMemory is { } vu && gpu.TotalMemory is > 0
+                        ? $"{vu / GiBf:F1}/{gpu.TotalMemory.Value / GiBf:F1} GB" : "n/a"),
+                    RemoteGraphMode.GpuClock => ("Clock", t.ClockMhz is { } mhz ? $"{mhz:F0} MHz" : "n/a"),
+                    RemoteGraphMode.GpuFan => ("Fan", t.FanPct is { } fan ? $"{fan:F0}%" : "n/a"),
                     _ => ("Temperature", t.TempC is { } c ? $"{c:F0} °C" : "n/a"),
                 };
                 label = $"GPU {gpuIndex} {Markup.Escape(gpu.Name)} {label}";
-                GpuGraph(gpu, _remoteGraphMode);
-                key = GpuGraphKey(gpu, _remoteGraphMode);
+                GpuGraph(gpu, mode);
+                key = GpuGraphKey(gpu, mode);
                 break;
             case RemoteGraphMode.HostCpu:
                 key = "r_hcpu";
@@ -405,6 +486,16 @@ public partial class PsMonitorUI
                 label = "Server processes CPU (100% = one core)";
                 value = _remoteData?.System?.Server?.CpuPct is { } sc ? $"{sc:F0}%" : "n/a";
                 break;
+            case RemoteGraphMode.ServerMem:
+                key = "r_smem";
+                label = "Server processes memory (RSS)";
+                value = _remoteData?.System?.Server?.Rss is { } sr ? $"{sr / GiBf:F1} GB" : "n/a";
+                break;
+            case RemoteGraphMode.KvHost:
+                key = "r_kvhost";
+                label = "KV rolling window, host RAM";
+                value = _remoteData?.KvHostBytes is { Count: > 0 } kvHost ? FormatGiB((long)kvHost.Values.Sum(b => (double)b)) : "n/a";
+                break;
             default:
                 key = "r_vram";
                 label = "Loaded models, VRAM";
@@ -419,10 +510,11 @@ public partial class PsMonitorUI
             content.AppendLine(line);
         content.Append(RenderTimeAxisString(graphWidthChars));
 
+        var keys = main ? $"I=Toggle{(TelemetryDevices.Count > 1 ? ", G=GPU" : "")}" : "O=Toggle";
         console.Write(new Panel(new Markup(content.ToString()))
-            .Header($"[green][[{value}]][/]──[bold yellow]{label}[/]──[dim](I=Toggle{(TelemetryDevices.Count > 1 ? ", G=GPU" : "")})[/]")
+            .Header($"[green][[{value}]][/]──[bold {(main ? "yellow" : "dodgerblue1")}]{label}[/]──[dim]({keys})[/]")
             .Border(BoxBorder.Rounded)
-            .BorderColor(Color.Yellow)
+            .BorderColor(main ? Color.Yellow : Color.DodgerBlue1)
             .Expand());
     }
 
@@ -437,7 +529,9 @@ public partial class PsMonitorUI
         if (_ollamaConnected && data != null)
         {
             var ver = data.Version.Length > 0 ? $"[magenta]v{Markup.Escape(data.Version)}[/] " : "";
-            title = $"[bold magenta]Remote {flavor}[/] ── {ver}[green]●[/] [white]{Markup.Escape(_ollamaHost)}[/] [dim]RTT {data.RoundTripMs:F0} ms[/] ── {osyncVer}";
+            title = _remote
+                ? $"[bold magenta]Remote {flavor}[/] ── {ver}[green]●[/] [white]{Markup.Escape(_ollamaHost)}[/] [dim]RTT {data.RoundTripMs:F0} ms[/] ── {osyncVer}"
+                : $"[bold magenta]{flavor}[/] ── {ver}[green]●[/] Connected to [white]{Markup.Escape(_ollamaHost)}[/] ── {osyncVer}";
             var info = new List<string>();
             if (data.StoredModels is { } stored)
                 info.Add($"{stored} models stored ({FormatGiB(data.StoredBytes ?? 0)})");
@@ -449,7 +543,7 @@ public partial class PsMonitorUI
         }
         else
         {
-            title = $"[bold magenta]Remote {flavor}[/] ── [red]●[/] Not connected [dim]({Markup.Escape(_ollamaHost)})[/] ── {osyncVer}\n ";
+            title = $"[bold magenta]{(_remote ? "Remote " : "")}{flavor}[/] ── [red]●[/] Not connected [dim]({Markup.Escape(_ollamaHost)})[/] ── {osyncVer}\n ";
         }
 
         var table = new Table()

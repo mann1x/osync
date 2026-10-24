@@ -83,7 +83,7 @@ namespace osync
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions), TabCompletion(typeof(LocalModelsTabCompletionSource), HistoryToSave = 10, REPL = true, REPLWelcomeMessage = "Type a command or 'quit' (Ctrl+C) to exit.")]
     public class OsyncProgram
     {
-        public static string AppVersion = "1.4.8";
+        public static string AppVersion = "1.4.9";
         static HttpClient client = new HttpClient() { Timeout = TimeSpan.FromDays(1) };
         public static bool isInteractiveMode = false;
         public string ollama_models = "";
@@ -7073,6 +7073,11 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
         {
             try
             {
+                // Windows: UTF-8 output before Spectre.Console's console exists. Its writer is bound to the encoding of
+                // the moment; switching the code page later (psmonitor did) left it encoding box drawing and blocks in
+                // the old code page while the console read UTF-8: plain text and garbage until the window was reused.
+                WindowsConsoleMode.UseUtf8Output();
+
                 // Color depth for all Spectre.Console output: OSYNC_COLOR_MODE, NO_COLOR, colorMode in the
                 // settings file, else detected from COLORTERM / the original TERM (see ColorSupport).
                 ColorSupport.ApplyToSpectre();

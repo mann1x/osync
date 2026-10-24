@@ -170,14 +170,35 @@ public class RemoteMonitorTests
         RemoteServerMonitor.ParseKvPressure(Json("""{"allocations":[]}""")).Should().BeNull();
     }
 
+    // opencoti c13 polykv/tps?once=1 (get_polykv_tps): one slot decoding, one idle slot that keeps its last tps_ewma
+    private const string Tps = """
+        {"ts_us":1000000000,"n_decoded_cum_total":5000,"n_tokens_predicted_total":5000,"mean_active_tps":42.0,
+         "n_active_sessions":1,"n_warming":0,
+         "sessions":[
+           {"slot_id":0,"session_id":"a","tps_ewma":42.0,"active":true,"ctx_used":100,"ctx_total":8192,"state":"decoding"},
+           {"slot_id":1,"session_id":"b","tps_ewma":55.0,"active":false,"ctx_used":900,"ctx_total":8192,"state":"idle"}]}
+        """;
+
     [Fact]
-    public void ParseTokensPerSecond_JsonOrEvents()
+    public void ParseTpsReading_CounterAndActiveSessionsOnly()
     {
-        RemoteServerMonitor.ParseTokensPerSecond(Json("""{"tps":41.5}"""), null).Should().Be(41.5);
-        RemoteServerMonitor.ParseTokensPerSecond(Json("""{"sessions":[{"id":"a","tps":10},{"id":"b","tps":5.5}]}"""), null).Should().Be(15.5);
-        RemoteServerMonitor.ParseTokensPerSecond(null, "data: {\"tps\":41.5}\n\ndata: {\"tps\":42.0}\n\n").Should().Be(42.0);
-        RemoteServerMonitor.ParseTokensPerSecond(Json("""{"error":"x"}"""), null).Should().BeNull();
-        RemoteServerMonitor.ParseTokensPerSecond(null, null).Should().BeNull();
+        var reading = RemoteServerMonitor.ParseTpsReading(Json(Tps));
+
+        reading.Should().Be(new RemoteServerMonitor.TpsReading(5000, 1000000000, 42.0));
+        RemoteServerMonitor.ParseTpsReading(Json("""{"sessions":[{"tps_ewma":3,"active":true}]}""")).Should().BeNull();
+    }
+
+    [Fact]
+    public void CounterRate_TokensOverTheEngineClock()
+    {
+        var first = new RemoteServerMonitor.TpsReading(5000, 1_000_000_000, 42);
+
+        RemoteServerMonitor.CounterRate(null, first).Should().BeNull();
+        RemoteServerMonitor.CounterRate(first, first with { DecodedTotal = 5200, TimestampUs = 1_005_000_000 }).Should().Be(40);
+        // idle: the counter does not move, whatever the slots' last tps_ewma says
+        RemoteServerMonitor.CounterRate(first, first with { TimestampUs = 1_005_000_000 }).Should().Be(0);
+        // the engine restarted: skip the interval
+        RemoteServerMonitor.CounterRate(first, new RemoteServerMonitor.TpsReading(10, 5_000_000, 0)).Should().BeNull();
     }
 
     [Fact]
@@ -197,4 +218,46 @@ public class RemoteMonitorTests
     [InlineData("http://192.0.2.10:11434", false)]
     public void IsThisMachine(string url, bool expected) =>
         RemoteServerMonitor.IsThisMachine(url).Should().Be(expected);
+
+    [Fact]
+    public void ParseKvHost_SumsTheModelsThatReportTheirWindow()
+    {
+        var kv = RemoteServerMonitor.ParseKvHost(Json("""
+            {"models":[
+              {"name":"qwen3.6:27b","size":1,"size_vram":1,"kv":{"residency":"window","host_bytes":2147483648}},
+              {"name":"gemma4:12b","size":1,"size_vram":1,"kv":{"residency":"resident","host_bytes":0}},
+              {"name":"llama3:8b","size":1,"size_vram":1,"kv":{"host_bytes":null}},
+              {"name":"old:latest","size":1,"size_vram":1}]}
+            """));
+
+        kv.Should().NotBeNull();
+        kv!.Should().HaveCount(2);
+        kv["qwen3.6:27b"].Should().Be(2147483648UL);
+        kv["gemma4:12b"].Should().Be(0UL);
+    }
+
+    [Fact]
+    public void ParseKvHost_NoModelReportsIt_IsNull()
+    {
+        RemoteServerMonitor.ParseKvHost(Json("""{"models":[{"name":"a","size":1}]}""")).Should().BeNull();
+        RemoteServerMonitor.ParseKvHost(Json("""{"host":{}}""")).Should().BeNull();
+    }
+
+    // xOllama dev 06cb8676d, measured on a 3090 (qwen3:4b, 32k): an engaged window, a load that does not spill,
+    // a KVarN cache (no byte sizes) and a model that is not readable yet
+    [Fact]
+    public void ParseKvHost_XOllamaPayload()
+    {
+        var kv = RemoteServerMonitor.ParseKvHost(Json("""
+            {"models":[
+              {"name":"qwen3:4b","size":1,"size_vram":1,"kv":{"as_of":"2026-10-24T09:15:00Z","residency_mode":"auto","engaged":true,"kvarn":false,
+                "cells":32768,"window_cells":2560,"tail_cells":30208,"device_bytes":377634816,"host_bytes":4454645760}},
+              {"name":"small:latest","size":1,"size_vram":1,"kv":{"residency_mode":"auto","engaged":false,"kvarn":false,
+                "cells":32768,"window_cells":32768,"tail_cells":0,"device_bytes":null,"host_bytes":0}},
+              {"name":"kvarn:latest","size":1,"size_vram":1,"kv":{"residency_mode":"auto","engaged":true,"kvarn":true,"host_bytes":null}},
+              {"name":"loading:latest","size":1,"size_vram":1,"kv":null}]}
+            """));
+
+        kv.Should().BeEquivalentTo(new Dictionary<string, ulong> { ["qwen3:4b"] = 4454645760UL, ["small:latest"] = 0UL });
+    }
 }

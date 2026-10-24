@@ -55,6 +55,28 @@
 - 📈 **Real-Time Monitor** - Live dashboard with GPU/CPU metrics, VRAM usage graphs, model status, and Ollama process tracking
 - 🔀 **Ollama and xOllama** - Works with [Ollama](https://github.com/ollama/ollama) and the [xOllama](https://github.com/mann1x/xollama) fork (see [Local server](#local-server-ollama-and-xollama))
 
+### Screenshots
+
+**`osync psmonitor`** on Windows, a local xOllama on an RTX 5080: host, server processes, GPU utilization graph and the loaded model with its speed
+
+<img src="docs/screenshots/psmonitor-local-windows.png" alt="osync psmonitor, local xOllama on Windows" width="800" />
+
+**`osync psmonitor -d <server>`** on Windows, a remote xOllama host with three GPUs (CUDA and Vulkan), everything read from the server's API
+
+<img src="docs/screenshots/psmonitor-remote-windows.png" alt="osync psmonitor, remote multi-GPU xOllama host on Windows" width="800" />
+
+**`osync psmonitor -d <server>`** on Linux, watching the Windows xOllama server over the network
+
+<img src="docs/screenshots/psmonitor-remote-linux.png" alt="osync psmonitor on Linux, remote xOllama server" width="800" />
+
+**`osync manage`** on Windows
+
+<img src="docs/screenshots/manage-windows.png" alt="osync manage on Windows" width="800" />
+
+**`osync manage`** on Linux
+
+<img src="docs/screenshots/manage-linux.png" alt="osync manage on Linux" width="800" />
+
 ### Built With
 
 > **[C# .NET 10]**
@@ -534,6 +556,8 @@ GPU Status (NVIDIA):
 
 Interactive real-time monitoring dashboard inspired by nvitop, with braille-dot graphs and color-coded metrics.
 
+See the [screenshots](#screenshots) of the local and remote views on Windows and Linux.
+
 ```bash
 # Start monitor with default settings (5s refresh, 5m history)
 osync psmonitor
@@ -566,13 +590,14 @@ osync psmonitor -d http://192.168.0.100:11434
 
 **Features:**
 
-- Real-time GPU utilization graphs with braille characters (half blocks in the classic Windows console)
-- CPU usage history graph
+- One view for a local and a remote server: a System panel (CPU, memory, swap, load, the server's processes), the GPUs (backend and engine on xOllama, VRAM used, utilization, temperature, power, clock, fan, PCIe link), a history graph that `I` cycles and a second one under it (`O`), and the loaded models (quantization, runner or engine, size and how much is in VRAM, context, busy slots and tokens per second on xOllama, expiry)
+- Graphs with braille characters (half blocks in the classic Windows console)
 - Color-coded metrics (green < 50%, yellow 50-80%, red > 80%)
-- GPU metrics: utilization, VRAM, temperature, power, clocks
-- System metrics: CPU, RAM, Swap with progress bars
-- Loaded Ollama models with expiration times
-- NVIDIA driver and CUDA version display
+- NVIDIA driver and CUDA version display for a server on this machine
+
+**Server on this machine:**
+
+The server's API is read as for a remote server (models, engines, stored models). An xOllama with system telemetry also sends the System panel and the GPUs; for any other server (Ollama, an older xOllama) they are read on this machine (`nvidia-smi` or the vendor's tool, the OS's CPU and memory counters, every process named like ollama), and on an xOllama without telemetry each GPU gets the backend and engine from its device list. The graphs `I` cycles: GPU utilization, power, temperature, VRAM, clock and fan, VRAM and memory outside VRAM of the loaded models, tokens per second and busy slots (xOllama), the host's CPU and memory, the server's CPU and memory, and the host RAM of the KV rolling window (below).
 
 **Remote servers:**
 
@@ -581,6 +606,7 @@ For a server on another machine, psmonitor shows only what that server reports t
 - **Ollama**: the loaded models (quantization, runner, size and how much of it is in VRAM, context, expiry), the memory they hold in VRAM and outside it with a history graph, the response time from here, and how many models the server stores. Ollama's API has no GPU or system statistics, so there are none
 - **xOllama** adds its GPUs (name, backend, engine, VRAM used, total and free; read at most once a minute, since the server looks its GPUs up again to answer, `R` re-reads them), and per loaded model the engine actually serving it, its busy slots and its generation speed (tokens per second). `I` cycles the graph through VRAM, memory outside VRAM, tokens per second and busy slots
 - **xOllama with system telemetry** (0.40.4-xollama.5 and later, feature `system_telemetry_v1`) also sends its host and its GPUs' live readings, read on every refresh from a snapshot the server keeps (cheap, no GPU lookup): a System panel with the host's CPU, memory, swap and load and the server's own processes (CPU, where 100% is one core, and memory, per engine serving a model), and per GPU its utilization, temperature, power and limit, clock, fan and PCIe link. A reading the server's platform does not expose is shown as `-`, never as 0 (on Windows, AMD and Intel GPUs report only memory and utilization). `I` adds graphs of the GPU's utilization, power and temperature, the host's CPU and memory and the server's CPU; `G` picks the GPU the GPU graphs show
+- **KV rolling window**: an xOllama that reports the host RAM held by each model's KV rolling window (opencoti's `--kv-rolling-window`, the part of the cache that spills out of VRAM; feature `kv_host_telemetry_v1`) gets a graph of it in the `I` cycle: the tail allocated in pinned host memory when the model loads, 0 while the window is not engaged. A KVarN cache reports no byte size and is left out of the sum. Servers that do not report it (before the xOllama release after 0.40.10) do not show the graph
 - Every request is cheap: only the loaded models are read on every refresh, over kept-alive connections; the version is read once, the stored models every minute, and an engine endpoint a model does not have is not asked again until it reloads. The xOllama API key (`XOLLAMA_API_KEY` or the key file) is sent to xOllama servers only
 
 **Interactive Controls:**
@@ -589,6 +615,9 @@ For a server on another machine, psmonitor shows only what that server reports t
 - **H** - Show help
 - **←/→** - Adjust graph history (+/- 1 minute, range: 1-60m)
 - **↑/↓** - Adjust refresh interval (+/- 1 second)
+- **I** - Cycle the main graph; **G** - pick the GPU the GPU graphs show
+- **O** - Second graph: the server's CPU, its memory, or none (shown when the window has room for both)
+- **R** - Re-read an xOllama's GPU list (without system telemetry)
 - **Ctrl+C** - Exit
 
 **Graph characters:**
@@ -1230,6 +1259,8 @@ osync benchview results.json -Fo pdf -O report.pdf
 
 Interactive TUI for managing models with keyboard shortcuts.
 
+See the [screenshots](#screenshots) on Windows and Linux.
+
 ```bash
 # Launch manage interface for local server
 osync manage
@@ -1520,6 +1551,17 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.9
+
+**New**
+- **`osync psmonitor` on this machine has everything the remote view has**: the System panel (CPU, memory, swap, load, the server's processes and their CPU and memory), the GPUs with backend and engine on xOllama, VRAM used, utilization, temperature, power, clock and fan, and the models table with quantization, engine, busy slots and tokens per second, plus the stored models. A local xOllama with system telemetry is read from `/api/xollama/system`; any other server from this machine's readings, as before. `I` cycles more graphs (GPU VRAM, clock and fan, server memory) and `O` shows a second graph (the server's CPU or memory) under the main one when the window has room
+- **psmonitor's generation speed shows a 30 s average next to the live reading** (`16.7 tok/s · avg 15.9`): the live reading jumps between bursts and pauses; the average counts only the readings taken while generating
+- **psmonitor graphs the host RAM of the KV rolling window** (opencoti's `--kv-rolling-window`, the cache that spills out of VRAM), on an xOllama that reports it (feature `kv_host_telemetry_v1`)
+
+**Fixed**
+- **psmonitor's tokens per second on xOllama with opencoti did not match the real speed**: the engine's speed reading was parsed under field names it does not have, so osync fell back to comparing two `/slots` reads, which loses the tokens of a request that ends between two refreshes. It now uses the engine's decoded-token counter between two refreshes (as the engine's own aggregate does): exact over the interval, decode only, drafter tokens counted when accepted, and 0 while idle
+- **`osync psmonitor` in the Windows Command Prompt sometimes started as plain text**: no boxes, bars or graphs, and stray characters where the borders should be, until it was started again in the same window. osync switched the console to UTF-8 only when the monitor started, after its output had been set up for the console's old code page. The console is now switched to UTF-8 when osync starts, and given its code page back on exit
 
 v1.4.8
 

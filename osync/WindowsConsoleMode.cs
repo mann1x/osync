@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace osync;
 
@@ -33,6 +34,29 @@ public static class WindowsConsoleMode
         catch
         {
             // best effort: never stop osync over the console mode
+        }
+    }
+
+    /// <summary>
+    /// Switches a Windows console to UTF-8 output for this run and gives it its code page back on exit. Must run
+    /// before anything captures <see cref="Console.Out"/> (Spectre.Console's AnsiConsole does on first use).
+    /// </summary>
+    public static void UseUtf8Output()
+    {
+        if (!OperatingSystem.IsWindows() || Console.IsOutputRedirected) return;
+        try
+        {
+            var original = Console.OutputEncoding;
+            if (original.CodePage == Encoding.UTF8.CodePage) return;
+            Console.OutputEncoding = Encoding.UTF8;
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                try { Console.OutputEncoding = original; } catch { }
+            };
+        }
+        catch
+        {
+            // best effort: never stop osync over the console code page
         }
     }
 
