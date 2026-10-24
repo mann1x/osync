@@ -55,6 +55,28 @@
 - 📈 **Real-Time Monitor** - Live dashboard with GPU/CPU metrics, VRAM usage graphs, model status, and Ollama process tracking
 - 🔀 **Ollama and xOllama** - Works with [Ollama](https://github.com/ollama/ollama) and the [xOllama](https://github.com/mann1x/xollama) fork (see [Local server](#local-server-ollama-and-xollama))
 
+### Screenshots
+
+**`osync psmonitor`** on Windows, a local xOllama on an RTX 5080: host, server processes, GPU utilization graph and the loaded model with its speed
+
+<img src="docs/screenshots/psmonitor-local-windows.png" alt="osync psmonitor, local xOllama on Windows" width="800" />
+
+**`osync psmonitor -d <server>`** on Windows, a remote xOllama host with three GPUs (CUDA and Vulkan), everything read from the server's API
+
+<img src="docs/screenshots/psmonitor-remote-windows.png" alt="osync psmonitor, remote multi-GPU xOllama host on Windows" width="800" />
+
+**`osync psmonitor -d <server>`** on Linux, watching the Windows xOllama server over the network
+
+<img src="docs/screenshots/psmonitor-remote-linux.png" alt="osync psmonitor on Linux, remote xOllama server" width="800" />
+
+**`osync manage`** on Windows
+
+<img src="docs/screenshots/manage-windows.png" alt="osync manage on Windows" width="800" />
+
+**`osync manage`** on Linux
+
+<img src="docs/screenshots/manage-linux.png" alt="osync manage on Linux" width="800" />
+
 ### Built With
 
 > **[C# .NET 10]**
@@ -533,6 +555,8 @@ GPU Status (NVIDIA):
 #### Real-Time Monitor (`psmonitor`, `monitor`, `psm`)
 
 Interactive real-time monitoring dashboard inspired by nvitop, with braille-dot graphs and color-coded metrics.
+
+See the [screenshots](#screenshots) of the local and remote views on Windows and Linux.
 
 ```bash
 # Start monitor with default settings (5s refresh, 5m history)
@@ -1234,6 +1258,8 @@ osync benchview results.json -Fo pdf -O report.pdf
 #### Manage (`manage`)
 
 Interactive TUI for managing models with keyboard shortcuts.
+
+See the [screenshots](#screenshots) on Windows and Linux.
 
 ```bash
 # Launch manage interface for local server
