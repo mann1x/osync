@@ -1534,6 +1534,7 @@ v1.4.9
 - **psmonitor graphs the host RAM of the KV rolling window** (opencoti's `--kv-rolling-window`, the cache that spills out of VRAM), on an xOllama that reports it (feature `kv_host_telemetry_v1`)
 
 **Fixed**
+- **psmonitor's tokens per second on xOllama with opencoti did not match the real speed**: the engine's speed reading was parsed under field names it does not have, so osync fell back to comparing two `/slots` reads, which loses the tokens of a request that ends between two refreshes. It now uses the engine's decoded-token counter between two refreshes (as the engine's own aggregate does): exact over the interval, decode only, drafter tokens counted when accepted, and 0 while idle
 - **`osync psmonitor` in the Windows Command Prompt sometimes started as plain text**: no boxes, bars or graphs, and stray characters where the borders should be, until it was started again in the same window. osync switched the console to UTF-8 only when the monitor started, after its output had been set up for the console's old code page. The console is now switched to UTF-8 when osync starts, and given its code page back on exit
 
 v1.4.8
