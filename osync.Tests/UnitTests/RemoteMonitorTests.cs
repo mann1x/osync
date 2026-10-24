@@ -197,4 +197,28 @@ public class RemoteMonitorTests
     [InlineData("http://192.0.2.10:11434", false)]
     public void IsThisMachine(string url, bool expected) =>
         RemoteServerMonitor.IsThisMachine(url).Should().Be(expected);
+
+    [Fact]
+    public void ParseKvHost_SumsTheModelsThatReportTheirWindow()
+    {
+        var kv = RemoteServerMonitor.ParseKvHost(Json("""
+            {"models":[
+              {"name":"qwen3.6:27b","size":1,"size_vram":1,"kv":{"residency":"window","host_bytes":2147483648}},
+              {"name":"gemma4:12b","size":1,"size_vram":1,"kv":{"residency":"resident","host_bytes":0}},
+              {"name":"llama3:8b","size":1,"size_vram":1,"kv":{"host_bytes":null}},
+              {"name":"old:latest","size":1,"size_vram":1}]}
+            """));
+
+        kv.Should().NotBeNull();
+        kv!.Should().HaveCount(2);
+        kv["qwen3.6:27b"].Should().Be(2147483648UL);
+        kv["gemma4:12b"].Should().Be(0UL);
+    }
+
+    [Fact]
+    public void ParseKvHost_NoModelReportsIt_IsNull()
+    {
+        RemoteServerMonitor.ParseKvHost(Json("""{"models":[{"name":"a","size":1}]}""")).Should().BeNull();
+        RemoteServerMonitor.ParseKvHost(Json("""{"host":{}}""")).Should().BeNull();
+    }
 }

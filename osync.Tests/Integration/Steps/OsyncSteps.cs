@@ -75,6 +75,16 @@ public sealed class OsyncSteps
         _output.WriteLine(result.ToString());
     }
 
+    [When("I open psmonitor on {word} as a local server in a terminal and press {string}")]
+    public async Task WhenIOpenPsMonitorAsLocal(string server, string keys)
+    {
+        var url = TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured");
+        var result = await OsyncCli.RunInTerminalAsync($"psmonitor -d {url} -L 1", TerminalKeys.Parse(_state.Resolve(keys)),
+            readyText: "Expires", environment: Env());
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
     private async Task OpenManage(string arguments, string keys, bool withHostSettings)
     {
         var result = await OsyncCli.RunInTerminalAsync(arguments, TerminalKeys.Parse(_state.Resolve(keys)),

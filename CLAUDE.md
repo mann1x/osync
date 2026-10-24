@@ -63,7 +63,7 @@ The application uses PowerArgs for CLI parsing. All commands are defined as acti
 - `QcScoring.cs` - Score calculation logic for QC results
 - `OllamaModels.cs` - Ollama API data models
 - `ThrottledStream.cs` - Bandwidth limiting for transfers
-- `RemoteMonitor.cs` + `PsMonitorRemote.cs` - `psmonitor` for a server on another machine: only what its API reports (Ollama `/api/ps`; xOllama `/api/xollama/devices`, `/api/engine`), cached and pooled; never local GPU/system stats
+- `RemoteMonitor.cs` + `PsMonitorRemote.cs` - `psmonitor`'s one view for every server: what its API reports (Ollama `/api/ps`; xOllama `/api/xollama/system`, `/api/xollama/devices`, `/api/engine`), cached and pooled. For a server on another machine never local GPU/system stats; `PsMonitorLocal.cs` (`LocalReadings`) fills the System panel and GPUs from this machine for a local server without system telemetry
 - `ModelStore.cs` - the on-disk model store: manifest paths in the `manifests-v2/` (0.40+) and legacy `manifests/` layouts, manifest lists (one build per runner) and the child a copy takes; use it instead of building `manifests/...` paths
 - `ModelRecreate.cs` - `/api/create` body that rebuilds a model from its manifest byte for byte (copy fallback, local→remote upload) and the modelfile comparison that verifies a copy
 - `CloudProviders/` - Cloud AI provider implementations for judge models

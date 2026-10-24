@@ -29,6 +29,8 @@ internal sealed record RemoteDevice(string Backend, string Id, string PciId, str
     public string Vendor { get; init; } = "";
     /// <summary>Live readings from /api/xollama/system; null for a device from /api/xollama/devices.</summary>
     public RemoteGpuTelemetry? Telemetry { get; init; }
+    /// <summary>False for a GPU of this machine when the server has no device list: an empty backend then is unknown, not "not used".</summary>
+    public bool BackendKnown { get; init; } = true;
 }
 
 /// <summary>A GPU's live readings (/api/xollama/system); null is a value the platform does not expose.</summary>
@@ -62,8 +64,11 @@ internal sealed record RemoteEngineStats(string Engine, bool Readable)
     public bool PressureActive { get; init; }
 }
 
-/// <summary>Everything psmonitor shows for a server on another machine: only what that server answers.</summary>
-internal sealed class RemoteSnapshot
+/// <summary>
+/// Everything psmonitor shows for a server: what that server answers, and for a server on this machine without
+/// system telemetry, this machine's own readings in System (LocalReadings is then true).
+/// </summary>
+internal sealed record RemoteSnapshot
 {
     public bool Connected { get; init; }
     public ServerFlavor Flavor { get; init; }
@@ -77,6 +82,13 @@ internal sealed class RemoteSnapshot
     public DateTime? DevicesAsOf { get; init; }
     /// <summary>The server's system telemetry; null when it has none (stock Ollama, xOllama without system_telemetry_v1).</summary>
     public RemoteSystem? System { get; init; }
+    /// <summary>System and Devices were read on this machine, not sent by the server.</summary>
+    public bool LocalReadings { get; init; }
+    /// <summary>
+    /// Host RAM the KV rolling window holds, per loaded model (xOllama, kv_host_telemetry_v1); only the models whose
+    /// engine reports it, null when the server reports it for none.
+    /// </summary>
+    public Dictionary<string, ulong>? KvHostBytes { get; init; }
     public Dictionary<string, RemoteEngineStats> Engine { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -96,6 +108,8 @@ internal sealed class RemoteServerMonitor
     public static readonly TimeSpan DevicesInterval = TimeSpan.FromSeconds(60);
     public static readonly TimeSpan TagsInterval = TimeSpan.FromSeconds(60);
     public const string SystemTelemetryFeature = "system_telemetry_v1";
+    /// <summary>xOllama reports the host RAM of each model's KV rolling window in /api/xollama/system (models[].kv).</summary>
+    public const string KvHostFeature = "kv_host_telemetry_v1";
     private const int MaxParallelEngineReads = 4;
 
     private static readonly HttpClient Http = new(new SocketsHttpHandler
@@ -115,6 +129,7 @@ internal sealed class RemoteServerMonitor
     private bool? _cloudDisabled;
     private bool _identityRead;
     private bool _telemetry;
+    private bool _kvHost;
 
     private int? _storedModels;
     private long? _storedBytes;
@@ -150,6 +165,7 @@ internal sealed class RemoteServerMonitor
             {
                 using var identity = await GetJsonAsync("api/xollama", cancellationToken);
                 _telemetry = identity != null && HasFeature(identity.RootElement, SystemTelemetryFeature);
+                _kvHost = _telemetry && HasFeature(identity!.RootElement, KvHostFeature);
             }
             _identityRead = _flavor != ServerFlavor.Unknown || _version.Length > 0;
         }
@@ -178,12 +194,14 @@ internal sealed class RemoteServerMonitor
 
         var engine = new Dictionary<string, RemoteEngineStats>(StringComparer.OrdinalIgnoreCase);
         RemoteSystem? system = null;
+        Dictionary<string, ulong>? kvHost = null;
         if (_flavor == ServerFlavor.XOllama)
         {
             if (_telemetry)
             {
                 using var doc = await GetJsonAsync("api/xollama/system", cancellationToken);
                 system = doc != null ? ParseSystem(doc.RootElement) : null;
+                if (doc != null && _kvHost) kvHost = ParseKvHost(doc.RootElement);
                 if (system != null)
                 {
                     _devices = system.Devices;
@@ -209,6 +227,7 @@ internal sealed class RemoteServerMonitor
             Devices = _devices,
             DevicesAsOf = _devicesAsOf,
             System = system,
+            KvHostBytes = kvHost,
             Engine = engine,
         };
     }
@@ -466,6 +485,26 @@ internal sealed class RemoteServerMonitor
         }
 
         return new RemoteSystem(asOf, host, server, ParseDevices(root));
+    }
+
+    /// <summary>
+    /// The host RAM each loaded model's KV rolling window holds (/api/xollama/system models[].kv.host_bytes,
+    /// kv_host_telemetry_v1): 0 while the window is not engaged. A model the engine cannot read it for (null) is left
+    /// out; null when no model reports it.
+    /// </summary>
+    public static Dictionary<string, ulong>? ParseKvHost(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            return null;
+        var result = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in models.EnumerateArray())
+        {
+            if (m.ValueKind != JsonValueKind.Object || !m.TryGetProperty("kv", out var kv) || kv.ValueKind != JsonValueKind.Object) continue;
+            var name = Str(m, "name");
+            if (name.Length > 0 && U64(kv, "host_bytes") is { } bytes)
+                result[name] = result.GetValueOrDefault(name) + bytes;
+        }
+        return result.Count > 0 ? result : null;
     }
 
     /// <summary>Whether GET /api/xollama lists <paramref name="feature"/> in its "features".</summary>
