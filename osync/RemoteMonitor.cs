@@ -53,7 +53,8 @@ internal sealed record RemoteSystem(DateTime? AsOf, RemoteHost? Host, RemoteServ
 
 /// <summary>
 /// What a remote xOllama's engine says about one loaded model; null fields were not answered. Tokens per second
-/// is opencoti's own reading (polykv/tps) when it has one, else the tokens decoded between two /slots reads.
+/// is opencoti's decoded-token counter (polykv/tps) between two polls when it has one, else the tokens decoded
+/// between two /slots reads.
 /// </summary>
 internal sealed record RemoteEngineStats(string Engine, bool Readable)
 {
@@ -144,6 +145,7 @@ internal sealed class RemoteServerMonitor
     private Dictionary<string, (string Engine, bool Readable)> _engineList = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _missingEndpoints = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, (List<SlotReading>? Slots, DateTime At)> _lastSlots = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, TpsReading> _lastTps = new(StringComparer.OrdinalIgnoreCase);
 
     public RemoteServerMonitor(string url, string? apiKey)
     {
@@ -316,6 +318,7 @@ internal sealed class RemoteServerMonitor
             {
                 _missingEndpoints.Clear();
                 _lastSlots.Clear();
+                _lastTps.Clear();
             }
             using var doc = await GetJsonAsync("api/engine", cancellationToken);
             _engineList = doc != null ? ParseEngineList(doc.RootElement) : new(StringComparer.OrdinalIgnoreCase);
@@ -353,8 +356,13 @@ internal sealed class RemoteServerMonitor
                     }
                     if (kv.Result?.Body is { } kvBody && ParseKvPressure(kvBody) is { } p)
                         stats = stats with { Refused60s = p.Refused60s, PressureActive = p.Active };
-                    if (tps.Result is { } tpsReply && ParseTokensPerSecond(tpsReply.Body, tpsReply.Text) is { } t)
-                        stats = stats with { TokensPerSecond = t };
+                    if (tps.Result?.Body is { } tpsBody && ParseTpsReading(tpsBody) is { } reading)
+                    {
+                        // The counter between two polls; on the first poll, the speed of the slots decoding now
+                        _lastTps.TryGetValue(name, out var previous);
+                        stats = stats with { TokensPerSecond = CounterRate(previous, reading) ?? reading.ActiveEwma };
+                        _lastTps[name] = reading;
+                    }
                 }
                 finally
                 {
@@ -592,49 +600,47 @@ internal sealed class RemoteServerMonitor
         return (refused, active);
     }
 
+    /// <summary>One polykv/tps reading: the engine's decoded-token counter, its clock, and the decoding sessions' speed.</summary>
+    public sealed record TpsReading(long DecodedTotal, long TimestampUs, double ActiveEwma);
+
     /// <summary>
-    /// opencoti's /polykv/tps reading: the generation speed summed over the sessions. Accepts the JSON body
-    /// ({"tps":x}, or a list/"sessions" of entries with "tps") or server-sent events, where the last event wins.
+    /// opencoti's polykv/tps with once=1 (inside the /api/engine "body"): n_decoded_cum_total (tokens decoded over
+    /// the engine's life, accepted drafts included, rejected ones not), ts_us (the engine clock) and per slot a
+    /// decode-only tps_ewma. An idle slot keeps its last tps_ewma, so only the "active" ones count. Null when the
+    /// body has no counter.
     /// </summary>
-    public static double? ParseTokensPerSecond(JsonElement? body, string? text)
+    public static TpsReading? ParseTpsReading(JsonElement body)
     {
-        if (body is { } b) return SumTps(b);
-        if (string.IsNullOrEmpty(text)) return null;
-        double? last = null;
-        foreach (var line in text.Split('\n'))
+        if (body.ValueKind != JsonValueKind.Object ||
+            !body.TryGetProperty("n_decoded_cum_total", out var d) || !d.TryGetInt64(out var decoded) ||
+            !body.TryGetProperty("ts_us", out var t) || !t.TryGetInt64(out var ts))
+            return null;
+        double active = 0;
+        if (body.TryGetProperty("sessions", out var sessions) && sessions.ValueKind == JsonValueKind.Array)
         {
-            var trimmed = line.Trim();
-            var json = trimmed.StartsWith("data:", StringComparison.Ordinal) ? trimmed[5..].Trim() : trimmed;
-            if (json.Length == 0 || (json[0] != '{' && json[0] != '[')) continue;
-            try
+            foreach (var session in sessions.EnumerateArray())
             {
-                using var doc = JsonDocument.Parse(json);
-                if (SumTps(doc.RootElement) is { } v) last = v;
+                if (session.ValueKind == JsonValueKind.Object &&
+                    session.TryGetProperty("active", out var a) && a.ValueKind == JsonValueKind.True &&
+                    session.TryGetProperty("tps_ewma", out var e) && e.TryGetDouble(out var ewma))
+                    active += ewma;
             }
-            catch (JsonException) { }
         }
-        return last;
+        return new TpsReading(decoded, ts, active);
     }
 
-    private static double? SumTps(JsonElement e)
+    /// <summary>
+    /// Tokens per second between two readings of the engine's counter: exact over the interval, 0 while idle (what
+    /// the engine's own aggregate_tps does). Null without an earlier reading, or when the counter or the clock went
+    /// back (the engine restarted, a slot went away): that interval is skipped.
+    /// </summary>
+    public static double? CounterRate(TpsReading? previous, TpsReading current)
     {
-        switch (e.ValueKind)
-        {
-            case JsonValueKind.Object:
-                foreach (var name in new[] { "total_tps", "tps" })
-                    if (e.TryGetProperty(name, out var v) && v.TryGetDouble(out var d)) return d;
-                foreach (var name in new[] { "sessions", "slots", "seqs" })
-                    if (e.TryGetProperty(name, out var list)) return SumTps(list);
-                return null;
-            case JsonValueKind.Array:
-                double sum = 0;
-                var any = false;
-                foreach (var item in e.EnumerateArray())
-                    if (SumTps(item) is { } x) { sum += x; any = true; }
-                return any ? sum : null;
-            default:
-                return null;
-        }
+        if (previous == null) return null;
+        var tokens = current.DecodedTotal - previous.DecodedTotal;
+        var micros = current.TimestampUs - previous.TimestampUs;
+        if (tokens < 0 || micros <= 0) return null;
+        return tokens / (micros / 1_000_000.0);
     }
 
     private static string Str(JsonElement e, string name) =>
