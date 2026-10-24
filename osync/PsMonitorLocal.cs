@@ -103,3 +103,26 @@ internal static class LocalReadings
         var other => other.ToString().ToLowerInvariant()
     };
 }
+
+/// <summary>
+/// The generation speed averaged over a recent window, from the readings taken while a model was generating:
+/// the instant readings jump between bursts, pauses between tokens and the gaps between requests, and a gap (0)
+/// would drag the average down.
+/// </summary>
+internal sealed class RateAverage
+{
+    private readonly TimeSpan _window;
+    private readonly Queue<(DateTime At, double Value)> _samples = new();
+
+    public RateAverage(TimeSpan window) => _window = window;
+
+    /// <summary>Adds a reading; 0 or less (nothing generating) is not counted.</summary>
+    public void Add(DateTime at, double value)
+    {
+        if (value > 0) _samples.Enqueue((at, value));
+        while (_samples.Count > 0 && at - _samples.Peek().At > _window) _samples.Dequeue();
+    }
+
+    /// <summary>The mean of the readings inside the window, or null when nothing generated in it.</summary>
+    public double? Average => _samples.Count > 0 ? _samples.Average(s => s.Value) : null;
+}

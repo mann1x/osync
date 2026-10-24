@@ -1530,6 +1530,7 @@ v1.4.9
 
 **New**
 - **`osync psmonitor` on this machine has everything the remote view has**: the System panel (CPU, memory, swap, load, the server's processes and their CPU and memory), the GPUs with backend and engine on xOllama, VRAM used, utilization, temperature, power, clock and fan, and the models table with quantization, engine, busy slots and tokens per second, plus the stored models. A local xOllama with system telemetry is read from `/api/xollama/system`; any other server from this machine's readings, as before. `I` cycles more graphs (GPU VRAM, clock and fan, server memory) and `O` shows a second graph (the server's CPU or memory) under the main one when the window has room
+- **psmonitor's generation speed shows a 30 s average next to the live reading** (`16.7 tok/s · avg 15.9`): the live reading jumps between bursts and pauses; the average counts only the readings taken while generating
 - **psmonitor graphs the host RAM of the KV rolling window** (opencoti's `--kv-rolling-window`, the cache that spills out of VRAM), on an xOllama that reports it (feature `kv_host_telemetry_v1`)
 
 **Fixed**

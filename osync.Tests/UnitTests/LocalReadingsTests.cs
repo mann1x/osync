@@ -104,4 +104,23 @@ public class LocalReadingsTests
     [InlineData("AMD Radeon RX 9070 XT", "AMD Radeon(TM) Graphics", false)]
     [InlineData("", "NVIDIA GeForce RTX 5080", false)]
     public void SameCard(string a, string b, bool expected) => LocalReadings.SameCard(a, b).Should().Be(expected);
+
+    [Fact]
+    public void RateAverage_CountsOnlyGeneratingReadingsInsideTheWindow()
+    {
+        var average = new RateAverage(TimeSpan.FromSeconds(30));
+        var t0 = new DateTime(2026, 10, 24, 10, 0, 0, DateTimeKind.Utc);
+
+        average.Average.Should().BeNull();
+        average.Add(t0, 10);
+        average.Add(t0.AddSeconds(5), 0);   // a pause between requests is not counted
+        average.Add(t0.AddSeconds(10), 20);
+        average.Average.Should().Be(15);
+
+        average.Add(t0.AddSeconds(35), 30);  // the first reading has left the window
+        average.Average.Should().Be(25);
+
+        average.Add(t0.AddSeconds(80), 0);   // nothing generated in the last 30 s
+        average.Average.Should().BeNull();
+    }
 }

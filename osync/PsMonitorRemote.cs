@@ -40,6 +40,7 @@ public partial class PsMonitorUI
     private RemoteSnapshot? _remoteData;
     private RemoteGraphMode? _secondGraphMode = RemoteGraphMode.ServerCpu;  // the graph under the main one (O cycles), when there is room
     private string _gpuDriverInfo = "";
+    private readonly RateAverage _tpsAverage = new(TimeSpan.FromSeconds(30));
     private RemoteGraphMode _remoteGraphMode = RemoteGraphMode.Vram;
     private int _remoteGpu;  // index into the telemetry devices, for the GPU graphs (G cycles)
 
@@ -139,7 +140,9 @@ public partial class PsMonitorUI
                 const double GiB = 1024.0 * 1024 * 1024;
                 _graphs["r_vram"].AddDataPoint(snapshot.Models.Sum(m => m.SizeVram) / GiB, "green");
                 _graphs["r_ram"].AddDataPoint(snapshot.Models.Sum(m => Math.Max(0, m.Size - m.SizeVram)) / GiB, "yellow");
-                _graphs["r_tps"].AddDataPoint(snapshot.Engine.Values.Sum(e => e.TokensPerSecond ?? 0), "aqua");
+                var tokensPerSecond = snapshot.Engine.Values.Sum(e => e.TokensPerSecond ?? 0);
+                _graphs["r_tps"].AddDataPoint(tokensPerSecond, "aqua");
+                _tpsAverage.Add(DateTime.UtcNow, tokensPerSecond);
                 _graphs["r_slots"].AddDataPoint(snapshot.Engine.Values.Sum(e => e.SlotsBusy ?? 0), "orange1");
                 // Only the models whose engine reports its window: an unknown is never drawn as 0
                 if (snapshot.KvHostBytes is { Count: > 0 } kv)
@@ -441,6 +444,8 @@ public partial class PsMonitorUI
                 label = "Generation speed";
                 var tps = engine.Values.Where(e => e.TokensPerSecond.HasValue).ToList();
                 value = tps.Count > 0 ? $"{tps.Sum(e => e.TokensPerSecond!.Value):F1} tok/s" : "n/a";
+                // the instant reading jumps; the average of the last 30 s while generating is the one to compare
+                if (_tpsAverage.Average is { } avg) value += $" · avg {avg:F1}";
                 break;
             case RemoteGraphMode.Slots:
                 key = "r_slots";
