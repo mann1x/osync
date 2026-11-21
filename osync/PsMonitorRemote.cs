@@ -89,7 +89,7 @@ public partial class PsMonitorUI
         RemoteModelPlacement? placement = null;
         _remoteData?.Engine.TryGetValue(model.Name ?? "", out stats);
         _remoteData?.Placements.TryGetValue(model.Name ?? "", out placement);
-        return MemorySplit.FromProcess(stats?.Process) ?? MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes);
+        return MemorySplit.FromProcess(stats?.Process, model.Size, model.SizeVram) ?? MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes);
     }
 
     private void InitRemoteGraphs()

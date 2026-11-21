@@ -226,4 +226,114 @@ public class ModelDetailTests
         PsMonitorUI.MemoryCells(new MemorySplit(8 * GiB, 2 * GiB), true).Ram.Should().Be("[red]2.0 GB 20%[/]");
         PsMonitorUI.MemoryCells(new MemorySplit(1000 * GiB, GiB / 2), false).Ram.Should().Be("[dim]512 MB <1%[/]");
     }
+
+    // solidpc, xOllama 0.40.16-xollama.2 on Linux, 2026-11-21: an embedding model on opencoti. The OS's GPU memory is
+    // not observable there, the engine reports no KV types and nothing drafts
+    [Fact]
+    public void Lines_LinuxEmbeddingModel_ServerFiguresAndNoGuesses()
+    {
+        var model = new RunningModel
+        {
+            Name = "snowflake-arctic-embed2:latest", Size = 664000265, SizeVram = 664000265, ContextLength = 8192, Runner = "llamacpp",
+            Details = new ModelDetails { Family = "bert", Format = "gguf", ParameterSize = "566.70M", QuantizationLevel = "F16" },
+        };
+        var props = Json("""
+            {"default_generation_settings":{"n_ctx":8192},"total_slots":1,
+             "opencoti":{"kv":{"kv_pool_cells":8192,"cells_used":61,"cells_free":8192},
+               "dca":{"enabled":false,"chunk_size":0},"sparse_attn":{"enabled":false},
+               "speculative":{"types":["none"],"draft_model":"","n_max":3,"cache_type_k":"f16","cache_type_v":"f16","drafter":{"state":"none","kind":null}},
+               "kv_reuse":{"cache_ram_mib":8192,"ctx_checkpoints":32},"sampling":{"effective_placement":"idle"},
+               "polykv":{"max_pools":0,"pools_enabled":false},"gpu_process_memory":{"observable":false},
+               "elastic_slots":{"enabled":false,"slots_live":1,"slots_max":1,"reason":"disabled"}}}
+            """);
+        var kv = Json("""{"rs":null,"rolling_kv":{"residency_mode":"auto","available":false},"cells_total":8192,"cells_used":61,"cells_free":8192,"pressure":{"refused_60s":0}}""");
+        var slots = Json("""[{"id":0,"n_ctx":8192,"is_processing":false,"opencoti":{"draft_n_total":0,"draft_n_accepted":0,"state":"idle"}}]""");
+        var show = Json("""{"model_info":{"general.architecture":"bert","bert.block_count":24,"bert.attention.head_count":16,"bert.embedding_length":1024,"bert.context_length":8192}}""");
+
+        var d = ModelDetail.Build(model, "opencoti", null, props, kv, slots, show);
+        d.Process.Should().BeNull();
+        d.KvBytes.Should().BeNull();
+        var lines = d.Lines();
+        lines[0].Text.Should().Be("VRAM 633 MB (100%) · RAM 0 MB (0%)");
+        lines[1].Text.Should().Be("8192 cells, 61 used, 8192 free · window auto");
+        lines[2].Text.Should().Be("0 busy of 1 · context 8192");
+        lines[3].Text.Should().Be("off");
+        lines[4].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 8.0 GB, 32 checkpoints");
+    }
+
+    // ELEVEN2GO, 2026-11-21: gemma4 26B A4B with an attached assistant drafter on the 3090 (interleaved sliding
+    // window: 25 SWA layers, 5 full-attention layers), after one 64-token chat
+    [Fact]
+    public void Lines_Gemma4WithAssistantDrafter()
+    {
+        var model = new RunningModel
+        {
+            Name = "mannix/gemma4-26b-agentic:mtp-vision-Q4_K_M", Size = 18348570048, SizeVram = 18348570048, ContextLength = 32768, Runner = "llamacpp",
+            Details = new ModelDetails { Family = "gemma4", Format = "gguf", ParameterSize = "25.2B", QuantizationLevel = "Q4_K_M" },
+        };
+        var placement = new RemoteModelPlacement(model.Name, model.Size, model.SizeVram, new List<RemoteModelGpu> { new("CUDA", "0", "0000:11:00.0", 18348570048) })
+            { KvResidencyMode = "auto", KvEngaged = false, KvHostBytes = 0 };
+        var props = Json("""
+            {"default_generation_settings":{"n_ctx":32768},"total_slots":1,
+             "opencoti":{"kv":{"kv_pool_cells":32768,"cells_used":85,"cells_free":32768,
+                 "effective":{"type_k":"q8_0","type_v":"q8_0","type_k_tail":"q8_0","type_v_tail":"q8_0","n_cells":32768,"n_layers_spilling":0,"fully_resident":true,"is_iswa":true}},
+               "dca":{"enabled":false},"sparse_attn":{"enabled":false},
+               "speculative":{"types":["none","draft-assistant"],"draft_model":"/C/Users/ManniX/.ollama/models/blobs/sha256-5963a2edfb516fbdff499b1d4b7f8158a7a811af7196eaae00be2119188e422e","n_max":2,
+                              "drafter":{"state":"attached","kind":"assistant","head_mib":432}},
+               "kv_reuse":{"ctx_checkpoints":8,"cache_ram_mib":2048},"sampling":{"effective_placement":"idle"},
+               "polykv":{"max_pools":0,"pools_enabled":false},
+               "gpu_process_memory":{"observable":true,"shared_mib":988,"dedicated_mib":18319,"pinned_mib":902,"on_device_mib":18048,"off_card_mib":0,"spilled":false},
+               "elastic_slots":{"enabled":true,"slots_live":1,"slots_max":4,"reason":"idle slot available"}}}
+            """);
+        var kv = Json("""
+            {"rs":null,"rolling_kv":{"residency_mode":"auto","engaged":false,"kvarn":false,"layers":5,"layers_spilling":0,"type_k":"q8_0","type_v":"q8_0"},
+             "cells_total":32768,"cells_used":85,"cells_free":32768,"swa":{"cells_total":4096,"window":1024,"cells_phys_total":4608},"pressure":{"refused_60s":0}}
+            """);
+        var slots = Json("""
+            [{"id":0,"n_ctx":32768,"is_processing":false,"opencoti":{"draft_n_total":59,"draft_n_accepted":32,"tps_ewma":79.5,"state":"idle"}},
+             {"id":1,"n_ctx":32768,"is_processing":false,"opencoti":{"draft_n_total":0,"draft_n_accepted":0,"tps_ewma":0.0,"state":"idle"}}]
+            """);
+        var show = Json("""
+            {"model_info":{"general.architecture":"gemma4","gemma4.attention.head_count":16,"gemma4.attention.head_count_kv":[8,8,8,8,8,2,8,8,8,8,8,2,8,8,8,8,8,2,8,8,8,8,8,2,8,8,8,8,8,2],
+               "gemma4.attention.key_length":512,"gemma4.attention.key_length_swa":256,"gemma4.attention.value_length":512,"gemma4.attention.value_length_swa":256,
+               "gemma4.attention.sliding_window":1024,"gemma4.attention.sliding_window_pattern":[true,true,true,true,true,false,true,true,true,true,true,false,true,true,true,true,true,false,true,true,true,true,true,false,true,true,true,true,true,false],"gemma4.block_count":30,"gemma4.context_length":262144},
+             "drafter":{"source":"attached","spec_type":"draft-assistant","architecture":"gemma4-assistant","parameter_size":"419.71M","quantization_level":"Q8_0",
+               "tokens":2,"loaded":{"state":"attached","kind":"assistant","head_mib":432}}}
+            """);
+
+        var d = ModelDetail.Build(model, "opencoti", placement, props, kv, slots, show);
+        // 25 SWA layers × 8 heads × (256 + 256) over 4608 cells, 5 full layers × 2 heads × (512 + 512) over 32768, q8_0
+        d.KvBytes.Should().Be((ulong)(25 * 8 * 512 * 34.0 / 32 * 4608 + 5 * 2 * 1024 * 34.0 / 32 * 32768));
+        var lines = d.Lines();
+        lines[0].Text.Should().Be("VRAM 17.9 GB (95%) · RAM 988 MB (5%) · on CUDA0 · 902 MB pinned · not spilled · engine buffers 17.1 GB");
+        lines[1].Text.Should().Be("q8_0/q8_0 · ~818 MB · 32768 cells, 85 used, 32768 free · all in VRAM · window auto");
+        lines[2].Text.Should().Be("0 busy of 1 (max 4) · elastic: idle slot available · last 79.5 tok/s · context 32768 of 262144");
+        lines[3].Text.Should().Be("draft-assistant (assistant, attached) · gemma4-assistant 419.71M Q8_0 · up to 2 tokens · 54% accepted");
+    }
+
+    [Theory]
+    [InlineData("/C/Users/ManniX/.ollama/models/blobs/sha256-5963a2edfb516fbdff499b1d4b7f8158a7a811af7196eaae00be2119188e422e", "sha256-5963a2edfb51")]
+    [InlineData(@"D:\models\draft.Q8_0.gguf", "draft.Q8_0.gguf")]
+    public void ShortModelPath_FileNameAndShortDigest(string path, string expected) =>
+        ModelDetail.ShortModelPath(path).Should().Be(expected);
+
+    // ELEVEN2GO, 2026-11-21: the same gemma pinned to the RX 9070 XT (16 GB). The engine put the token embedding and
+    // what did not fit on the CPU: 2.8 GiB of ordinary process memory the GPU counters never see (shared 85 MiB),
+    // which the server reports as size − size_vram
+    [Fact]
+    public void MemorySplit_FromProcess_CountsWeightsTheEngineKeptOnTheCpu()
+    {
+        var props = Json("""
+            {"opencoti":{"speculative":{"types":["none","draft-assistant"],"token_embd":{"device":"CPU","reason":"model 16.1 GiB vs 15.1 GiB free on vulkan:amd exceeds 70% fit bound"}},
+              "gpu_process_memory":{"observable":true,"shared_mib":85,"dedicated_mib":15073,"pinned_mib":84,"on_device_mib":14929,"off_card_mib":0,"spilled":false}}}
+            """);
+        var split = MemorySplit.FromProcess(GpuProcessMemory.FromProps(props), 18131821298, 15110965818)!.Value;
+        split.Vram.Should().Be(15073L << 20);
+        split.Ram.Should().Be(18131821298 - 15110965818);
+        split.RamPct.Should().BeApproximately(16.0, 0.1);
+
+        var model = new RunningModel { Name = "g", Size = 18131821298, SizeVram = 15110965818, ContextLength = 32768 };
+        var lines = ModelDetail.Build(model, "opencoti", null, props, null, null, null).Lines();
+        lines[0].Text.Should().Be("VRAM 14.7 GB (84%) · RAM 2.8 GB (16%) · 84 MB pinned · not spilled · engine buffers 16.9 GB · token embedding on CPU");
+    }
 }
