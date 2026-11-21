@@ -141,6 +141,10 @@ internal sealed record ModelDetail
     public string? DraftModel { get; init; }
     public int? DraftNMax { get; init; }
     public double? DraftAcceptance { get; init; }
+    /// <summary>The last generation speed of the slots (opencoti tps_ewma; an idle slot keeps its last value).</summary>
+    public double? LastTps { get; init; }
+    /// <summary>Sliding-window cells (interleaved SWA models: kv.swa), for the KV size.</summary>
+    public long? SwaCells { get; init; }
 
     // Engine features
     public bool? Dca { get; init; }
@@ -199,6 +203,9 @@ internal sealed record ModelDetail
                     DraftNMax = (int?)Int(dr, "tokens"),
                     DrafterState = Obj(dr, "loaded") is { } loaded ? Str(loaded, "state") : null,
                     DrafterKind = Obj(dr, "loaded") is { } loaded2 ? Str(loaded2, "kind") : null,
+                    // an attached draft model: its architecture, size and quantization rather than its blob path
+                    DraftModel = string.Join(" ", new[] { Str(dr, "architecture"), Str(dr, "parameter_size"), Str(dr, "quantization_level") }
+                        .Where(x => x is { Length: > 0 })) is { Length: > 0 } named ? named : null,
                 };
             }
         }
@@ -257,7 +264,7 @@ internal sealed record ModelDetail
                     {
                         SpecTypes = types.Length > 0 ? types : d.SpecTypes ?? "none",
                         DraftNMax = (int?)Int(spec, "n_max") ?? d.DraftNMax,
-                        DraftModel = Str(spec, "draft_model") is { Length: > 0 } dm ? dm : null,
+                        DraftModel = d.DraftModel ?? (Str(spec, "draft_model") is { Length: > 0 } dm ? ShortModelPath(dm) : null),
                         DrafterState = drafter is { } dr1 ? Str(dr1, "state") ?? d.DrafterState : d.DrafterState,
                         DrafterKind = drafter is { } dr2 ? Str(dr2, "kind") ?? d.DrafterKind : d.DrafterKind,
                     };
@@ -288,6 +295,8 @@ internal sealed record ModelDetail
             }
             if (Obj(k, "rs") is { } rs && Int(rs, "committed_bytes") is > 0 and var rsBytes)
                 d = d with { RsBytes = (ulong)rsBytes };
+            if (Obj(k, "swa") is { } swa)
+                d = d with { SwaCells = Int(swa, "cells_phys_total") ?? Int(swa, "cells_total") };
             if (Obj(k, "pressure") is { } pressure)
                 d = d with { Refused60s = (int?)Int(pressure, "refused_60s") };
         }
@@ -296,6 +305,7 @@ internal sealed record ModelDetail
         {
             int busy = 0;
             long drafted = 0, accepted = 0;
+            double? lastTps = null;
             foreach (var slot in sl.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.Object))
             {
                 var processing = Bool(slot, "is_processing") == true;
@@ -303,6 +313,7 @@ internal sealed record ModelDetail
                 if (Obj(slot, "opencoti") is not { } so) continue;
                 drafted += Int(so, "draft_n_total") ?? 0;
                 accepted += Int(so, "draft_n_accepted") ?? 0;
+                if (Dbl(so, "tps_ewma") is > 0 and var tps) lastTps = (lastTps ?? 0) + tps;
                 if (processing && d.SlotState == null)
                 {
                     d = d with { SlotState = Str(so, "state") };
@@ -310,13 +321,13 @@ internal sealed record ModelDetail
                         d = d with { PrefillDone = Int(pp, "processed"), PrefillTotal = Int(pp, "total") };
                 }
             }
-            d = d with { SlotsBusy = busy, DraftAcceptance = drafted > 0 ? (double)accepted / drafted : null };
+            d = d with { SlotsBusy = busy, DraftAcceptance = drafted > 0 ? (double)accepted / drafted : null, LastTps = lastTps };
             if (d.SlotsLive == null) d = d with { SlotsLive = sl.GetArrayLength() };
         }
 
         if (info != null)
             // only from the types the engine says it used: an embedding model, or an engine that does not report them, gets no guess
-            d = d with { KvBytes = d.TypeK != null && d.TypeV != null ? EstimateKvBytes(info, d.Cells ?? d.Context, d.KvLayers, d.TypeK, d.TypeV) : null };
+            d = d with { KvBytes = d.TypeK != null && d.TypeV != null ? EstimateKvBytes(info, d.Cells ?? d.Context, d.KvLayers, d.TypeK, d.TypeV, d.SwaCells) : null };
         return d;
     }
 
@@ -339,9 +350,33 @@ internal sealed record ModelDetail
     /// The layers are the engine's own count when it reports one (a hybrid model keeps KV on its attention layers
     /// only), else the model's block count. Null when the model's shape or a type's width is not known.
     /// </summary>
-    public static ulong? EstimateKvBytes(Dictionary<string, JsonElement> info, long cells, int? kvLayers, string typeK, string typeV)
+    public static ulong? EstimateKvBytes(Dictionary<string, JsonElement> info, long cells, int? kvLayers, string typeK, string typeV, long? swaCells = null)
     {
         if (cells <= 0 || BytesPerElement(typeK) is not { } bk || BytesPerElement(typeV) is not { } bv) return null;
+        // Interleaved sliding-window models (gemma): per layer, a full-attention layer holds every cell at its own head
+        // count and head size, a sliding-window layer only the window's cells at the SWA head size
+        if (ArchArray(info, "attention.sliding_window_pattern") is { Count: > 0 } pattern)
+        {
+            var kvHeadsPerLayer = ArchArray(info, "attention.head_count_kv");
+            var kvHeadsAll = ArchLong(info, "attention.head_count_kv");
+            var key = ArchLong(info, "attention.key_length");
+            var value = ArchLong(info, "attention.value_length") ?? key;
+            var keySwa = ArchLong(info, "attention.key_length_swa") ?? key;
+            var valueSwa = ArchLong(info, "attention.value_length_swa") ?? keySwa;
+            var window = ArchLong(info, "attention.sliding_window");
+            var swa = swaCells ?? (window is > 0 ? Math.Min(cells, window.Value) : cells);
+            if (key is not > 0 || value is not > 0) return null;
+            double total = 0;
+            for (var i = 0; i < pattern.Count; i++)
+            {
+                var layerHeads = kvHeadsPerLayer is { } per && i < per.Count ? per[i] : kvHeadsAll;
+                if (layerHeads is not > 0) return null;
+                total += pattern[i] != 0
+                    ? layerHeads.Value * (keySwa!.Value * bk + valueSwa!.Value * bv) * swa
+                    : layerHeads.Value * (key.Value * bk + value.Value * bv) * cells;
+            }
+            return (ulong)total;
+        }
         var layers = kvLayers ?? ArchLong(info, "block_count");
         var heads = ArchLong(info, "attention.head_count");
         var kvHeads = ArchLong(info, "attention.head_count_kv") ?? heads;
@@ -352,6 +387,27 @@ internal sealed record ModelDetail
         if (layers is not > 0 || kvHeads is not > 0 || keyDim is not > 0 || valueDim is not > 0) return null;
         var perCell = layers.Value * kvHeads.Value * (keyDim.Value * bk + valueDim.Value * bv);
         return (ulong)(perCell * cells);
+    }
+
+    /// <summary>A per-layer model_info array (numbers, or booleans as 1/0); null when absent or not an array.</summary>
+    private static List<long>? ArchArray(Dictionary<string, JsonElement> info, string key)
+    {
+        var arch = info.TryGetValue("general.architecture", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null;
+        if (arch == null || !info.TryGetValue($"{arch}.{key}", out var value) || value.ValueKind != JsonValueKind.Array) return null;
+        return value.EnumerateArray().Select(x => x.ValueKind switch
+        {
+            JsonValueKind.True => 1L,
+            JsonValueKind.False => 0L,
+            JsonValueKind.Number when x.TryGetInt64(out var n) => n,
+            _ => -1L,
+        }).ToList();
+    }
+
+    /// <summary>A model file path as a short name: the file, and a blob's digest cut to 12 characters.</summary>
+    public static string ShortModelPath(string path)
+    {
+        var name = path.Replace('\\', '/').Split('/').Last();
+        return name.StartsWith("sha256-", StringComparison.Ordinal) && name.Length > 19 ? name[..19] : name;
     }
 
     /// <summary>A model_info number under the model's architecture ("qwen35.block_count"); for a per-layer array, its largest value.</summary>
@@ -388,8 +444,11 @@ internal sealed record ModelDetail
             $"VRAM {Gb(Memory.Vram)} ({Memory.VramPct:F0}%)",
             $"RAM {Gb(Memory.Ram)} ({Memory.RamPct:F0}%)",
         };
+        // per GPU, the server's figures; with the OS's measurement only where (they would not add up to it)
         if (Gpus.Count > 0)
-            mem.Add(string.Join(", ", Gpus.Select(g => $"{g.Backend}{g.Id} {Gb((long)g.Vram)}")));
+            mem.Add(Process != null
+                ? "on " + string.Join(", ", Gpus.Select(g => $"{g.Backend}{g.Id}"))
+                : string.Join(", ", Gpus.Select(g => $"{g.Backend}{g.Id} {Gb((long)g.Vram)}")));
         if (KvHostBytes is > 0)
             mem.Add($"KV tail in RAM {Gb((long)KvHostBytes.Value)}");
         if (Process is { } proc)
@@ -453,6 +512,7 @@ internal sealed record ModelDetail
             slots.Add($"prefill {PrefillDone}/{PrefillTotal} ({PrefillDone * 100.0 / PrefillTotal:F0}%)");
         else if (SlotState is { Length: > 0 } state && state != "idle")
             slots.Add(state.Replace('_', ' '));
+        if (LastTps is { } last) slots.Add($"last {last:F1} tok/s");
         slots.Add($"context {Context}" + (ContextTrained is > 0 && ContextTrained != Context ? $" of {ContextTrained}" : ""));
         lines.Add(("Slots", string.Join(" · ", slots)));
 
