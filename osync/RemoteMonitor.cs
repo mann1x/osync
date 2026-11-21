@@ -63,6 +63,12 @@ internal sealed record RemoteEngineStats(string Engine, bool Readable)
     public double? TokensPerSecond { get; init; }
     public int? Refused60s { get; init; }
     public bool PressureActive { get; init; }
+    /// <summary>The engine's last props, kv and slots replies (the detail box reads them); null when not answered.</summary>
+    public JsonElement? Props { get; init; }
+    public JsonElement? Kv { get; init; }
+    public JsonElement? Slots { get; init; }
+    /// <summary>opencoti's measurement of the engine process's GPU memory (props gpu_process_memory); null when not observable.</summary>
+    public GpuProcessMemory? Process => GpuProcessMemory.FromProps(Props);
 }
 
 /// <summary>
@@ -90,6 +96,10 @@ internal sealed record RemoteSnapshot
     /// engine reports it, null when the server reports it for none.
     /// </summary>
     public Dictionary<string, ulong>? KvHostBytes { get; init; }
+    /// <summary>Where each loaded model sits (/api/xollama/system models[]); empty without system telemetry.</summary>
+    public Dictionary<string, RemoteModelPlacement> Placements { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The selected model's /api/show (model_info, drafter, think budget), once it has been read.</summary>
+    public JsonElement? SelectedShow { get; init; }
     public Dictionary<string, RemoteEngineStats> Engine { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -112,6 +122,8 @@ internal sealed class RemoteServerMonitor
     /// <summary>xOllama reports the host RAM of each model's KV rolling window in /api/xollama/system (models[].kv).</summary>
     public const string KvHostFeature = "kv_host_telemetry_v1";
     private const int MaxParallelEngineReads = 4;
+    /// <summary>How often a model's engine props (about 14 KB on opencoti) are read again; every refresh for the selected model.</summary>
+    public static readonly TimeSpan PropsInterval = TimeSpan.FromSeconds(30);
 
     private static readonly HttpClient Http = new(new SocketsHttpHandler
     {
@@ -146,6 +158,9 @@ internal sealed class RemoteServerMonitor
     private readonly ConcurrentDictionary<string, byte> _missingEndpoints = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, (List<SlotReading>? Slots, DateTime At)> _lastSlots = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, TpsReading> _lastTps = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, (JsonElement Body, DateTime At)> _lastProps = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, JsonElement> _show = new(StringComparer.OrdinalIgnoreCase);
+    private volatile string? _selected;
 
     public RemoteServerMonitor(string url, string? apiKey)
     {
@@ -155,6 +170,70 @@ internal sealed class RemoteServerMonitor
 
     /// <summary>Asks for a fresh device list on the next tick (R key), still at most one request at a time.</summary>
     public void RefreshDevicesSoon() => _devicesRequestedAt = DateTime.MinValue;
+
+    /// <summary>
+    /// The model the detail box shows (null: none). Its engine props are read on every refresh, and its /api/show
+    /// once; both start reading now, so the box fills before the next refresh.
+    /// </summary>
+    public void Select(string? model, Action? read = null)
+    {
+        _selected = model;
+        if (model == null) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var tasks = new List<Task> { ReadShowAsync(model, CancellationToken.None) };
+                if (_flavor == ServerFlavor.XOllama && !_missingEndpoints.ContainsKey(model + "\nprops"))
+                    tasks.Add(ReadPropsAsync(model, CancellationToken.None));
+                await Task.WhenAll(tasks);
+                read?.Invoke();
+            }
+            catch { }
+        });
+    }
+
+    private async Task ReadShowAsync(string model, CancellationToken cancellationToken)
+    {
+        if (_show.ContainsKey(model)) return;
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, $"{_url}/api/show")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { model }), System.Text.Encoding.UTF8, "application/json"),
+            };
+            if (_apiKey != null && _flavor == ServerFlavor.XOllama)
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+            using var response = await Http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode) return;
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            _show[model] = ShowSummary(doc.RootElement);
+        }
+        catch { }
+    }
+
+    private async Task ReadPropsAsync(string model, CancellationToken cancellationToken)
+    {
+        if (await ReadEngineAsync(model, "props", cancellationToken) is { Body: { } body })
+            _lastProps[model] = (body, DateTime.UtcNow);
+    }
+
+    /// <summary>The parts of /api/show the detail box reads (model_info without its token lists, drafter, think budget).</summary>
+    public static JsonElement ShowSummary(JsonElement root)
+    {
+        var keep = new Dictionary<string, object?>();
+        if (root.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var name in new[] { "drafter", "think_budget", "think_budget_tokens", "capabilities" })
+                if (root.TryGetProperty(name, out var v)) keep[name] = v.Clone();
+            if (root.TryGetProperty("model_info", out var info) && info.ValueKind == JsonValueKind.Object)
+                keep["model_info"] = info.EnumerateObject()
+                    .Where(p => !p.Name.StartsWith("tokenizer.", StringComparison.Ordinal) &&
+                                (p.Value.ValueKind != JsonValueKind.Array || p.Value.GetArrayLength() <= 1024))
+                    .ToDictionary(p => p.Name, p => p.Value.Clone());
+        }
+        return JsonSerializer.SerializeToElement(keep);
+    }
 
     public async Task<RemoteSnapshot> CollectAsync(CancellationToken cancellationToken = default)
     {
@@ -197,6 +276,10 @@ internal sealed class RemoteServerMonitor
         var engine = new Dictionary<string, RemoteEngineStats>(StringComparer.OrdinalIgnoreCase);
         RemoteSystem? system = null;
         Dictionary<string, ulong>? kvHost = null;
+        var placements = new Dictionary<string, RemoteModelPlacement>(StringComparer.OrdinalIgnoreCase);
+        var selected = _selected;
+        if (selected != null && models.Any(m => string.Equals(m.Name, selected, StringComparison.OrdinalIgnoreCase)))
+            await ReadShowAsync(selected, cancellationToken);
         if (_flavor == ServerFlavor.XOllama)
         {
             if (_telemetry)
@@ -204,6 +287,7 @@ internal sealed class RemoteServerMonitor
                 using var doc = await GetJsonAsync("api/xollama/system", cancellationToken);
                 system = doc != null ? ParseSystem(doc.RootElement) : null;
                 if (doc != null && _kvHost) kvHost = ParseKvHost(doc.RootElement);
+                if (doc != null) placements = ParsePlacements(doc.RootElement);
                 if (system != null)
                 {
                     _devices = system.Devices;
@@ -230,6 +314,8 @@ internal sealed class RemoteServerMonitor
             DevicesAsOf = _devicesAsOf,
             System = system,
             KvHostBytes = kvHost,
+            Placements = placements,
+            SelectedShow = selected != null && _show.TryGetValue(selected, out var show) ? show : null,
             Engine = engine,
         };
     }
@@ -319,6 +405,8 @@ internal sealed class RemoteServerMonitor
                 _missingEndpoints.Clear();
                 _lastSlots.Clear();
                 _lastTps.Clear();
+                _lastProps.Clear();
+                _show.Clear();
             }
             using var doc = await GetJsonAsync("api/engine", cancellationToken);
             _engineList = doc != null ? ParseEngineList(doc.RootElement) : new(StringComparer.OrdinalIgnoreCase);
@@ -340,7 +428,17 @@ internal sealed class RemoteServerMonitor
                     var slots = ReadEngineAsync(name, "slots", cancellationToken);
                     var kv = opencoti ? ReadEngineAsync(name, "kv", cancellationToken) : Task.FromResult<EngineReply?>(null);
                     var tps = opencoti ? ReadEngineAsync(name, "polykv/tps", cancellationToken, "&once=1") : Task.FromResult<EngineReply?>(null);
-                    await Task.WhenAll(slots, kv, tps);
+                    // props are mostly settings: every PropsInterval, every refresh for the model the detail box shows
+                    var propsDue = !_lastProps.TryGetValue(name, out var lastProps) || DateTime.UtcNow - lastProps.At >= PropsInterval ||
+                                   string.Equals(name, _selected, StringComparison.OrdinalIgnoreCase);
+                    var props = propsDue ? ReadPropsAsync(name, cancellationToken) : Task.CompletedTask;
+                    await Task.WhenAll(slots, kv, tps, props);
+                    stats = stats with
+                    {
+                        Props = _lastProps.TryGetValue(name, out var p0) ? p0.Body : null,
+                        Kv = kv.Result?.Body,
+                        Slots = slots.Result?.Body,
+                    };
 
                     if (slots.Result?.Body is { } slotsBody && ParseSlots(slotsBody) is { } s)
                     {
@@ -513,6 +611,38 @@ internal sealed class RemoteServerMonitor
                 result[name] = result.GetValueOrDefault(name) + bytes;
         }
         return result.Count > 0 ? result : null;
+    }
+
+    /// <summary>/api/xollama/system models[]: where each loaded model sits, its GPUs and its KV window. Empty when absent.</summary>
+    public static Dictionary<string, RemoteModelPlacement> ParsePlacements(JsonElement root)
+    {
+        var result = new Dictionary<string, RemoteModelPlacement>(StringComparer.OrdinalIgnoreCase);
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            return result;
+        foreach (var m in models.EnumerateArray())
+        {
+            if (m.ValueKind != JsonValueKind.Object) continue;
+            var name = Str(m, "name");
+            if (name.Length == 0) continue;
+            var gpus = m.TryGetProperty("devices", out var ds) && ds.ValueKind == JsonValueKind.Array
+                ? ds.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.Object)
+                    .Select(x => new RemoteModelGpu(Str(x, "backend"), Str(x, "id"), Str(x, "pci_id"), U64(x, "vram") ?? 0)).ToList()
+                : new List<RemoteModelGpu>();
+            var placement = new RemoteModelPlacement(name, (long)(U64(m, "size") ?? 0), (long)(U64(m, "size_vram") ?? 0), gpus);
+            if (m.TryGetProperty("kv", out var kv) && kv.ValueKind == JsonValueKind.Object)
+            {
+                placement = placement with
+                {
+                    KvResidencyMode = Str(kv, "residency_mode") is { Length: > 0 } mode ? mode : null,
+                    KvEngaged = kv.TryGetProperty("engaged", out var e) && e.ValueKind is JsonValueKind.True or JsonValueKind.False ? e.GetBoolean() : null,
+                    KvArn = kv.TryGetProperty("kvarn", out var k) && k.ValueKind == JsonValueKind.True,
+                    KvDeviceBytes = U64(kv, "device_bytes"),
+                    KvHostBytes = U64(kv, "host_bytes"),
+                };
+            }
+            result[name] = placement;
+        }
+        return result;
     }
 
     /// <summary>Whether GET /api/xollama lists <paramref name="feature"/> in its "features".</summary>
