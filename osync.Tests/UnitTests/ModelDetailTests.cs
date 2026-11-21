@@ -226,4 +226,38 @@ public class ModelDetailTests
         PsMonitorUI.MemoryCells(new MemorySplit(8 * GiB, 2 * GiB), true).Ram.Should().Be("[red]2.0 GB 20%[/]");
         PsMonitorUI.MemoryCells(new MemorySplit(1000 * GiB, GiB / 2), false).Ram.Should().Be("[dim]512 MB <1%[/]");
     }
+
+    // solidpc, xOllama 0.40.16-xollama.2 on Linux, 2026-11-21: an embedding model on opencoti. The OS's GPU memory is
+    // not observable there, the engine reports no KV types and nothing drafts
+    [Fact]
+    public void Lines_LinuxEmbeddingModel_ServerFiguresAndNoGuesses()
+    {
+        var model = new RunningModel
+        {
+            Name = "snowflake-arctic-embed2:latest", Size = 664000265, SizeVram = 664000265, ContextLength = 8192, Runner = "llamacpp",
+            Details = new ModelDetails { Family = "bert", Format = "gguf", ParameterSize = "566.70M", QuantizationLevel = "F16" },
+        };
+        var props = Json("""
+            {"default_generation_settings":{"n_ctx":8192},"total_slots":1,
+             "opencoti":{"kv":{"kv_pool_cells":8192,"cells_used":61,"cells_free":8192},
+               "dca":{"enabled":false,"chunk_size":0},"sparse_attn":{"enabled":false},
+               "speculative":{"types":["none"],"draft_model":"","n_max":3,"cache_type_k":"f16","cache_type_v":"f16","drafter":{"state":"none","kind":null}},
+               "kv_reuse":{"cache_ram_mib":8192,"ctx_checkpoints":32},"sampling":{"effective_placement":"idle"},
+               "polykv":{"max_pools":0,"pools_enabled":false},"gpu_process_memory":{"observable":false},
+               "elastic_slots":{"enabled":false,"slots_live":1,"slots_max":1,"reason":"disabled"}}}
+            """);
+        var kv = Json("""{"rs":null,"rolling_kv":{"residency_mode":"auto","available":false},"cells_total":8192,"cells_used":61,"cells_free":8192,"pressure":{"refused_60s":0}}""");
+        var slots = Json("""[{"id":0,"n_ctx":8192,"is_processing":false,"opencoti":{"draft_n_total":0,"draft_n_accepted":0,"state":"idle"}}]""");
+        var show = Json("""{"model_info":{"general.architecture":"bert","bert.block_count":24,"bert.attention.head_count":16,"bert.embedding_length":1024,"bert.context_length":8192}}""");
+
+        var d = ModelDetail.Build(model, "opencoti", null, props, kv, slots, show);
+        d.Process.Should().BeNull();
+        d.KvBytes.Should().BeNull();
+        var lines = d.Lines();
+        lines[0].Text.Should().Be("VRAM 633 MB (100%) · RAM 0 MB (0%)");
+        lines[1].Text.Should().Be("8192 cells, 61 used, 8192 free · window auto");
+        lines[2].Text.Should().Be("0 busy of 1 · context 8192");
+        lines[3].Text.Should().Be("off");
+        lines[4].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 8.0 GB, 32 checkpoints");
+    }
 }

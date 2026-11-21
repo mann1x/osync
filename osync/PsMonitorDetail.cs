@@ -315,7 +315,8 @@ internal sealed record ModelDetail
         }
 
         if (info != null)
-            d = d with { KvBytes = EstimateKvBytes(info, d.Cells ?? d.Context, d.KvLayers, d.TypeK ?? "f16", d.TypeV ?? "f16") };
+            // only from the types the engine says it used: an embedding model, or an engine that does not report them, gets no guess
+            d = d with { KvBytes = d.TypeK != null && d.TypeV != null ? EstimateKvBytes(info, d.Cells ?? d.Context, d.KvLayers, d.TypeK, d.TypeV) : null };
         return d;
     }
 
@@ -410,7 +411,7 @@ internal sealed record ModelDetail
             if (Engine.Length > 0) model.Add($"runner {Engine}");
             lines.Add(("Model", string.Join(" · ", model)));
             lines.Add(("Context", Context > 0
-                ? $"{Context}" + (ContextTrained is > 0 ? $" of {ContextTrained} trained" : "")
+                ? $"{Context}" + (ContextTrained is > 0 && ContextTrained != Context ? $" of {ContextTrained} trained" : "")
                 : "-"));
             if (SpecTypes is { Length: > 0 } st && st != "none")
                 lines.Add(("MTP", Spec()));
@@ -452,7 +453,7 @@ internal sealed record ModelDetail
             slots.Add($"prefill {PrefillDone}/{PrefillTotal} ({PrefillDone * 100.0 / PrefillTotal:F0}%)");
         else if (SlotState is { Length: > 0 } state && state != "idle")
             slots.Add(state.Replace('_', ' '));
-        slots.Add($"context {Context}" + (ContextTrained is > 0 ? $" of {ContextTrained}" : ""));
+        slots.Add($"context {Context}" + (ContextTrained is > 0 && ContextTrained != Context ? $" of {ContextTrained}" : ""));
         lines.Add(("Slots", string.Join(" · ", slots)));
 
         lines.Add(("MTP", Spec()));
@@ -462,7 +463,7 @@ internal sealed record ModelDetail
         if (PoolsEnabled != null) eng.Add(PoolsEnabled == true ? $"PolyKV pools on (max {PoolsMax})" : "PolyKV pools off");
         if (SparseAttn == true) eng.Add("sparse attention");
         if (CacheRamMib is > 0) eng.Add($"prompt cache {Gb(Mib(CacheRamMib.Value))}" + (CtxCheckpoints is > 0 ? $", {CtxCheckpoints} checkpoints" : ""));
-        if (Sampling is { Length: > 0 } smp) eng.Add($"sampling on {smp}");
+        if (Sampling is { Length: > 0 } smp && smp != "idle") eng.Add($"sampling on {smp}");
         if (ThinkBudget != null) eng.Add("think " + ThinkText());
         lines.Add((Engine.Length > 0 ? Engine : "Engine", eng.Count > 0 ? string.Join(" · ", eng) : "-"));
         return lines.Take(5).ToList();
