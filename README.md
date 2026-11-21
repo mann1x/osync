@@ -590,7 +590,7 @@ osync psmonitor -d http://192.168.0.100:11434
 
 **Features:**
 
-- One view for a local and a remote server: a System panel (CPU, memory, swap, load, the server's processes), the GPUs (backend and engine on xOllama, VRAM used, utilization, temperature, power, clock, fan, PCIe link), a history graph that `I` cycles and a second one under it (`O`), and the loaded models (quantization, runner or engine, size and how much is in VRAM, context, busy slots and tokens per second on xOllama, expiry)
+- One view for a local and a remote server: a System panel (CPU, memory, swap, load, the server's processes), the GPUs (backend and engine on xOllama, VRAM used, utilization, temperature, power, clock, fan, PCIe link), a history graph that `I` cycles and a second one under it (`O`), and the loaded models (quantization, runner or engine, how much is in VRAM and in RAM (↑/↓ opens a model's details), context, busy slots and tokens per second on xOllama, expiry)
 - Graphs with braille characters (half blocks in the classic Windows console)
 - Color-coded metrics (green < 50%, yellow 50-80%, red > 80%)
 - NVIDIA driver and CUDA version display for a server on this machine
@@ -607,14 +607,17 @@ For a server on another machine, psmonitor shows only what that server reports t
 - **xOllama** adds its GPUs (name, backend, engine, VRAM used, total and free; read at most once a minute, since the server looks its GPUs up again to answer, `R` re-reads them), and per loaded model the engine actually serving it, its busy slots and its generation speed (tokens per second). `I` cycles the graph through VRAM, memory outside VRAM, tokens per second and busy slots
 - **xOllama with system telemetry** (0.40.4-xollama.5 and later, feature `system_telemetry_v1`) also sends its host and its GPUs' live readings, read on every refresh from a snapshot the server keeps (cheap, no GPU lookup): a System panel with the host's CPU, memory, swap and load and the server's own processes (CPU, where 100% is one core, and memory, per engine serving a model), and per GPU its utilization, temperature, power and limit, clock, fan and PCIe link. A reading the server's platform does not expose is shown as `-`, never as 0 (on Windows, AMD and Intel GPUs report only memory and utilization). `I` adds graphs of the GPU's utilization, power and temperature, the host's CPU and memory and the server's CPU; `G` picks the GPU the GPU graphs show
 - **KV rolling window**: an xOllama that reports the host RAM held by each model's KV rolling window (opencoti's `--kv-rolling-window`, the part of the cache that spills out of VRAM; feature `kv_host_telemetry_v1`) gets a graph of it in the `I` cycle: the tail allocated in pinned host memory when the model loads, 0 while the window is not engaged. A KVarN cache reports no byte size and is left out of the sum. Servers that do not report it (before the xOllama release after 0.40.10) do not show the graph
+- **VRAM and RAM of each model**: the models table shows how much of each model is in VRAM and how much, and what share, is in system RAM (`21.9 GB` and `1.1 GB 5%`), as `ollama ps` splits it. On opencoti (xOllama on Windows) these are what the OS charges the engine process: dedicated GPU memory, and the shared system memory the GPU maps for it (pinned host buffers, and what the driver moved off a full card: a Vulkan card keeps a model larger than its VRAM by placing the rest in system RAM, shown in red). Elsewhere they are the server's `size_vram` and `size`, which on a llama.cpp engine are the engine's own buffers (weights, KV cache and compute) on the GPUs and in all; when every layer is on a GPU xOllama reports both equal, and the KV rolling window's tail in host memory is added as RAM
+- **Model details** (`↑/↓` selects a model): at most five lines under the table. Memory (VRAM and RAM, the GPUs the model is on, pinned memory, spilled or not), KV cache (types, estimated size, recurrent state, cells used and free, whether it is all in VRAM, the rolling window), slots (busy, live and elastic maximum, prompt processing progress, context of the trained length), MTP / drafter (type, state, draft length, acceptance) and the engine's features (DCA, PolyKV pools, prompt cache, sampling placement, think budget). They come from the engine's `props`, `kv` and `slots` (through `/api/engine`) and `/api/show`; props are read every 30 s, every refresh for the selected model. On Ollama, or before the engine answers, the box shows the server's figures, the model and its context
 - Every request is cheap: only the loaded models are read on every refresh, over kept-alive connections; the version is read once, the stored models every minute, and an engine endpoint a model does not have is not asked again until it reloads. The xOllama API key (`XOLLAMA_API_KEY` or the key file) is sent to xOllama servers only
 
 **Interactive Controls:**
-- **Q / Esc** - Quit monitor
+- **Q** - Quit monitor (**Esc** too, when no model is selected)
+- **↑/↓** - Select a loaded model: its details open in a box under the table; **Esc** closes it
 - **P** - Pause/Resume updates
 - **H** - Show help
 - **←/→** - Adjust graph history (+/- 1 minute, range: 1-60m)
-- **↑/↓** - Adjust refresh interval (+/- 1 second)
+- **+/-** - Adjust refresh interval (+/- 1 second)
 - **I** - Cycle the main graph; **G** - pick the GPU the GPU graphs show
 - **O** - Second graph: the server's CPU, its memory, or none (shown when the window has room for both)
 - **R** - Re-read an xOllama's GPU list (without system telemetry)
@@ -1551,6 +1554,15 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.10
+
+**New**
+- **psmonitor shows how much of each model is in VRAM and how much in RAM**: the `Size (VRAM)` column, which showed the server's total and a share only when it was below 100%, is now a `VRAM` and a `RAM` column (`21.9 GB` and `1.1 GB 5%`). On xOllama with opencoti they are what the OS charges the engine process, dedicated GPU memory and the shared system memory the GPU maps for it, so a model a Vulkan card keeps partly in system RAM (larger than the card's VRAM) shows it, in red; before, its whole size was shown as in VRAM. The VRAM and RAM graphs use the same figures
+- **psmonitor model details**: `↑/↓` selects a loaded model and opens a box of up to five lines under the table with its memory (VRAM, RAM, GPUs, pinned, spilled), KV cache (types, estimated size, cells used and free, rolling window), slots (busy, live and elastic maximum, prompt progress), MTP / drafter (state, draft length, acceptance rate) and engine features (DCA, PolyKV pools, prompt cache, sampling, think budget); `Esc` closes it. The refresh interval moved from `↑/↓` to `+/-`; `Esc` still quits when no model is selected
+
+**Fixed**
+- **psmonitor's status bar wrapped onto a second line in a narrow window**
 
 v1.4.9
 

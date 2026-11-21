@@ -187,8 +187,16 @@ public partial class PsMonitorUI
         switch (key.Key)
         {
             case ConsoleKey.Q:
-            case ConsoleKey.Escape:
                 _isRunning = false;
+                break;
+
+            case ConsoleKey.Escape:
+                // Esc closes the detail box first; with nothing selected it quits, as before
+                if (_selectedModel != null)
+                    SelectModel(null);
+                else
+                    _isRunning = false;
+                _needsRedraw = true;
                 break;
 
             case ConsoleKey.C when key.Modifiers.HasFlag(ConsoleModifiers.Control):
@@ -222,11 +230,23 @@ public partial class PsMonitorUI
                 break;
 
             case ConsoleKey.UpArrow:
-                _refreshIntervalSeconds = Math.Min(300, _refreshIntervalSeconds + 1);
+                MoveSelection(-1);
                 _needsRedraw = true;
                 break;
 
             case ConsoleKey.DownArrow:
+                MoveSelection(+1);
+                _needsRedraw = true;
+                break;
+
+            case ConsoleKey.Add:
+            case ConsoleKey.OemPlus:
+                _refreshIntervalSeconds = Math.Min(300, _refreshIntervalSeconds + 1);
+                _needsRedraw = true;
+                break;
+
+            case ConsoleKey.Subtract:
+            case ConsoleKey.OemMinus:
                 _refreshIntervalSeconds = Math.Max(1, _refreshIntervalSeconds - 1);
                 _needsRedraw = true;
                 break;
@@ -277,11 +297,13 @@ public partial class PsMonitorUI
         AnsiConsole.Write(new Panel(
             new Markup(
                 "[bold cyan]osync Monitor - Keyboard Shortcuts[/]\n\n" +
-                "[yellow]Q/Esc[/]        Quit monitor\n" +
+                "[yellow]Q[/]            Quit monitor (Esc too, when no model is selected)\n" +
+                "[yellow]Up/Down[/]      Select a loaded model: its details open under the table\n" +
+                "[yellow]Esc[/]          Close the details\n" +
                 "[yellow]P[/]            Pause/Resume updates\n" +
                 "[yellow]H[/]            Show this help\n" +
                 "[yellow]Left/Right[/]   Adjust graph history (+/- 1 min)\n" +
-                "[yellow]Up/Down[/]      Adjust refresh interval\n" +
+                "[yellow]+/-[/]          Adjust refresh interval\n" +
                 "[yellow]I[/]            Cycle the graph (VRAM, RAM, tok/s, busy slots, KV window in host RAM;\n" +
                 "             GPU, host and server graphs when they are known)\n" +
                 "[yellow]G[/]            Pick the GPU the GPU graphs show\n" +
@@ -424,7 +446,7 @@ public partial class PsMonitorUI
 
                 // Build left part (plain text for length calculation)
                 var pauseText = _isPaused ? "PAUSED" : "RUNNING";
-                var leftText = $" {pauseText} | Refresh: {_refreshIntervalSeconds}s | History: {_historyMinutes}m | Q=Quit P=Pause H=Help";
+                var leftText = $" {pauseText} | Refresh: {_refreshIntervalSeconds}s | History: {_historyMinutes}m | Q=Quit P=Pause H=Help Up/Down=Model";
 
                 // Right side: date/time (use fixed format to avoid locale issues)
                 var now = DateTime.Now;
@@ -436,7 +458,8 @@ public partial class PsMonitorUI
                 var totalNeeded = leftLen + 2 + rightLen; // 2 for minimum spacing
 
                 // If not enough space, truncate left part
-                if (totalNeeded > width)
+                var compact = totalNeeded > width;
+                if (compact)
                 {
                     // Use shorter left text
                     leftText = $" {pauseText} | {_refreshIntervalSeconds}s | {_historyMinutes}m";
@@ -456,9 +479,17 @@ public partial class PsMonitorUI
                 // Build and write the line, ensuring it fits
                 var sb = new StringBuilder();
                 sb.Append($" {pauseColor}{pauseText}{reset}");
-                sb.Append($" {dim}|{reset} Refresh: {white}{_refreshIntervalSeconds}s{reset}");
-                sb.Append($" {dim}|{reset} History: {white}{_historyMinutes}m{reset}");
-                sb.Append($" {dim}|{reset} {dim}Q{reset}=Quit {dim}P{reset}=Pause {dim}H{reset}=Help");
+                if (compact)
+                {
+                    // the same text as the short leftText: the date goes after it without wrapping the line
+                    sb.Append($" {dim}|{reset} {white}{_refreshIntervalSeconds}s{reset} {dim}|{reset} {white}{_historyMinutes}m{reset}");
+                }
+                else
+                {
+                    sb.Append($" {dim}|{reset} Refresh: {white}{_refreshIntervalSeconds}s{reset}");
+                    sb.Append($" {dim}|{reset} History: {white}{_historyMinutes}m{reset}");
+                    sb.Append($" {dim}|{reset} {dim}Q{reset}=Quit {dim}P{reset}=Pause {dim}H{reset}=Help {dim}Up/Down{reset}=Model");
+                }
 
                 // Pad and add date - ensure total doesn't exceed width
                 var currentLen = leftText.Length;
