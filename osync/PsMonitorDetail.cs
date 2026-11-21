@@ -52,10 +52,12 @@ internal readonly record struct MemorySplit(long Vram, long Ram)
     /// on the cards, shared the system RAM the GPU maps for it (pinned host buffers, and allocations the driver moved
     /// off a full card). This is a measurement, where size/size_vram are the engine's own buffer sizes: a Vulkan card
     /// that runs out of VRAM keeps the allocation and places it in shared memory, and only this shows it.
+    /// Weights the engine itself placed on the CPU (the token embedding, layers that did not fit) are ordinary process
+    /// memory the GPU counters never see: the engine reports them as size − size_vram, so RAM is the larger of the two.
     /// </summary>
-    public static MemorySplit? FromProcess(GpuProcessMemory? gpm) =>
+    public static MemorySplit? FromProcess(GpuProcessMemory? gpm, long size = 0, long sizeVram = 0) =>
         gpm is { DedicatedMib: { } ded, SharedMib: { } shared }
-            ? new MemorySplit(MiB(ded), MiB(shared))
+            ? new MemorySplit(MiB(ded), Math.Max(MiB(shared), Math.Max(0, size - Math.Max(0, sizeVram))))
             : null;
 
     private static long MiB(double mib) => (long)(Math.Max(0, mib) * 1024 * 1024);
@@ -139,6 +141,8 @@ internal sealed record ModelDetail
     public string? DrafterState { get; init; }
     public string? DrafterKind { get; init; }
     public string? DraftModel { get; init; }
+    /// <summary>Where the engine put the token embedding (opencoti speculative.token_embd.device), when not on a GPU.</summary>
+    public string? TokenEmbdDevice { get; init; }
     public int? DraftNMax { get; init; }
     public double? DraftAcceptance { get; init; }
     /// <summary>The last generation speed of the slots (opencoti tps_ewma; an idle slot keeps its last value).</summary>
@@ -214,7 +218,7 @@ internal sealed record ModelDetail
         {
             d = d with { EngineRead = true };
             if (GpuProcessMemory.FromProps(p) is { } gpm)
-                d = d with { Process = gpm, Memory = MemorySplit.FromProcess(gpm) ?? d.Memory };
+                d = d with { Process = gpm, Memory = MemorySplit.FromProcess(gpm, model.Size, model.SizeVram) ?? d.Memory };
             if (Obj(p, "default_generation_settings") is { } gen && Int(gen, "n_ctx") is { } nctx && d.Context == 0)
                 d = d with { Context = (int)nctx };
             // stock llama.cpp: its slot count
@@ -260,6 +264,8 @@ internal sealed record ModelDetail
                         ? string.Join(",", t.EnumerateArray().Select(x => x.GetString()).Where(x => x is { Length: > 0 } && x != "none"))
                         : "";
                     var drafter = Obj(spec, "drafter");
+                    if (Obj(spec, "token_embd") is { } te && Str(te, "device") is { } dev && dev.Equals("CPU", StringComparison.OrdinalIgnoreCase))
+                        d = d with { TokenEmbdDevice = dev };
                     d = d with
                     {
                         SpecTypes = types.Length > 0 ? types : d.SpecTypes ?? "none",
@@ -457,6 +463,8 @@ internal sealed record ModelDetail
             mem.Add(proc.OffCardMib is > 0 and var off ? $"SPILLED {Gb(Mib(off))} to RAM" : proc.Spilled == true ? "SPILLED to RAM" : "not spilled");
             mem.Add($"engine buffers {Gb(ServerMemory.Total)}");
         }
+        if (TokenEmbdDevice != null)
+            mem.Add("token embedding on CPU");
         lines.Add(("Memory", string.Join(" · ", mem)));
 
         if (!EngineRead)

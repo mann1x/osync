@@ -316,4 +316,24 @@ public class ModelDetailTests
     [InlineData(@"D:\models\draft.Q8_0.gguf", "draft.Q8_0.gguf")]
     public void ShortModelPath_FileNameAndShortDigest(string path, string expected) =>
         ModelDetail.ShortModelPath(path).Should().Be(expected);
+
+    // ELEVEN2GO, 2026-11-21: the same gemma pinned to the RX 9070 XT (16 GB). The engine put the token embedding and
+    // what did not fit on the CPU: 2.8 GiB of ordinary process memory the GPU counters never see (shared 85 MiB),
+    // which the server reports as size − size_vram
+    [Fact]
+    public void MemorySplit_FromProcess_CountsWeightsTheEngineKeptOnTheCpu()
+    {
+        var props = Json("""
+            {"opencoti":{"speculative":{"types":["none","draft-assistant"],"token_embd":{"device":"CPU","reason":"model 16.1 GiB vs 15.1 GiB free on vulkan:amd exceeds 70% fit bound"}},
+              "gpu_process_memory":{"observable":true,"shared_mib":85,"dedicated_mib":15073,"pinned_mib":84,"on_device_mib":14929,"off_card_mib":0,"spilled":false}}}
+            """);
+        var split = MemorySplit.FromProcess(GpuProcessMemory.FromProps(props), 18131821298, 15110965818)!.Value;
+        split.Vram.Should().Be(15073L << 20);
+        split.Ram.Should().Be(18131821298 - 15110965818);
+        split.RamPct.Should().BeApproximately(16.0, 0.1);
+
+        var model = new RunningModel { Name = "g", Size = 18131821298, SizeVram = 15110965818, ContextLength = 32768 };
+        var lines = ModelDetail.Build(model, "opencoti", null, props, null, null, null).Lines();
+        lines[0].Text.Should().Be("VRAM 14.7 GB (84%) · RAM 2.8 GB (16%) · 84 MB pinned · not spilled · engine buffers 16.9 GB · token embedding on CPU");
+    }
 }
