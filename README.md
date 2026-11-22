@@ -1558,11 +1558,14 @@ osync mv qwen2 qwen2-7b:dev
 v1.4.10
 
 **New**
-- **psmonitor shows how much of each model is in VRAM and how much in RAM**: the `Size (VRAM)` column, which showed the server's total and a share only when it was below 100%, is now a `VRAM` and a `RAM` column (`21.9 GB` and `1.1 GB 5%`). On xOllama with opencoti they are what the OS charges the engine process, dedicated GPU memory and the shared system memory the GPU maps for it, so a model a Vulkan card keeps partly in system RAM (larger than the card's VRAM) shows it, in red; before, its whole size was shown as in VRAM. The VRAM and RAM graphs use the same figures
+- **psmonitor shows how much of each model is in VRAM and how much in RAM**: the `Size (VRAM)` column, which showed the server's total and a share only when it was below 100%, is now a `VRAM` and a `RAM` column (`21.9 GB` and `1.1 GB 5%`). On xOllama with opencoti they are what the OS charges the engine process, dedicated GPU memory and the shared system memory the GPU maps for it, so a model a Vulkan card keeps partly in system RAM (larger than the card's VRAM) shows it, in red; before, its whole size was shown as in VRAM. Weights the engine kept on the CPU (such as the token embedding) are counted in RAM too. The VRAM and RAM graphs use the same figures
 - **psmonitor model details**: `↑/↓` selects a loaded model and opens a box of up to five lines under the table with its memory (VRAM, RAM, GPUs, pinned, spilled), KV cache (types, estimated size, cells used and free, rolling window), slots (busy, live and elastic maximum, prompt progress), MTP / drafter (state, draft length, acceptance rate) and engine features (DCA, PolyKV pools, prompt cache, sampling, think budget); `Esc` closes it. The refresh interval moved from `↑/↓` to `+/-`; `Esc` still quits when no model is selected
 
 **Fixed**
 - **psmonitor's status bar wrapped onto a second line in a narrow window**
+
+**CI**
+- Integration tests read the GitHub releases API with the job's token, so `osync upgrade --check` no longer fails on the shared unauthenticated rate limit
 
 v1.4.9
 
