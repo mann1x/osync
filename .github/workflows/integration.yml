@@ -45,6 +45,10 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   # osync sends it on its own huggingface.co requests (tag lookups); empty when the secret is not set
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  # osync upgrade reads the GitHub releases API: unauthenticated it gets 60 requests an hour per IP, shared by every
+  # job on the runner's address, and the upgrade scenarios failed with "403 rate limit exceeded". osync sends
+  # GITHUB_TOKEN when it is set (read-only here: contents: read)
+  GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   integration:
