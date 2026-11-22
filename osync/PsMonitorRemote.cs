@@ -43,6 +43,54 @@ public partial class PsMonitorUI
     private readonly RateAverage _tpsAverage = new(TimeSpan.FromSeconds(30));
     private RemoteGraphMode _remoteGraphMode = RemoteGraphMode.Vram;
     private int _remoteGpu;  // index into the telemetry devices, for the GPU graphs (G cycles)
+    private volatile string? _selectedModel;  // the loaded model whose details show under the table (Up/Down, Esc)
+    private const int MaxDetailLines = 5;
+
+    /// <summary>Selects a loaded model (null: none) and has its details read now rather than at the next refresh.</summary>
+    private void SelectModel(string? name)
+    {
+        _selectedModel = name;
+        _remoteMonitor.Select(name, () => _needsRedraw = true);
+    }
+
+    /// <summary>Up/Down: the previous or next loaded model; from no selection Down picks the first and Up the last.</summary>
+    private void MoveSelection(int step)
+    {
+        var models = _loadedModels;
+        if (models is not { Count: > 0 }) { SelectModel(null); return; }
+        SelectModel(models[NextSelection(models.Select(m => m.Name ?? "").ToList(), _selectedModel, step)].Name);
+    }
+
+    /// <summary>The index Up/Down moves to in <paramref name="names"/>; stays at either end.</summary>
+    internal static int NextSelection(IReadOnlyList<string> names, string? selected, int step)
+    {
+        var at = selected == null ? -1 : names.ToList().FindIndex(n => string.Equals(n, selected, StringComparison.OrdinalIgnoreCase));
+        if (at < 0) return step > 0 ? 0 : names.Count - 1;
+        return Math.Clamp(at + step, 0, names.Count - 1);
+    }
+
+    /// <summary>The selected model's details, from the last snapshot; null when nothing is selected or it was unloaded.</summary>
+    private ModelDetail? SelectedDetail()
+    {
+        var name = _selectedModel;
+        var data = _remoteData;
+        if (name == null || data == null || _loadedModels == null) return null;
+        var model = _loadedModels.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (model == null) return null;
+        data.Engine.TryGetValue(name, out var stats);
+        data.Placements.TryGetValue(name, out var placement);
+        return ModelDetail.Build(model, stats?.Engine ?? "", placement, stats?.Props, stats?.Kv, stats?.Slots, data.SelectedShow);
+    }
+
+    /// <summary>A model's memory in and outside VRAM: the OS's measurement when the engine reports one, else the server's figures.</summary>
+    private MemorySplit ModelMemory(RunningModel model)
+    {
+        RemoteEngineStats? stats = null;
+        RemoteModelPlacement? placement = null;
+        _remoteData?.Engine.TryGetValue(model.Name ?? "", out stats);
+        _remoteData?.Placements.TryGetValue(model.Name ?? "", out placement);
+        return MemorySplit.FromProcess(stats?.Process, model.Size, model.SizeVram) ?? MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes);
+    }
 
     private void InitRemoteGraphs()
     {
@@ -134,12 +182,16 @@ public partial class PsMonitorUI
             _ollamaConnected = snapshot.Connected;
             _ollamaVersion = snapshot.Version;
             _loadedModels = snapshot.Connected ? snapshot.Models : null;
+            // A selected model that was unloaded closes its box
+            if (_selectedModel is { } sel && _loadedModels?.Any(m => string.Equals(m.Name, sel, StringComparison.OrdinalIgnoreCase)) != true)
+                SelectModel(null);
 
             if (snapshot.Connected)
             {
                 const double GiB = 1024.0 * 1024 * 1024;
-                _graphs["r_vram"].AddDataPoint(snapshot.Models.Sum(m => m.SizeVram) / GiB, "green");
-                _graphs["r_ram"].AddDataPoint(snapshot.Models.Sum(m => Math.Max(0, m.Size - m.SizeVram)) / GiB, "yellow");
+                var split = snapshot.Models.Select(ModelMemory).ToList();
+                _graphs["r_vram"].AddDataPoint(split.Sum(m => m.Vram) / GiB, "green");
+                _graphs["r_ram"].AddDataPoint(split.Sum(m => m.Ram) / GiB, "yellow");
                 var tokensPerSecond = snapshot.Engine.Values.Sum(e => e.TokensPerSecond ?? 0);
                 _graphs["r_tps"].AddDataPoint(tokensPerSecond, "aqua");
                 _tpsAverage.Add(DateTime.UtcNow, tokensPerSecond);
@@ -201,7 +253,10 @@ public partial class PsMonitorUI
             var systemRows = system == null ? 0 : (system.Host != null ? 1 : 0) + (system.Server != null ? 1 : 0);
             // System panel (2 + rows), devices table (4 + rows, when any), graph panels (graph + 3 each), models table
             // (2 title lines + 4 + rows), status bar
-            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + (2 + 4 + modelRows) + 1;
+            var detail = SelectedDetail();
+            var detailLines = detail?.Lines() ?? new List<(string Label, string Text)>();
+            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + (2 + 4 + modelRows) + 1 +
+                              (detail != null ? 2 + detailLines.Count : 0);
             var room = height - fixedHeight;
             // The second graph only when both keep at least 3 rows, and only with a reading to draw
             var second = _secondGraphMode is { } sm && sm != _remoteGraphMode && RemoteGraphModes().Contains(sm) && room >= 2 * (3 + 3)
@@ -230,6 +285,7 @@ public partial class PsMonitorUI
             RenderRemoteGraph(console, width, _remoteGraphMode, main: true);
             if (second is { } secondMode) RenderRemoteGraph(console, width, secondMode, main: false);
             RenderRemoteModels(console, width);
+            if (detail != null) RenderModelDetail(console, detail, detailLines, width);
 
             var lines = frame.ToString().Replace("\r", "").Split('\n');
             var output = new StringBuilder();
@@ -437,7 +493,7 @@ public partial class PsMonitorUI
             case RemoteGraphMode.Ram:
                 key = "r_ram";
                 label = "Loaded models, memory outside VRAM";
-                value = FormatGiB(models.Sum(m => Math.Max(0, m.Size - m.SizeVram)));
+                value = FormatGiB(models.Sum(m => ModelMemory(m).Ram));
                 break;
             case RemoteGraphMode.Tokens:
                 key = "r_tps";
@@ -499,7 +555,7 @@ public partial class PsMonitorUI
             default:
                 key = "r_vram";
                 label = "Loaded models, VRAM";
-                var vram = models.Sum(m => m.SizeVram);
+                var vram = models.Sum(m => ModelMemory(m).Vram);
                 var total = _remoteData?.Devices?.Where(d => !d.Integrated && d.Backend.Length > 0).Sum(d => (long)(d.TotalMemory ?? 0)) ?? 0;
                 value = total > 0 ? $"{FormatGiB(vram)}/{FormatGiB(total)}" : FormatGiB(vram);
                 break;
@@ -553,8 +609,8 @@ public partial class PsMonitorUI
             .Expand();
 
         // Column widths are content widths: each column adds 2 of padding and 1 of border, plus the last border
-        var fixedColumns = new[] { 12, 8, 6, 8, 14, 7 }.Sum() + 9 + (xollama ? 5 + 7 : 0);
-        var columnCount = 1 + 7 + (xollama ? 2 : 0);
+        var fixedColumns = new[] { 12, 8, 6, 8, 8, 10, 7 }.Sum() + 9 + (xollama ? 5 + 7 : 0);
+        var columnCount = 1 + 8 + (xollama ? 2 : 0);
         var nameWidth = width - fixedColumns - 3 * columnCount - 1;
         // The model name matters more than its ID: the ID goes first when the name would not fit
         var showId = nameWidth >= 30;
@@ -565,7 +621,8 @@ public partial class PsMonitorUI
         table.AddColumn(new TableColumn("[bold]Param[/]").Centered().Width(8))
             .AddColumn(new TableColumn("[bold]Quant[/]").Centered().Width(6))
             .AddColumn(new TableColumn(xollama ? "[bold]Engine[/]" : "[bold]Runner[/]").Centered().Width(8))
-            .AddColumn(new TableColumn("[bold]Size (VRAM)[/]").Centered().Width(14).NoWrap())
+            .AddColumn(new TableColumn("[bold]VRAM[/]").RightAligned().Width(8).NoWrap())
+            .AddColumn(new TableColumn("[bold]RAM[/]").RightAligned().Width(10).NoWrap())
             .AddColumn(new TableColumn("[bold]Context[/]").Centered().Width(7));
         if (xollama)
         {
@@ -583,27 +640,20 @@ public partial class PsMonitorUI
                 RemoteEngineStats? stats = null;
                 data?.Engine.TryGetValue(model.Name ?? "", out stats);
 
-                string size;
-                if (model.Size > 0 && model.SizeVram < model.Size)
-                {
-                    var vramPct = model.SizeVram * 100.0 / model.Size;
-                    var vramColor = vramPct < 50 ? "yellow" : vramPct < 80 ? "lime" : "green";
-                    size = $"[{vramColor}]{FormatBytes(model.Size)}[/] [dim]({vramPct:F0}%)[/]";
-                }
-                else
-                {
-                    size = $"[green]{FormatBytes(model.Size)}[/]";
-                }
+                var (vramCell, ramCell) = MemoryCells(ModelMemory(model), stats?.Process?.IsSpilled == true);
 
                 var runner = xollama ? stats?.Engine ?? "" : model.Runner ?? "";
                 var ctx = model.ContextLength > 0 ? model.ContextLength.ToString() : model.Details?.Format == "media" ? "media" : "N/A";
                 var row = new List<string>
                 {
-                    $"[white]{Markup.Escape(name)}[/]",
+                    string.Equals(model.Name, _selectedModel, StringComparison.OrdinalIgnoreCase)
+                        ? $"[black on aqua]{Markup.Escape(name)}[/]"
+                        : $"[white]{Markup.Escape(name)}[/]",
                     $"[white]{Markup.Escape(model.Details?.ParameterSize is { Length: > 0 } p ? p : "N/A")}[/]",
                     $"[white]{Markup.Escape(model.Details?.QuantizationLevel is { Length: > 0 } q ? q : "-")}[/]",
                     $"[white]{Markup.Escape(runner.Length > 0 ? runner : "-")}[/]",
-                    size,
+                    vramCell,
+                    ramCell,
                     $"[white]{ctx}[/]",
                 };
                 if (xollama)
@@ -625,6 +675,39 @@ public partial class PsMonitorUI
         }
 
         console.Write(table);
+    }
+
+    /// <summary>
+    /// The VRAM and RAM cells of a model's row, as `ollama ps` splits it: the size in VRAM, and the size and share in
+    /// system RAM ("2.4 GB 15%"), yellow when some is in RAM and red when the driver spilled VRAM to RAM.
+    /// </summary>
+    internal static (string Vram, string Ram) MemoryCells(MemorySplit split, bool spilled)
+    {
+        var vram = $"[green]{Markup.Escape(ModelDetail.Gb(split.Vram))}[/]";
+        if (split.Ram <= 0)
+            return (vram, "[dim]0%[/]");
+        var pct = split.RamPct < 1 ? "<1%" : $"{split.RamPct:F0}%";
+        var color = spilled ? "red" : split.RamPct >= 1 ? "yellow" : "dim";
+        return (vram, $"[{color}]{Markup.Escape(ModelDetail.Gb(split.Ram))} {pct}[/]");
+    }
+
+    /// <summary>The selected model's details: at most five lines under the models table, each cut to the width.</summary>
+    private static void RenderModelDetail(IAnsiConsole console, ModelDetail detail, List<(string Label, string Text)> lines, int width)
+    {
+        var labelWidth = Math.Max(6, lines.Max(l => l.Label.Length));
+        var room = Math.Max(10, width - 4 - labelWidth - 1);
+        var body = string.Join("\n", lines.Select(l =>
+        {
+            var text = l.Text.Length > room ? l.Text[..(room - 1)] + "…" : l.Text;
+            var escaped = Markup.Escape(text);
+            if (text.Contains("SPILLED")) escaped = escaped.Replace("SPILLED", "[red bold]SPILLED[/]");
+            return $"[aqua]{Markup.Escape(l.Label.PadRight(labelWidth))}[/] {escaped}";
+        }));
+        console.Write(new Panel(new Markup(body))
+            .Header($"[black on aqua] {Markup.Escape(detail.Name)} [/][dim]──(Up/Down=Model, Esc=Close)[/]")
+            .Border(BoxBorder.Rounded)
+            .BorderColor(Color.Aqua)
+            .Expand());
     }
 
     private static string FormatGiB(long bytes) => $"{bytes / 1073741824.0:F1} GB";

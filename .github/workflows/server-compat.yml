@@ -2,7 +2,8 @@ name: Server compatibility (reusable)
 
 # Checks one server implementation for a new *stable* release (pre-releases are ignored) and, only when
 # there is an unhandled one, runs the integration suite against it:
-#   pass -> PR into dev bumping .github/<server>-version
+#   pass -> PR into dev bumping .github/<server>-version, closing older bump PRs of that server; with the
+#           BUMP_TOKEN secret its CI starts on its own and it auto-merges when the required checks pass
 #   fail -> issue with a link to the run (no re-test while that issue is open)
 on:
   workflow_call:
@@ -13,6 +14,8 @@ on:
         required: true
     secrets:
       HF_TOKEN:
+        required: false
+      BUMP_TOKEN:
         required: false
 
 permissions:
@@ -78,7 +81,11 @@ jobs:
       pull-requests: write
       issues: write
     env:
-      GH_TOKEN: ${{ github.token }}
+      # A PR opened with GITHUB_TOKEN gets a CI run that waits for a maintainer's approval, so its required
+      # checks never report: BUMP_TOKEN (fine-grained PAT, contents + pull requests read/write on this
+      # repository) opens it as a real account, its CI starts on its own and it auto-merges when green
+      GH_TOKEN: ${{ secrets.BUMP_TOKEN || github.token }}
+      HAS_BUMP_TOKEN: ${{ secrets.BUMP_TOKEN != '' }}
       SERVER: ${{ inputs.server }}
       LATEST: ${{ needs.check.outputs.latest }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -86,6 +93,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: dev
+          token: ${{ secrets.BUMP_TOKEN || github.token }}
 
       - name: Open bump PR
         if: needs.test.result == 'success'
@@ -97,10 +105,26 @@ jobs:
           git commit -am "Test against $SERVER $LATEST"
           git push -f origin "ci/$SERVER-$LATEST"
           body="The integration suite passed against $SERVER $LATEST: $RUN_URL"
-          if ! gh pr create --base dev --head "ci/$SERVER-$LATEST" --title "Test against $SERVER $LATEST" --body "$body"; then
+          if ! url="$(gh pr create --base dev --head "ci/$SERVER-$LATEST" --title "Test against $SERVER $LATEST" --body "$body")"; then
             # Repositories can forbid Actions from creating PRs; fall back to an issue
             gh issue create --title "$SERVER $LATEST passes: bump .github/$SERVER-version" \
               --body "$body. Branch ci/$SERVER-$LATEST contains the bump."
+            exit 0
+          fi
+          pr="${url##*/}"
+          # Older bump PRs of this server are superseded
+          gh pr list --state open --base dev --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"ci/$SERVER-\")) | select(.number != $pr) | \"\(.number) \(.headRefName)\"" |
+          while read -r old ref; do
+            gh pr close "$old" --comment "Superseded by #$pr ($SERVER $LATEST)."
+            git push origin --delete "$ref" || true
+          done
+          if [ "$HAS_BUMP_TOKEN" = true ]; then
+            # Only the pin file changes and the suite already passed against $LATEST: merge when the checks pass
+            gh pr merge "$pr" --auto --merge ||
+              echo "::warning::Could not enable auto-merge on #$pr (is \"Allow auto-merge\" on in the repository settings?)"
+          else
+            echo "::warning::No BUMP_TOKEN secret: the CI run of #$pr waits for a maintainer to approve it"
           fi
 
       - name: Open failure issue

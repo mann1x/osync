@@ -49,3 +49,17 @@ Feature: psmonitor
     And the output contains "Q4_0"
     And the output does not contain "Remote "
     And the output does not contain "GPU Status"
+
+  # Up/Down select a loaded model and open its details under the table; Esc closes them, and quits only when
+  # nothing is selected. The table splits each model into VRAM and RAM
+  @remote1
+  Scenario: Selecting a loaded model opens its details
+    Given a test model "runner" on remote1
+    And the model "{runner}" is loaded on remote1
+    When I open psmonitor on remote1 as a remote server in a terminal and press "wait:Q4_0 Down wait:Esc=Close Esc text:q"
+    Then the command succeeds
+    And the output contains "VRAM"
+    And the output contains "RAM"
+    And the output contains "Esc=Close"
+    And the output contains "Memory"
+    And the output does not contain "Size (VRAM)"

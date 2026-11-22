@@ -19,6 +19,7 @@ jobs:
       server: ollama
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      BUMP_TOKEN: ${{ secrets.BUMP_TOKEN }}
 
   xollama:
     uses: ./.github/workflows/server-compat.yml
@@ -26,3 +27,4 @@ jobs:
       server: xollama
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      BUMP_TOKEN: ${{ secrets.BUMP_TOKEN }}
