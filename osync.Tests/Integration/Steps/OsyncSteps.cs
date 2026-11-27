@@ -75,6 +75,20 @@ public sealed class OsyncSteps
         _output.WriteLine(result.ToString());
     }
 
+    [When("I open psmonitor on {word} with {word} as secondary in a terminal and press {string}")]
+    public async Task WhenIOpenPsMonitorWithSecondary(string server, string secondary, string keys)
+    {
+        var environment = Env();
+        environment["OSYNC_PSMONITOR_REMOTE"] = "1";
+        var url = TestEnvironment.ServerUrl(server) ?? throw new InvalidOperationException($"Server '{server}' is not configured");
+        var secondaryUrl = TestEnvironment.ServerUrl(secondary) ?? throw new InvalidOperationException($"Server '{secondary}' is not configured");
+        // two -d, as a user types it: the second one is the secondary server
+        var result = await OsyncCli.RunInTerminalAsync($"psmonitor -d {url} -d {secondaryUrl} -L 1", TerminalKeys.Parse(_state.Resolve(keys)),
+            readyText: "Expires", environment: environment);
+        _state.LastResult = result;
+        _output.WriteLine(result.ToString());
+    }
+
     [When("I open psmonitor on {word} as a local server in a terminal and press {string}")]
     public async Task WhenIOpenPsMonitorAsLocal(string server, string keys)
     {

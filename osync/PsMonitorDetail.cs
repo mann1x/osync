@@ -96,6 +96,9 @@ internal sealed record ModelDetail
     public MemorySplit ServerMemory { get; init; }
     /// <summary>GPU memory of the engine process as the OS sees it (opencoti props gpu_process_memory, Windows).</summary>
     public GpuProcessMemory? Process { get; init; }
+    /// <summary>/api/ps size and size_vram as the server sent them: the engine's buffers, all of them and those on a GPU.</summary>
+    public long BuffersTotal { get; init; }
+    public long BuffersVram { get; init; }
 
     // Model
     public string Family { get; init; } = "";
@@ -119,6 +122,8 @@ internal sealed record ModelDetail
     public int? KvLayers { get; init; }
     public int? LayersSpilling { get; init; }
     public bool? FullyResident { get; init; }
+    /// <summary>KV cells kept on the GPU (opencoti kv.effective.n_cells_resident) of <see cref="Cells"/>.</summary>
+    public long? CellsResident { get; init; }
     public string? ResidencyMode { get; init; }
     public bool? WindowEngaged { get; init; }
     /// <summary>The KV cache's size, worked out from its type, cells and the model's attention shape; null when unknown (KVarN).</summary>
@@ -143,6 +148,10 @@ internal sealed record ModelDetail
     public string? DraftModel { get; init; }
     /// <summary>Where the engine put the token embedding (opencoti speculative.token_embd.device), when not on a GPU.</summary>
     public string? TokenEmbdDevice { get; init; }
+    /// <summary>Why the engine put the token embedding on the CPU ("model 16.1 GiB vs 15.1 GiB free ... exceeds 70% fit bound").</summary>
+    public string? TokenEmbdReason { get; init; }
+    /// <summary>The drafter's own weights (opencoti speculative.drafter.head_mib).</summary>
+    public double? DrafterHeadMib { get; init; }
     public int? DraftNMax { get; init; }
     public double? DraftAcceptance { get; init; }
     /// <summary>The last generation speed of the slots (opencoti tps_ewma; an idle slot keeps its last value).</summary>
@@ -173,6 +182,8 @@ internal sealed record ModelDetail
             Name = model.Name ?? "",
             Engine = engine.Length > 0 ? engine : model.Runner ?? "",
             Memory = MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes),
+            BuffersTotal = Math.Max(0, model.Size),
+            BuffersVram = Math.Max(0, model.SizeVram),
             ServerMemory = MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes),
             Gpus = placement?.Gpus ?? new List<RemoteModelGpu>(),
             KvHostBytes = placement?.KvHostBytes,
@@ -243,6 +254,7 @@ internal sealed record ModelDetail
                             TypeKTail = Str(e, "type_k_tail"), TypeVTail = Str(e, "type_v_tail"),
                             LayersSpilling = (int?)Int(e, "n_layers_spilling"),
                             FullyResident = Bool(e, "fully_resident"),
+                            CellsResident = Int(e, "n_cells_resident"),
                         };
                     }
                 }
@@ -265,7 +277,7 @@ internal sealed record ModelDetail
                         : "";
                     var drafter = Obj(spec, "drafter");
                     if (Obj(spec, "token_embd") is { } te && Str(te, "device") is { } dev && dev.Equals("CPU", StringComparison.OrdinalIgnoreCase))
-                        d = d with { TokenEmbdDevice = dev };
+                        d = d with { TokenEmbdDevice = dev, TokenEmbdReason = Str(te, "reason") };
                     d = d with
                     {
                         SpecTypes = types.Length > 0 ? types : d.SpecTypes ?? "none",
@@ -273,6 +285,7 @@ internal sealed record ModelDetail
                         DraftModel = d.DraftModel ?? (Str(spec, "draft_model") is { Length: > 0 } dm ? ShortModelPath(dm) : null),
                         DrafterState = drafter is { } dr1 ? Str(dr1, "state") ?? d.DrafterState : d.DrafterState,
                         DrafterKind = drafter is { } dr2 ? Str(dr2, "kind") ?? d.DrafterKind : d.DrafterKind,
+                        DrafterHeadMib = drafter is { } dr3 ? Dbl(dr3, "head_mib") : null,
                     };
                 }
             }
@@ -439,7 +452,7 @@ internal sealed record ModelDetail
 
     // ---- formatting (pure, unit-tested) ----
 
-    /// <summary>The box's lines, at most five, each as (label, text): plain text, escaped and colored by the renderer.</summary>
+    /// <summary>The box's lines, at most six, each as (label, text): plain text, escaped and colored by the renderer.</summary>
     public List<(string Label, string Text)> Lines()
     {
         var lines = new List<(string, string)>();
@@ -455,17 +468,20 @@ internal sealed record ModelDetail
             mem.Add(Process != null
                 ? "on " + string.Join(", ", Gpus.Select(g => $"{g.Backend}{g.Id}"))
                 : string.Join(", ", Gpus.Select(g => $"{g.Backend}{g.Id} {Gb((long)g.Vram)}")));
-        if (KvHostBytes is > 0)
+        // with the engine read, the KV tail and pinned buffers are on the Fit line (in RAM by design)
+        if (KvHostBytes is > 0 && !EngineRead)
             mem.Add($"KV tail in RAM {Gb((long)KvHostBytes.Value)}");
         if (Process is { } proc)
         {
-            if (proc.PinnedMib is > 0 and var pin) mem.Add($"{Gb(Mib(pin))} pinned");
+            if (proc.PinnedMib is > 0 and var pin && !EngineRead) mem.Add($"{Gb(Mib(pin))} pinned");
             mem.Add(proc.OffCardMib is > 0 and var off ? $"SPILLED {Gb(Mib(off))} to RAM" : proc.Spilled == true ? "SPILLED to RAM" : "not spilled");
             mem.Add($"engine buffers {Gb(ServerMemory.Total)}");
         }
-        if (TokenEmbdDevice != null)
+        if (TokenEmbdDevice != null && !EngineRead)
             mem.Add("token embedding on CPU");
         lines.Add(("Memory", string.Join(" · ", mem)));
+        if (EngineRead && FitText() is { } fit)
+            lines.Add(("Fit", fit));
 
         if (!EngineRead)
         {
@@ -484,7 +500,7 @@ internal sealed record ModelDetail
                 lines.Add(("MTP", Spec()));
             if (ThinkBudget != null)
                 lines.Add(("Think", ThinkText()));
-            return lines.Take(5).ToList();
+            return lines.Take(MaxLines).ToList();
         }
 
         // KV cache
@@ -534,8 +550,70 @@ internal sealed record ModelDetail
         if (Sampling is { Length: > 0 } smp && smp != "idle") eng.Add($"sampling on {smp}");
         if (ThinkBudget != null) eng.Add("think " + ThinkText());
         lines.Add((Engine.Length > 0 ? Engine : "Engine", eng.Count > 0 ? string.Join(" · ", eng) : "-"));
-        return lines.Take(5).ToList();
+        return lines.Take(MaxLines).ToList();
     }
+
+    /// <summary>The most lines the box shows.</summary>
+    public const int MaxLines = 6;
+
+    /// <summary>
+    /// What was meant for VRAM and how much of it is there: the engine's buffers (weights, KV, compute) and the KV
+    /// cache's layers on the GPU, then what the engine or the driver had to put in system RAM because it did not fit
+    /// (CPU buffers, KV layers spilling, the token embedding, a driver spill), apart from what is in RAM by design
+    /// (the KV window's tail, pinned staging buffers, the prompt cache). Null when the engine reported none of it.
+    /// </summary>
+    public string? FitText()
+    {
+        var parts = new List<string>();
+        var pushed = new List<string>();
+
+        // The engine's buffers: on a full offload xOllama reports size = size_vram (the host buffers are not in it)
+        if (BuffersTotal > 0)
+        {
+            var onCpu = Math.Max(0, BuffersTotal - BuffersVram);
+            var pct = BuffersVram * 100.0 / BuffersTotal;
+            parts.Add($"buffers {Pct(pct)} in VRAM");
+            if (onCpu > 0) pushed.Add($"{Gb(onCpu)} of buffers on CPU");
+        }
+
+        // The KV cache: its layers (or cells) on the GPU
+        if (KvLayers is > 0 && LayersSpilling is { } spill)
+        {
+            var onGpu = Math.Max(0, KvLayers.Value - spill);
+            parts.Add($"KV {Pct(onGpu * 100.0 / KvLayers.Value)} in VRAM ({onGpu}/{KvLayers} layers)");
+            if (spill > 0) pushed.Add($"{spill} KV layers");
+        }
+        else if (Cells is > 0 && CellsResident is { } resident)
+        {
+            parts.Add($"KV {Pct(Math.Min(resident, Cells.Value) * 100.0 / Cells.Value)} in VRAM");
+            if (resident < Cells) pushed.Add($"{Cells - resident} KV cells");
+        }
+        else if (FullyResident == true)
+        {
+            parts.Add("KV 100% in VRAM");
+        }
+
+        // The drafter (MTP head or draft model) lives with the model's buffers; it is named when it has weights of its own
+        if (DrafterHeadMib is > 0 and var head)
+            parts.Add($"drafter {Gb(Mib(head))}");
+
+        if (TokenEmbdDevice != null)
+            pushed.Add("token embedding" + (TokenEmbdReason is { Length: > 0 } why ? $" ({why})" : ""));
+        if (Process is { } proc && proc.IsSpilled)
+            pushed.Add(proc.OffCardMib is > 0 and var off ? $"driver SPILLED {Gb(Mib(off))}" : "driver SPILLED");
+
+        if (parts.Count == 0 && pushed.Count == 0) return null;
+        parts.Add(pushed.Count > 0 ? "didn't fit, in RAM: " + string.Join(", ", pushed) : "nothing pushed to RAM");
+
+        var byDesign = new List<string>();
+        if (KvHostBytes is > 0) byDesign.Add($"KV tail {Gb((long)KvHostBytes.Value)}");
+        if (Process?.PinnedMib is > 0 and var pin) byDesign.Add($"{Gb(Mib(pin))} pinned");
+        if (CacheRamMib is > 0) byDesign.Add($"prompt cache {Gb(Mib(CacheRamMib.Value))}");
+        if (byDesign.Count > 0) parts.Add("in RAM by design: " + string.Join(", ", byDesign));
+        return string.Join(" · ", parts);
+    }
+
+    private static string Pct(double pct) => pct >= 99.95 ? "100%" : pct > 99 ? ">99%" : pct < 1 && pct > 0 ? "<1%" : $"{pct:F0}%";
 
     private string Spec()
     {

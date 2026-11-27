@@ -168,6 +168,55 @@ internal sealed class RemoteServerMonitor
         _apiKey = apiKey;
     }
 
+    /// <summary>The server this monitor reads.</summary>
+    public string Url => _url;
+
+    /// <summary>
+    /// Unloads a model (psmonitor U): a generate request with keep_alive 0 and no prompt, as `ollama stop` does, on
+    /// Ollama and xOllama alike. An embedding-only model that refuses generate is unloaded through /api/embed.
+    /// Returns null on success, else the server's error.
+    /// </summary>
+    public async Task<string?> UnloadAsync(string model, CancellationToken cancellationToken = default)
+    {
+        async Task<(bool Ok, string Error)> PostAsync(string path, object body)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, $"{_url}/{path}")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json"),
+            };
+            if (_apiKey != null && _flavor == ServerFlavor.XOllama)
+                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+            using var response = await Http.SendAsync(request, cancellationToken);
+            var text = await response.Content.ReadAsStringAsync(cancellationToken);
+            return (response.IsSuccessStatusCode, response.IsSuccessStatusCode ? "" : ServerError(text, (int)response.StatusCode));
+        }
+
+        try
+        {
+            var (ok, error) = await PostAsync("api/generate", new { model, keep_alive = 0, stream = false });
+            if (ok) return null;
+            var (embedOk, _) = await PostAsync("api/embed", new { model, input = Array.Empty<string>(), keep_alive = 0 });
+            return embedOk ? null : error;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
+    /// <summary>The "error" field of a server's reply, else its status code.</summary>
+    internal static string ServerError(string body, int status)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String)
+                return e.GetString() ?? $"HTTP {status}";
+        }
+        catch { }
+        return $"HTTP {status}";
+    }
+
     /// <summary>Asks for a fresh device list on the next tick (R key), still at most one request at a time.</summary>
     public void RefreshDevicesSoon() => _devicesRequestedAt = DateTime.MinValue;
 

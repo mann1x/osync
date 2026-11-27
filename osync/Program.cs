@@ -307,11 +307,14 @@ namespace osync
         {
             // Server from -d, else the local server (XOLLAMA_HOST / OLLAMA_HOST / localhost:11434 or :22434)
             var ollamaHost = OllamaServer.ResolveHost(args.Destination);
+            // A second server (second -d, e.g. a plain Ollama next to xOllama): its models are listed after the first's
+            var secondaryHost = string.IsNullOrWhiteSpace(args.Secondary) ? null : NormalizeServerUrl(args.Secondary);
 
             bool isLocalHost = string.IsNullOrEmpty(args.Destination) ||
                               ollamaHost.Contains("localhost") ||
                               ollamaHost.Contains("127.0.0.1");
 
+            var failed = false;
             try
             {
                 // If running locally, show GPU and ollama process stats first
@@ -321,101 +324,15 @@ namespace osync
                     ShowOllamaProcessStats();
                 }
 
-                using var httpClient = new HttpClient
-                {
-                    BaseAddress = new Uri(ollamaHost),
-                    Timeout = Timeout.InfiniteTimeSpan
-                };
-
-                var response = await httpClient.GetAsync("/api/ps");
-                response.EnsureSuccessStatusCode();
-
-                var json = await response.Content.ReadAsStringAsync();
-                var status = JsonSerializer.Deserialize<ProcessStatusResponse>(json);
-
+                var models = await ReadLoadedModelsAsync(ollamaHost);
                 System.Console.WriteLine($"{Out.Heading("Server:")} {OllamaServer.DisplayName(OllamaServer.GetFlavor(ollamaHost))} at {Out.Server(ollamaHost)}");
-
-                if (status?.Models == null || status.Models.Count == 0)
-                {
-                    Console.WriteLine("No models currently loaded in memory");
-                    return;
-                }
-
-                // Get console width and calculate column widths dynamically
-                int consoleWidth = 120; // Default width
-                try
-                {
-                    consoleWidth = System.Console.WindowWidth;
-                    if (consoleWidth < 80) consoleWidth = 80;
-                    if (consoleWidth > 300) consoleWidth = 300;
-                }
-                catch { /* Use default if console width unavailable */ }
-
-                // Fixed column widths for ID, SIZE, VRAM USAGE, CONTEXT, UNTIL
-                int idWidth = 14;
-                int sizeWidth = 20;
-                int vramWidth = 15;
-                int contextWidth = 8;
-                int untilWidth = 20;
-                int spacing = 5; // spaces between columns
-                int fixedColumnsWidth = idWidth + sizeWidth + vramWidth + contextWidth + untilWidth + spacing;
-                int nameWidth = Math.Max(20, consoleWidth - fixedColumnsWidth - 1);
-
-                // When output is redirected (pipes, scripts) there is no console width to fit: never truncate names
-                if (System.Console.IsOutputRedirected)
-                {
-                    nameWidth = Math.Max(20, status.Models.Max(m => m.Name?.Length ?? 0));
-                    consoleWidth = nameWidth + fixedColumnsWidth + 1;
-                }
-
-                Console.WriteLine("");
-                System.Console.WriteLine(Out.Heading("Loaded Models:"));
-                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
-                System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)} {"ID".PadRight(idWidth)} {"SIZE".PadRight(sizeWidth)} {"VRAM USAGE".PadRight(vramWidth)} {"CONTEXT".PadRight(contextWidth)} {"UNTIL".PadRight(untilWidth)}"));
-                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
-
-                foreach (var model in status.Models)
-                {
-                    var name = TruncateStringEnd(model.Name, nameWidth);
-                    var id = GetShortDigest(model.Digest);
-                    var size = FormatModelSize(model.Size, model.Details?.ParameterSize);
-
-                    // Add percentage if VRAM usage is less than total size
-                    string vramUsage;
-                    if (model.SizeVram < model.Size && model.Size > 0)
-                    {
-                        double percentage = ((double)model.SizeVram / model.Size) * 100;
-                        vramUsage = $"{FormatBytes(model.SizeVram)} ({percentage:F0}%)";
-                    }
-                    else
-                    {
-                        vramUsage = FormatBytes(model.SizeVram);
-                    }
-
-                    // An xOllama media engine (image, speech, transcription, video) has no context
-                    var context = model.ContextLength > 0 ? model.ContextLength.ToString()
-                        : model.Details?.Format == "media" ? "media" : "N/A";
-                    var until = FormatUntil(model.ExpiresAt);
-
-                    // Partly offloaded to the CPU: warning color; fully in VRAM: success color
-                    bool fullyInVram = !(model.SizeVram < model.Size && model.Size > 0);
-                    System.Console.WriteLine(
-                        Out.Paint(name.PadRight(nameWidth), p => p.Text) + " " +
-                        Out.Paint(id.PadRight(idWidth), p => p.Id) + " " +
-                        Out.Paint(size.PadRight(sizeWidth), p => p.Size) + " " +
-                        Out.Paint(vramUsage.PadRight(vramWidth), p => fullyInVram ? p.Success : p.Warning) + " " +
-                        Out.Paint(context.PadRight(contextWidth), p => p.Params) + " " +
-                        Out.Muted(until.PadRight(untilWidth)));
-                }
-
-                System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
-                Console.WriteLine("");
+                PrintLoadedModels(models, "Loaded Models:");
             }
             catch (HttpRequestException ex)
             {
                 Out.Error($"Could not connect to Ollama server at {ollamaHost}");
                 Console.WriteLine($"Details: {ex.Message}");
-                System.Environment.Exit(1);
+                failed = true;
             }
             catch (Exception ex)
             {
@@ -424,8 +341,122 @@ namespace osync
                 {
                     Console.WriteLine($"Inner error: {ex.InnerException.Message}");
                 }
-                System.Environment.Exit(1);
+                failed = true;
             }
+
+            // The secondary is listed even when the first server is down: that is often the moment it matters
+            if (secondaryHost != null)
+                await PrintSecondaryAsync(secondaryHost);
+            if (failed) System.Environment.Exit(1);
+        }
+
+        private async Task PrintSecondaryAsync(string secondaryHost)
+        {
+            try
+            {
+                var models = await ReadLoadedModelsAsync(secondaryHost);
+                System.Console.WriteLine($"{Out.Heading("Secondary server:")} {OllamaServer.DisplayName(OllamaServer.GetFlavor(secondaryHost))} at {Out.Server(secondaryHost)}");
+                PrintLoadedModels(models, "Loaded Models (secondary):");
+            }
+            catch (Exception ex)
+            {
+                // A secondary that does not answer is reported, not fatal: the first server decides the exit code
+                Out.Warning($"Could not read the loaded models of the secondary server at {secondaryHost}: {ex.Message}");
+            }
+        }
+
+        /// <summary>The models loaded on a server (/api/ps, the same on Ollama and xOllama).</summary>
+        private static async Task<List<RunningModel>> ReadLoadedModelsAsync(string host)
+        {
+            using var httpClient = new HttpClient
+            {
+                BaseAddress = new Uri(host),
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+            var response = await httpClient.GetAsync("/api/ps");
+            response.EnsureSuccessStatusCode();
+            var json = await response.Content.ReadAsStringAsync();
+            return JsonSerializer.Deserialize<ProcessStatusResponse>(json)?.Models ?? new List<RunningModel>();
+        }
+
+        /// <summary>The table of loaded models `ps` prints for a server.</summary>
+        private void PrintLoadedModels(List<RunningModel> models, string heading)
+        {
+            if (models.Count == 0)
+            {
+                Console.WriteLine("No models currently loaded in memory");
+                return;
+            }
+
+            // Get console width and calculate column widths dynamically
+            int consoleWidth = 120; // Default width
+            try
+            {
+                consoleWidth = System.Console.WindowWidth;
+                if (consoleWidth < 80) consoleWidth = 80;
+                if (consoleWidth > 300) consoleWidth = 300;
+            }
+            catch { /* Use default if console width unavailable */ }
+
+            // Fixed column widths for ID, SIZE, VRAM USAGE, CONTEXT, UNTIL
+            int idWidth = 14;
+            int sizeWidth = 20;
+            int vramWidth = 15;
+            int contextWidth = 8;
+            int untilWidth = 20;
+            int spacing = 5; // spaces between columns
+            int fixedColumnsWidth = idWidth + sizeWidth + vramWidth + contextWidth + untilWidth + spacing;
+            int nameWidth = Math.Max(20, consoleWidth - fixedColumnsWidth - 1);
+
+            // When output is redirected (pipes, scripts) there is no console width to fit: never truncate names
+            if (System.Console.IsOutputRedirected)
+            {
+                nameWidth = Math.Max(20, models.Max(m => m.Name?.Length ?? 0));
+                consoleWidth = nameWidth + fixedColumnsWidth + 1;
+            }
+
+            Console.WriteLine("");
+            System.Console.WriteLine(Out.Heading(heading));
+            System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
+            System.Console.WriteLine(Out.Heading($"{"NAME".PadRight(nameWidth)} {"ID".PadRight(idWidth)} {"SIZE".PadRight(sizeWidth)} {"VRAM USAGE".PadRight(vramWidth)} {"CONTEXT".PadRight(contextWidth)} {"UNTIL".PadRight(untilWidth)}"));
+            System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
+
+            foreach (var model in models)
+            {
+                var name = TruncateStringEnd(model.Name, nameWidth);
+                var id = GetShortDigest(model.Digest);
+                var size = FormatModelSize(model.Size, model.Details?.ParameterSize);
+
+                // Add percentage if VRAM usage is less than total size
+                string vramUsage;
+                if (model.SizeVram < model.Size && model.Size > 0)
+                {
+                    double percentage = ((double)model.SizeVram / model.Size) * 100;
+                    vramUsage = $"{FormatBytes(model.SizeVram)} ({percentage:F0}%)";
+                }
+                else
+                {
+                    vramUsage = FormatBytes(model.SizeVram);
+                }
+
+                // An xOllama media engine (image, speech, transcription, video) has no context
+                var context = model.ContextLength > 0 ? model.ContextLength.ToString()
+                    : model.Details?.Format == "media" ? "media" : "N/A";
+                var until = FormatUntil(model.ExpiresAt);
+
+                // Partly offloaded to the CPU: warning color; fully in VRAM: success color
+                bool fullyInVram = !(model.SizeVram < model.Size && model.Size > 0);
+                System.Console.WriteLine(
+                    Out.Paint(name.PadRight(nameWidth), p => p.Text) + " " +
+                    Out.Paint(id.PadRight(idWidth), p => p.Id) + " " +
+                    Out.Paint(size.PadRight(sizeWidth), p => p.Size) + " " +
+                    Out.Paint(vramUsage.PadRight(vramWidth), p => fullyInVram ? p.Success : p.Warning) + " " +
+                    Out.Paint(context.PadRight(contextWidth), p => p.Params) + " " +
+                    Out.Muted(until.PadRight(untilWidth)));
+            }
+
+            System.Console.WriteLine(Out.Muted(new string('-', consoleWidth - 1)));
+            Console.WriteLine("");
         }
 
         [ArgActionMethod, ArgDescription("Real-time system and GPU monitoring (aliases: monitor, psm)"), ArgShortcut("monitor"), ArgShortcut("psm")]
@@ -452,7 +483,9 @@ namespace osync
 
             var destination = !string.IsNullOrEmpty(args.Destination) ? NormalizeServerUrl(args.Destination) : null;
 
-            var monitorUI = new PsMonitorUI(destination, refreshSeconds, historyMinutes);
+            var secondary = !string.IsNullOrWhiteSpace(args.Secondary) ? NormalizeServerUrl(args.Secondary) : null;
+
+            var monitorUI = new PsMonitorUI(destination, refreshSeconds, historyMinutes, secondary);
             monitorUI.Run();
         }
 
@@ -7021,6 +7054,36 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
             return prefix;
         }
 
+        /// <summary>
+        /// ps and psmonitor take a second server: "-d xollama:22434 -d ollama:11434" lists the models loaded on both.
+        /// PowerArgs rejects a repeated -d, so the second one becomes --secondary.
+        /// </summary>
+        internal static string[] SecondDestinationAsSecondary(string[] args)
+        {
+            if (args.Length < 3) return args;
+            string[] commands = { "ps", "psmonitor", "monitor", "psm" };
+            if (!commands.Contains(args[0].ToLowerInvariant())) return args;
+            var result = (string[])args.Clone();
+            // ps also takes its server as a positional argument ("ps gpu:22434 -d gpu:11434")
+            var seen = args[0].Equals("ps", StringComparison.OrdinalIgnoreCase) &&
+                       Enumerable.Range(1, args.Length - 1).Any(i => !args[i].StartsWith('-') && !args[i - 1].StartsWith('-'));
+            for (int i = 1; i < result.Length - 1; i++)
+            {
+                if (!string.Equals(result[i], "-d", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(result[i], "--destination", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(result[i], "-destination", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (seen)
+                {
+                    result[i] = "--secondary";
+                    break;
+                }
+                seen = true;
+                i++;  // its value
+            }
+            return result;
+        }
+
         static string[] ReorderArguments(string[] args)
         {
             if (args.Length < 2) return args;
@@ -7038,7 +7101,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
                 if (!args[i].StartsWith("-") && !args[i].StartsWith("http"))
                 {
                     // Skip if it's a value for a previous flag
-                    if (i > 1 && (args[i - 1] == "-d" || args[i - 1] == "-bt" || args[i - 1] == "-BufferSize" ||
+                    if (i > 1 && (args[i - 1] == "-d" || args[i - 1] == "-d2" || args[i - 1] == "--secondary" || args[i - 1] == "-bt" || args[i - 1] == "-BufferSize" ||
                                   args[i - 1] == "--format" || args[i - 1] == "--keepalive" ||
                                   args[i - 1] == "--dimensions" || args[i - 1] == "--think"))
                         continue;
@@ -7178,6 +7241,7 @@ Register-ArgumentCompleter -Native -CommandName osync -ScriptBlock {
 
                 // Handle shell wildcard expansion (Linux/macOS expand unquoted wildcards)
                 args = HandleShellExpansion(args);
+                args = SecondDestinationAsSecondary(args);
                 args = ReorderArguments(args);
 
                 // Check for global help request (osync -h without a command)
