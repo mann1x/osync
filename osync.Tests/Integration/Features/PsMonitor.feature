@@ -63,3 +63,30 @@ Feature: psmonitor
     And the output contains "Esc=Close"
     And the output contains "Memory"
     And the output does not contain "Size (VRAM)"
+
+  # A second -d lists the models loaded on another server (typically a plain Ollama next to xOllama, or the
+  # reverse) in a table of their own. Up/Down move through both tables; U unloads the selected model on the
+  # server it is loaded on, and only there
+  @remote1 @peer
+  Scenario: A secondary server's models are listed and U unloads the selected one there
+    Given a test model "first" on remote1
+    And the model "{first}" is loaded on remote1
+    And a test model "second" on peer
+    And the model "{second}" is loaded on peer
+    When I open psmonitor on remote1 with peer as secondary in a terminal and press "wait:Secondary wait:second:latest Down Down wait:Esc=Close text:u wait:Unloaded text:q"
+    Then the command succeeds
+    And the output contains "first:latest"
+    And the output contains "second:latest"
+    And the output contains "Secondary "
+    And the model "{second}" is not loaded on peer
+    And the model "{first}" is loaded on remote1
+
+  # U with nothing selected unloads nothing and says how to select a model
+  @remote1
+  Scenario: U without a selected model unloads nothing
+    Given a test model "runner" on remote1
+    And the model "{runner}" is loaded on remote1
+    When I open psmonitor on remote1 as a remote server in a terminal and press "wait:Q4_0 text:u wait:Select text:q"
+    Then the command succeeds
+    And the output contains "Select a model with Up/Down first"
+    And the model "{runner}" is loaded on remote1

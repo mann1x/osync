@@ -154,17 +154,18 @@ public class ModelDetailTests
     }
 
     [Fact]
-    public void Lines_OpencotiModel_FiveCompactLines()
+    public void Lines_OpencotiModel_SixCompactLines()
     {
         var lines = ModelDetail.Build(Qwen(), "opencoti", null, Json(Props), Json(Kv), Json(Slots), Json(Show)).Lines();
 
-        lines.Should().HaveCount(5);
-        lines.Select(l => l.Label).Should().Equal("Memory", "KV", "Slots", "MTP", "opencoti");
-        lines[0].Text.Should().StartWith("VRAM 21.9 GB (95%) · RAM 1.1 GB (5%)").And.Contain("not spilled").And.Contain("engine buffers 20.9 GB");
-        lines[1].Text.Should().Be("q8_0/q8_0 · ~4.2 GB · state 538 MB · 131072 cells, 26556 used, 8512 free · all in VRAM · window auto");
-        lines[2].Text.Should().Be("1 busy of 1 (max 4) · elastic: saturated, hold · prefill 26048/26560 (98%) · context 131072 of 262144");
-        lines[3].Text.Should().Be("draft-mtp (nextn, attached) · up to 4 tokens · 75% accepted");
-        lines[4].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 2.0 GB, 8 checkpoints · sampling on cpu · think medium (32768 tokens)");
+        lines.Should().HaveCount(6);
+        lines.Select(l => l.Label).Should().Equal("Memory", "Fit", "KV", "Slots", "MTP", "opencoti");
+        lines[0].Text.Should().Be("VRAM 21.9 GB (95%) · RAM 1.1 GB (5%) · not spilled · engine buffers 20.9 GB");
+        lines[1].Text.Should().Be("buffers 100% in VRAM · KV 100% in VRAM (16/16 layers) · nothing pushed to RAM · in RAM by design: 1.0 GB pinned, prompt cache 2.0 GB");
+        lines[2].Text.Should().Be("q8_0/q8_0 · ~4.2 GB · state 538 MB · 131072 cells, 26556 used, 8512 free · all in VRAM · window auto");
+        lines[3].Text.Should().Be("1 busy of 1 (max 4) · elastic: saturated, hold · prefill 26048/26560 (98%) · context 131072 of 262144");
+        lines[4].Text.Should().Be("draft-mtp (nextn, attached) · up to 4 tokens · 75% accepted");
+        lines[5].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 2.0 GB, 8 checkpoints · sampling on cpu · think medium (32768 tokens)");
     }
 
     [Fact]
@@ -255,10 +256,11 @@ public class ModelDetailTests
         d.KvBytes.Should().BeNull();
         var lines = d.Lines();
         lines[0].Text.Should().Be("VRAM 633 MB (100%) · RAM 0 MB (0%)");
-        lines[1].Text.Should().Be("8192 cells, 61 used, 8192 free · window auto");
-        lines[2].Text.Should().Be("0 busy of 1 · context 8192");
-        lines[3].Text.Should().Be("off");
-        lines[4].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 8.0 GB, 32 checkpoints");
+        lines[1].Text.Should().Be("buffers 100% in VRAM · nothing pushed to RAM · in RAM by design: prompt cache 8.0 GB");
+        lines[2].Text.Should().Be("8192 cells, 61 used, 8192 free · window auto");
+        lines[3].Text.Should().Be("0 busy of 1 · context 8192");
+        lines[4].Text.Should().Be("off");
+        lines[5].Text.Should().Be("DCA off · PolyKV pools off · prompt cache 8.0 GB, 32 checkpoints");
     }
 
     // ELEVEN2GO, 2026-11-21: gemma4 26B A4B with an attached assistant drafter on the 3090 (interleaved sliding
@@ -305,10 +307,46 @@ public class ModelDetailTests
         // 25 SWA layers × 8 heads × (256 + 256) over 4608 cells, 5 full layers × 2 heads × (512 + 512) over 32768, q8_0
         d.KvBytes.Should().Be((ulong)(25 * 8 * 512 * 34.0 / 32 * 4608 + 5 * 2 * 1024 * 34.0 / 32 * 32768));
         var lines = d.Lines();
-        lines[0].Text.Should().Be("VRAM 17.9 GB (95%) · RAM 988 MB (5%) · on CUDA0 · 902 MB pinned · not spilled · engine buffers 17.1 GB");
-        lines[1].Text.Should().Be("q8_0/q8_0 · ~818 MB · 32768 cells, 85 used, 32768 free · all in VRAM · window auto");
-        lines[2].Text.Should().Be("0 busy of 1 (max 4) · elastic: idle slot available · last 79.5 tok/s · context 32768 of 262144");
-        lines[3].Text.Should().Be("draft-assistant (assistant, attached) · gemma4-assistant 419.71M Q8_0 · up to 2 tokens · 54% accepted");
+        lines[0].Text.Should().Be("VRAM 17.9 GB (95%) · RAM 988 MB (5%) · on CUDA0 · not spilled · engine buffers 17.1 GB");
+        lines[1].Text.Should().Be("buffers 100% in VRAM · KV 100% in VRAM (5/5 layers) · drafter 432 MB · nothing pushed to RAM · in RAM by design: 902 MB pinned, prompt cache 2.0 GB");
+        lines[2].Text.Should().Be("q8_0/q8_0 · ~818 MB · 32768 cells, 85 used, 32768 free · all in VRAM · window auto");
+        lines[3].Text.Should().Be("0 busy of 1 (max 4) · elastic: idle slot available · last 79.5 tok/s · context 32768 of 262144");
+        lines[4].Text.Should().Be("draft-assistant (assistant, attached) · gemma4-assistant 419.71M Q8_0 · up to 2 tokens · 54% accepted");
+    }
+
+    [Fact]
+    public void Fit_KvLayersSpillingAndDriverSpillAreWhatDidNotFit()
+    {
+        var props = Json("""
+            {"opencoti":{"kv":{"effective":{"type_k":"q8_0","type_v":"q8_0","n_cells":65536,"n_cells_resident":49152,"n_layers_spilling":4,"fully_resident":false}},
+              "gpu_process_memory":{"observable":true,"dedicated_mib":15800,"shared_mib":4700,"pinned_mib":100,"off_card_mib":4608,"spilled":true}}}
+            """);
+        var kv = Json("""{"rolling_kv":{"residency_mode":"auto","engaged":true,"layers":16,"layers_spilling":4}}""");
+        var placement = new RemoteModelPlacement("q", 20L * GiB, 20L * GiB, new List<RemoteModelGpu>()) { KvHostBytes = 3UL << 30 };
+        var model = new RunningModel { Name = "q", Size = 20L * GiB, SizeVram = 20L * GiB, ContextLength = 65536 };
+        var fit = ModelDetail.Build(model, "opencoti", placement, props, kv, null, null).FitText();
+        fit.Should().Be("buffers 100% in VRAM · KV 75% in VRAM (12/16 layers) · didn't fit, in RAM: 4 KV layers, driver SPILLED 4.5 GB · in RAM by design: KV tail 3.0 GB, 100 MB pinned");
+    }
+
+    [Fact]
+    public void Fit_KvCellsWhenTheEngineReportsNoLayers()
+    {
+        var props = Json("""{"opencoti":{"kv":{"effective":{"n_cells":1000,"n_cells_resident":250}}}}""");
+        var model = new RunningModel { Name = "q", Size = 4L * GiB, SizeVram = 3L * GiB };
+        ModelDetail.Build(model, "opencoti", null, props, null, null, null).FitText()
+            .Should().Be("buffers 75% in VRAM · KV 25% in VRAM · didn't fit, in RAM: 1.0 GB of buffers on CPU, 750 KV cells");
+    }
+
+    [Fact]
+    public void NextSelection_MovesAcrossBothServers()
+    {
+        var models = new List<(bool, string)> { (false, "a:latest"), (false, "b:latest"), (true, "a:latest"), (true, "c:latest") };
+        PsMonitorUI.NextSelection(models, null, +1).Should().Be(0);
+        PsMonitorUI.NextSelection(models, null, -1).Should().Be(3);
+        // the same name on the other server is another model
+        PsMonitorUI.NextSelection(models, (false, "b:latest"), +1).Should().Be(2);
+        PsMonitorUI.NextSelection(models, (true, "a:latest"), -1).Should().Be(1);
+        PsMonitorUI.NextSelection(models, (true, "c:latest"), +1).Should().Be(3);
     }
 
     [Theory]
@@ -334,6 +372,9 @@ public class ModelDetailTests
 
         var model = new RunningModel { Name = "g", Size = 18131821298, SizeVram = 15110965818, ContextLength = 32768 };
         var lines = ModelDetail.Build(model, "opencoti", null, props, null, null, null).Lines();
-        lines[0].Text.Should().Be("VRAM 14.7 GB (84%) · RAM 2.8 GB (16%) · 84 MB pinned · not spilled · engine buffers 16.9 GB · token embedding on CPU");
+        lines[0].Text.Should().Be("VRAM 14.7 GB (84%) · RAM 2.8 GB (16%) · not spilled · engine buffers 16.9 GB");
+        // what was meant for the card and is not there: the buffers the engine kept on the CPU and why
+        lines[1].Label.Should().Be("Fit");
+        lines[1].Text.Should().Be("buffers 83% in VRAM · didn't fit, in RAM: 2.8 GB of buffers on CPU, token embedding (model 16.1 GiB vs 15.1 GiB free on vulkan:amd exceeds 70% fit bound) · in RAM by design: 84 MB pinned");
     }
 }

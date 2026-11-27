@@ -50,7 +50,7 @@ public partial class PsMonitorUI
     private const int MaxStoredDataPoints = 3600;  // Store up to 1 hour at 1s refresh (max history)
 
 
-    public PsMonitorUI(string? destination, int refreshIntervalSeconds, int historyMinutes)
+    public PsMonitorUI(string? destination, int refreshIntervalSeconds, int historyMinutes, string? secondary = null)
     {
         _destination = destination;
         _refreshIntervalSeconds = Math.Max(1, Math.Min(300, refreshIntervalSeconds));
@@ -64,6 +64,12 @@ public partial class PsMonitorUI
         _remote = Environment.GetEnvironmentVariable("OSYNC_PSMONITOR_REMOTE") == "1" ||
                   !RemoteServerMonitor.IsThisMachine(_ollamaHost);
         _remoteMonitor = new RemoteServerMonitor(_ollamaHost, XOllamaTweak.ApiKey());
+        // A second server (a plain Ollama next to xOllama, say): its loaded models are listed under the first's
+        if (!string.IsNullOrWhiteSpace(secondary))
+        {
+            _secondaryHost = secondary.TrimEnd('/');
+            _secondaryMonitor = new RemoteServerMonitor(_secondaryHost, XOllamaTweak.ApiKey());
+        }
         if (!_remote)
         {
             _systemMetrics = new SystemMetricsCollector();
@@ -269,6 +275,11 @@ public partial class PsMonitorUI
                 CycleRemoteGpu();
                 _needsRedraw = true;
                 break;
+
+            case ConsoleKey.U:
+                UnloadSelected();
+                _needsRedraw = true;
+                break;
         }
     }
 
@@ -280,8 +291,9 @@ public partial class PsMonitorUI
             var now = DateTime.UtcNow;
             var elapsed = (now - lastCollection).TotalSeconds;
 
-            if (!_isPaused && elapsed >= _refreshIntervalSeconds)
+            if (_collectNow || (!_isPaused && elapsed >= _refreshIntervalSeconds))
             {
+                _collectNow = false;
                 CollectDataAsync().Wait();
                 _needsRedraw = true;
                 lastCollection = now;
@@ -300,6 +312,7 @@ public partial class PsMonitorUI
                 "[yellow]Q[/]            Quit monitor (Esc too, when no model is selected)\n" +
                 "[yellow]Up/Down[/]      Select a loaded model: its details open under the table\n" +
                 "[yellow]Esc[/]          Close the details\n" +
+                "[yellow]U[/]            Unload the selected model (on the server it is loaded on)\n" +
                 "[yellow]P[/]            Pause/Resume updates\n" +
                 "[yellow]H[/]            Show this help\n" +
                 "[yellow]Left/Right[/]   Adjust graph history (+/- 1 min)\n" +
@@ -309,6 +322,9 @@ public partial class PsMonitorUI
                 "[yellow]G[/]            Pick the GPU the GPU graphs show\n" +
                 "[yellow]O[/]            Show or hide the second graph (server CPU and memory)\n" +
                 "[yellow]R[/]            Re-read the server's GPU list (xOllama without telemetry)\n\n" +
+                (_secondaryHost != null
+                    ? $"[dim]Secondary server {Markup.Escape(_secondaryHost)}: its loaded models are listed under the first server's.[/]\n"
+                    : "[dim]A second -d (psmonitor -d xollama:22434 -d ollama:11434) lists the models loaded on another server too.[/]\n") +
                 (_remote
                     ? "[dim]Remote server: only what its API reports is shown, nothing from this machine.[/]\n\n"
                     : "[dim]Server on this machine: its API, plus this machine's readings where the server sends none.[/]\n\n") +
@@ -446,7 +462,9 @@ public partial class PsMonitorUI
 
                 // Build left part (plain text for length calculation)
                 var pauseText = _isPaused ? "PAUSED" : "RUNNING";
-                var leftText = $" {pauseText} | Refresh: {_refreshIntervalSeconds}s | History: {_historyMinutes}m | Q=Quit P=Pause H=Help Up/Down=Model";
+                var message = StatusMessage;
+                var keysText = message ?? "Q=Quit P=Pause H=Help Up/Down=Model U=Unload";
+                var leftText = $" {pauseText} | Refresh: {_refreshIntervalSeconds}s | History: {_historyMinutes}m | {keysText}";
 
                 // Right side: date/time (use fixed format to avoid locale issues)
                 var now = DateTime.Now;
@@ -463,6 +481,10 @@ public partial class PsMonitorUI
                 {
                     // Use shorter left text
                     leftText = $" {pauseText} | {_refreshIntervalSeconds}s | {_historyMinutes}m";
+                    if (message != null && leftText.Length + 3 + message.Length + 2 + rightLen <= width)
+                        leftText += $" | {message}";
+                    else
+                        message = null;
                     leftLen = leftText.Length;
                     totalNeeded = leftLen + 2 + rightLen;
                 }
@@ -483,12 +505,15 @@ public partial class PsMonitorUI
                 {
                     // the same text as the short leftText: the date goes after it without wrapping the line
                     sb.Append($" {dim}|{reset} {white}{_refreshIntervalSeconds}s{reset} {dim}|{reset} {white}{_historyMinutes}m{reset}");
+                    if (message != null) sb.Append($" {dim}|{reset} \x1b[36m{message}{reset}");
                 }
                 else
                 {
                     sb.Append($" {dim}|{reset} Refresh: {white}{_refreshIntervalSeconds}s{reset}");
                     sb.Append($" {dim}|{reset} History: {white}{_historyMinutes}m{reset}");
-                    sb.Append($" {dim}|{reset} {dim}Q{reset}=Quit {dim}P{reset}=Pause {dim}H{reset}=Help {dim}Up/Down{reset}=Model");
+                    sb.Append(message != null
+                        ? $" {dim}|{reset} \x1b[36m{message}{reset}"
+                        : $" {dim}|{reset} {dim}Q{reset}=Quit {dim}P{reset}=Pause {dim}H{reset}=Help {dim}Up/Down{reset}=Model {dim}U{reset}=Unload");
                 }
 
                 // Pad and add date - ensure total doesn't exceed width

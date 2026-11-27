@@ -520,6 +520,9 @@ osync ps http://192.168.0.100:11434       # Full URL
 osync ps 192.168.0.100                     # IP address (auto: http:// + :11434)
 osync ps myserver/                         # Hostname with trailing slash
 osync ps -d myserver:11434                 # Using -d flag with port
+
+# Two servers on one host (xOllama and a plain Ollama, either way round): a second -d lists the second one's models too
+osync ps -d myserver:22434 -d myserver:11434
 ```
 
 **Features:**
@@ -580,11 +583,15 @@ osync psmonitor -L 2 -Hi 15     # 2s refresh, 15 minutes history
 
 # Monitor a server on another machine (only what its API reports, see below)
 osync psmonitor -d http://192.168.0.100:11434
+
+# Also list the models loaded on a second server (a plain Ollama next to xOllama, or the reverse)
+osync psmonitor -d 192.168.0.100:22434 -d 192.168.0.100:11434
 ```
 
 **Options:**
 
 - `-d <url>` - Server URL or alias (default: local). A server on another machine is shown in remote mode
+- A second `-d <url>` (or `-d2`, `--secondary`) - A second server whose loaded models get a table of their own under the first server's, so a model loaded on the other instance (and taking VRAM) is not missed. Either server can be Ollama or xOllama; each shows what its own API reports. `↑/↓` moves through both tables and `U` unloads the selected model on the server it is loaded on
 - `-L <interval>` - Refresh interval (default: 5s). Supports: 5, 5s, 30s, 1m, 5m, 1h30m
 - `-Hi, --history <duration>` - Initial graph history duration (default: 5m). Plain integers are treated as minutes (e.g., -Hi 10 = 10 minutes). Supports: 1m, 30m, 1h, 1h30m
 
@@ -608,7 +615,7 @@ For a server on another machine, psmonitor shows only what that server reports t
 - **xOllama with system telemetry** (0.40.4-xollama.5 and later, feature `system_telemetry_v1`) also sends its host and its GPUs' live readings, read on every refresh from a snapshot the server keeps (cheap, no GPU lookup): a System panel with the host's CPU, memory, swap and load and the server's own processes (CPU, where 100% is one core, and memory, per engine serving a model), and per GPU its utilization, temperature, power and limit, clock, fan and PCIe link. A reading the server's platform does not expose is shown as `-`, never as 0 (on Windows, AMD and Intel GPUs report only memory and utilization). `I` adds graphs of the GPU's utilization, power and temperature, the host's CPU and memory and the server's CPU; `G` picks the GPU the GPU graphs show
 - **KV rolling window**: an xOllama that reports the host RAM held by each model's KV rolling window (opencoti's `--kv-rolling-window`, the part of the cache that spills out of VRAM; feature `kv_host_telemetry_v1`) gets a graph of it in the `I` cycle: the tail allocated in pinned host memory when the model loads, 0 while the window is not engaged. A KVarN cache reports no byte size and is left out of the sum. Servers that do not report it (before the xOllama release after 0.40.10) do not show the graph
 - **VRAM and RAM of each model**: the models table shows how much of each model is in VRAM and how much, and what share, is in system RAM (`21.9 GB` and `1.1 GB 5%`), as `ollama ps` splits it. On opencoti (xOllama on Windows) these are what the OS charges the engine process: dedicated GPU memory, and the shared system memory the GPU maps for it (pinned host buffers, and what the driver moved off a full card: a Vulkan card keeps a model larger than its VRAM by placing the rest in system RAM, shown in red). Weights the engine itself keeps on the CPU (the token embedding, layers that do not fit) are ordinary process memory the GPU counters do not see: the engine reports them as `size` − `size_vram`, and RAM is the larger of the two. Elsewhere they are the server's `size_vram` and `size`, which on a llama.cpp engine are the engine's own buffers (weights, KV cache and compute) on the GPUs and in all; when every layer is on a GPU xOllama reports both equal, and the KV rolling window's tail in host memory is added as RAM
-- **Model details** (`↑/↓` selects a model): at most five lines under the table. Memory (VRAM and RAM, the GPUs the model is on, pinned memory, spilled or not), KV cache (types, estimated size, recurrent state, cells used and free, whether it is all in VRAM, the rolling window), slots (busy, live and elastic maximum, prompt processing progress, context of the trained length), MTP / drafter (type, state, draft length, acceptance) and the engine's features (DCA, PolyKV pools, prompt cache, sampling placement, think budget). They come from the engine's `props`, `kv` and `slots` (through `/api/engine`) and `/api/show`; props are read every 30 s, every refresh for the selected model. On Ollama, or before the engine answers, the box shows the server's figures, the model and its context
+- **Model details** (`↑/↓` selects a model, `U` unloads it): at most six lines under the table. Memory (VRAM and RAM, the GPUs the model is on, spilled or not), Fit (what was meant for VRAM and how much of it is there: the engine's buffers and the KV cache's layers on the GPU, then what did not fit and went to system RAM, i.e. buffers the engine kept on the CPU, KV layers spilling, the token embedding with the engine's reason, a driver spill, apart from what is in RAM by design: the KV window's tail, pinned buffers, the prompt cache), KV cache (types, estimated size, recurrent state, cells used and free, whether it is all in VRAM, the rolling window), slots (busy, live and elastic maximum, prompt processing progress, context of the trained length), MTP / drafter (type, state, draft length, acceptance) and the engine's features (DCA, PolyKV pools, prompt cache, sampling placement, think budget). They come from the engine's `props`, `kv` and `slots` (through `/api/engine`) and `/api/show`; props are read every 30 s, every refresh for the selected model. On Ollama, or before the engine answers, the box shows the server's figures, the model and its context
 - Every request is cheap: only the loaded models are read on every refresh, over kept-alive connections; the version is read once, the stored models every minute, and an engine endpoint a model does not have is not asked again until it reloads. The xOllama API key (`XOLLAMA_API_KEY` or the key file) is sent to xOllama servers only
 
 **Interactive Controls:**
@@ -1554,6 +1561,14 @@ osync mv qwen2 qwen2-7b:dev
 > None
 
 ## Changelog
+
+v1.4.11
+
+**New**
+
+- **ps and psmonitor list a second server's models**: a second `-d` (`osync psmonitor -d host:22434 -d host:11434`, also `-d2` / `--secondary`) adds a table with the models loaded on another server, typically a plain Ollama next to xOllama (either way round), so a model loaded on the other instance and taking VRAM is no longer missed. Each server is read through its own API (`/api/ps` on Ollama, the xOllama extras where it is xOllama). `osync ps` lists the second server even when the first one does not answer
+- **psmonitor unloads a model**: `U` unloads the model selected with `↑/↓`, on the server it is loaded on (a generate request with `keep_alive` 0, as `ollama stop` does; `/api/embed` for an embedding-only model); the status bar says when it is done or why it failed
+- **psmonitor model details: Fit line**: how much of what was meant for VRAM is in VRAM (the engine's buffers, the KV cache's layers or cells), what did not fit and went to system RAM (buffers on the CPU, KV layers spilling, the token embedding with the engine's reason, a driver spill), and what is in RAM by design (KV window tail, pinned buffers, prompt cache). The box has up to six lines
 
 v1.4.10
 

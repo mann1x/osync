@@ -44,38 +44,98 @@ public partial class PsMonitorUI
     private RemoteGraphMode _remoteGraphMode = RemoteGraphMode.Vram;
     private int _remoteGpu;  // index into the telemetry devices, for the GPU graphs (G cycles)
     private volatile string? _selectedModel;  // the loaded model whose details show under the table (Up/Down, Esc)
-    private const int MaxDetailLines = 5;
+    private volatile bool _selectedOnSecondary;  // the selected model is the secondary server's
+
+    // The secondary server (second -d): its loaded models are listed in a table of their own under the first's
+    private readonly string? _secondaryHost;
+    private readonly RemoteServerMonitor? _secondaryMonitor;
+    private RemoteSnapshot? _secondaryData;
+    private List<RunningModel>? SecondaryModels => _secondaryData is { Connected: true } d ? d.Models : null;
+
+    // A note in the status bar (unloading, unloaded, an error), shown for a few seconds
+    private volatile string? _statusMessage;
+    private DateTime _statusUntil;
+    private volatile bool _collectNow;  // read the servers now rather than at the next refresh (after an unload)
+
+    private string? StatusMessage => _statusMessage != null && DateTime.UtcNow < _statusUntil ? _statusMessage : null;
+
+    private void ShowStatus(string message, int seconds = 6)
+    {
+        _statusUntil = DateTime.UtcNow.AddSeconds(seconds);
+        _statusMessage = message;
+        _needsRedraw = true;
+    }
 
     /// <summary>Selects a loaded model (null: none) and has its details read now rather than at the next refresh.</summary>
-    private void SelectModel(string? name)
+    private void SelectModel(string? name, bool secondary = false)
     {
         _selectedModel = name;
-        _remoteMonitor.Select(name, () => _needsRedraw = true);
+        _selectedOnSecondary = name != null && secondary;
+        // only the server the model is on reads its details
+        var (on, off) = _selectedOnSecondary ? (_secondaryMonitor, _remoteMonitor) : (_remoteMonitor, _secondaryMonitor);
+        off?.Select(null);
+        on?.Select(name, () => _needsRedraw = true);
+    }
+
+    /// <summary>The models Up/Down moves through: the first server's, then the secondary's.</summary>
+    private List<(bool Secondary, string Name)> SelectableModels()
+    {
+        var list = new List<(bool, string)>();
+        if (_loadedModels is { } primary) list.AddRange(primary.Select(m => (false, m.Name ?? "")));
+        if (SecondaryModels is { } secondary) list.AddRange(secondary.Select(m => (true, m.Name ?? "")));
+        return list;
     }
 
     /// <summary>Up/Down: the previous or next loaded model; from no selection Down picks the first and Up the last.</summary>
     private void MoveSelection(int step)
     {
-        var models = _loadedModels;
-        if (models is not { Count: > 0 }) { SelectModel(null); return; }
-        SelectModel(models[NextSelection(models.Select(m => m.Name ?? "").ToList(), _selectedModel, step)].Name);
+        var models = SelectableModels();
+        if (models.Count == 0) { SelectModel(null); return; }
+        var at = NextSelection(models, _selectedModel == null ? null : (_selectedOnSecondary, _selectedModel), step);
+        SelectModel(models[at].Name, models[at].Secondary);
     }
 
     /// <summary>The index Up/Down moves to in <paramref name="names"/>; stays at either end.</summary>
-    internal static int NextSelection(IReadOnlyList<string> names, string? selected, int step)
+    internal static int NextSelection(IReadOnlyList<string> names, string? selected, int step) =>
+        NextSelection(names.Select(n => (false, n)).ToList(), selected == null ? null : (false, selected), step);
+
+    /// <summary>The index Up/Down moves to in <paramref name="models"/> (server, name); stays at either end.</summary>
+    internal static int NextSelection(IReadOnlyList<(bool Secondary, string Name)> models, (bool Secondary, string Name)? selected, int step)
     {
-        var at = selected == null ? -1 : names.ToList().FindIndex(n => string.Equals(n, selected, StringComparison.OrdinalIgnoreCase));
-        if (at < 0) return step > 0 ? 0 : names.Count - 1;
-        return Math.Clamp(at + step, 0, names.Count - 1);
+        var at = selected is not { } sel ? -1 : models.ToList().FindIndex(m =>
+            m.Secondary == sel.Secondary && string.Equals(m.Name, sel.Name, StringComparison.OrdinalIgnoreCase));
+        if (at < 0) return step > 0 ? 0 : models.Count - 1;
+        return Math.Clamp(at + step, 0, models.Count - 1);
+    }
+
+    /// <summary>U: unloads the selected model on the server it is loaded on, in the background.</summary>
+    private void UnloadSelected()
+    {
+        var name = _selectedModel;
+        var monitor = _selectedOnSecondary ? _secondaryMonitor : _remoteMonitor;
+        if (name == null || monitor == null)
+        {
+            ShowStatus("Select a model with Up/Down first, then U unloads it");
+            return;
+        }
+        ShowStatus($"Unloading {name}...", 60);
+        _ = Task.Run(async () =>
+        {
+            var error = await monitor.UnloadAsync(name);
+            ShowStatus(error == null ? $"Unloaded {name}" : $"Could not unload {name}: {error}");
+            _collectNow = true;
+        });
     }
 
     /// <summary>The selected model's details, from the last snapshot; null when nothing is selected or it was unloaded.</summary>
     private ModelDetail? SelectedDetail()
     {
         var name = _selectedModel;
-        var data = _remoteData;
-        if (name == null || data == null || _loadedModels == null) return null;
-        var model = _loadedModels.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase));
+        var secondary = _selectedOnSecondary;
+        var data = secondary ? _secondaryData : _remoteData;
+        var models = secondary ? SecondaryModels : _loadedModels;
+        if (name == null || data == null || models == null) return null;
+        var model = models.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase));
         if (model == null) return null;
         data.Engine.TryGetValue(name, out var stats);
         data.Placements.TryGetValue(name, out var placement);
@@ -83,12 +143,14 @@ public partial class PsMonitorUI
     }
 
     /// <summary>A model's memory in and outside VRAM: the OS's measurement when the engine reports one, else the server's figures.</summary>
-    private MemorySplit ModelMemory(RunningModel model)
+    private MemorySplit ModelMemory(RunningModel model) => ModelMemory(model, _remoteData);
+
+    private static MemorySplit ModelMemory(RunningModel model, RemoteSnapshot? data)
     {
         RemoteEngineStats? stats = null;
         RemoteModelPlacement? placement = null;
-        _remoteData?.Engine.TryGetValue(model.Name ?? "", out stats);
-        _remoteData?.Placements.TryGetValue(model.Name ?? "", out placement);
+        data?.Engine.TryGetValue(model.Name ?? "", out stats);
+        data?.Placements.TryGetValue(model.Name ?? "", out placement);
         return MemorySplit.FromProcess(stats?.Process, model.Size, model.SizeVram) ?? MemorySplit.From(model.Size, model.SizeVram, placement?.KvHostBytes);
     }
 
@@ -174,7 +236,13 @@ public partial class PsMonitorUI
     {
         try
         {
+            var secondaryTask = _secondaryMonitor?.CollectAsync();
             var snapshot = await _remoteMonitor.CollectAsync();
+            if (secondaryTask != null)
+            {
+                try { _secondaryData = await secondaryTask; }
+                catch { _secondaryData = new RemoteSnapshot { Connected = false }; }
+            }
             // A server on this machine without system telemetry: this machine's readings take its place
             if (!_remote && snapshot.System == null)
                 snapshot = await WithLocalReadingsAsync(snapshot);
@@ -183,7 +251,8 @@ public partial class PsMonitorUI
             _ollamaVersion = snapshot.Version;
             _loadedModels = snapshot.Connected ? snapshot.Models : null;
             // A selected model that was unloaded closes its box
-            if (_selectedModel is { } sel && _loadedModels?.Any(m => string.Equals(m.Name, sel, StringComparison.OrdinalIgnoreCase)) != true)
+            if (_selectedModel is { } sel &&
+                (_selectedOnSecondary ? SecondaryModels : _loadedModels)?.Any(m => string.Equals(m.Name, sel, StringComparison.OrdinalIgnoreCase)) != true)
                 SelectModel(null);
 
             if (snapshot.Connected)
@@ -255,7 +324,8 @@ public partial class PsMonitorUI
             // (2 title lines + 4 + rows), status bar
             var detail = SelectedDetail();
             var detailLines = detail?.Lines() ?? new List<(string Label, string Text)>();
-            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + (2 + 4 + modelRows) + 1 +
+            var secondaryRows = _secondaryHost != null ? 2 + 4 + Math.Max(1, SecondaryModels?.Count ?? 1) : 0;
+            var fixedHeight = (systemRows > 0 ? 2 + systemRows : 0) + (deviceRows > 0 ? 4 + deviceRows : 0) + (2 + 4 + modelRows) + secondaryRows + 1 +
                               (detail != null ? 2 + detailLines.Count : 0);
             var room = height - fixedHeight;
             // The second graph only when both keep at least 3 rows, and only with a reading to draw
@@ -284,8 +354,14 @@ public partial class PsMonitorUI
             if (deviceRows > 0) RenderRemoteDevices(console, devices!);
             RenderRemoteGraph(console, width, _remoteGraphMode, main: true);
             if (second is { } secondMode) RenderRemoteGraph(console, width, secondMode, main: false);
-            RenderRemoteModels(console, width);
-            if (detail != null) RenderModelDetail(console, detail, detailLines, width);
+            RenderRemoteModels(console, width, secondary: false);
+            // the details box goes under the table of the server the selected model is on
+            if (detail != null && !_selectedOnSecondary) RenderModelDetail(console, detail, detailLines, width);
+            if (_secondaryHost != null)
+            {
+                RenderRemoteModels(console, width, secondary: true);
+                if (detail != null && _selectedOnSecondary) RenderModelDetail(console, detail, detailLines, width);
+            }
 
             var lines = frame.ToString().Replace("\r", "").Split('\n');
             var output = new StringBuilder();
@@ -574,20 +650,24 @@ public partial class PsMonitorUI
             .Expand());
     }
 
-    private void RenderRemoteModels(IAnsiConsole console, int width)
+    private void RenderRemoteModels(IAnsiConsole console, int width, bool secondary)
     {
-        var data = _remoteData;
-        var xollama = RemoteIsXOllama;
-        var osyncVer = $"[cyan]osync {OsyncProgram.GetFullVersion()}[/]";
+        var data = secondary ? _secondaryData : _remoteData;
+        var connected = secondary ? data?.Connected == true : _ollamaConnected;
+        var loaded = secondary ? SecondaryModels : _loadedModels;
+        var host = secondary ? _secondaryHost! : _ollamaHost;
+        var xollama = data?.Flavor == ServerFlavor.XOllama;
+        var osyncVer = secondary ? "[dim]secondary[/]" : $"[cyan]osync {OsyncProgram.GetFullVersion()}[/]";
         var flavor = data != null && data.Flavor != ServerFlavor.Unknown ? OllamaServer.DisplayName(data.Flavor) : "Ollama";
+        var where = secondary ? "Secondary " : _remote ? "Remote " : "";
 
         string title;
-        if (_ollamaConnected && data != null)
+        if (connected && data != null)
         {
             var ver = data.Version.Length > 0 ? $"[magenta]v{Markup.Escape(data.Version)}[/] " : "";
-            title = _remote
-                ? $"[bold magenta]Remote {flavor}[/] ── {ver}[green]●[/] [white]{Markup.Escape(_ollamaHost)}[/] [dim]RTT {data.RoundTripMs:F0} ms[/] ── {osyncVer}"
-                : $"[bold magenta]{flavor}[/] ── {ver}[green]●[/] Connected to [white]{Markup.Escape(_ollamaHost)}[/] ── {osyncVer}";
+            title = secondary || _remote
+                ? $"[bold magenta]{where}{flavor}[/] ── {ver}[green]●[/] [white]{Markup.Escape(host)}[/] [dim]RTT {data.RoundTripMs:F0} ms[/] ── {osyncVer}"
+                : $"[bold magenta]{flavor}[/] ── {ver}[green]●[/] Connected to [white]{Markup.Escape(host)}[/] ── {osyncVer}";
             var info = new List<string>();
             if (data.StoredModels is { } stored)
                 info.Add($"{stored} models stored ({FormatGiB(data.StoredBytes ?? 0)})");
@@ -599,7 +679,7 @@ public partial class PsMonitorUI
         }
         else
         {
-            title = $"[bold magenta]{(_remote ? "Remote " : "")}{flavor}[/] ── [red]●[/] Not connected [dim]({Markup.Escape(_ollamaHost)})[/] ── {osyncVer}\n ";
+            title = $"[bold magenta]{where}{flavor}[/] ── [red]●[/] Not connected [dim]({Markup.Escape(host)})[/] ── {osyncVer}\n ";
         }
 
         var table = new Table()
@@ -631,22 +711,22 @@ public partial class PsMonitorUI
         }
         table.AddColumn(new TableColumn("[bold]Expires[/]").Centered().Width(9));
 
-        if (_ollamaConnected && _loadedModels is { Count: > 0 })
+        if (connected && loaded is { Count: > 0 })
         {
-            foreach (var model in _loadedModels)
+            foreach (var model in loaded)
             {
                 var name = model.Name ?? "";
                 if (name.Length > nameWidth - 2) name = TruncateString(name, nameWidth - 2);
                 RemoteEngineStats? stats = null;
                 data?.Engine.TryGetValue(model.Name ?? "", out stats);
 
-                var (vramCell, ramCell) = MemoryCells(ModelMemory(model), stats?.Process?.IsSpilled == true);
+                var (vramCell, ramCell) = MemoryCells(ModelMemory(model, data), stats?.Process?.IsSpilled == true);
 
                 var runner = xollama ? stats?.Engine ?? "" : model.Runner ?? "";
                 var ctx = model.ContextLength > 0 ? model.ContextLength.ToString() : model.Details?.Format == "media" ? "media" : "N/A";
                 var row = new List<string>
                 {
-                    string.Equals(model.Name, _selectedModel, StringComparison.OrdinalIgnoreCase)
+                    _selectedOnSecondary == secondary && string.Equals(model.Name, _selectedModel, StringComparison.OrdinalIgnoreCase)
                         ? $"[black on aqua]{Markup.Escape(name)}[/]"
                         : $"[white]{Markup.Escape(name)}[/]",
                     $"[white]{Markup.Escape(model.Details?.ParameterSize is { Length: > 0 } p ? p : "N/A")}[/]",
@@ -691,7 +771,7 @@ public partial class PsMonitorUI
         return (vram, $"[{color}]{Markup.Escape(ModelDetail.Gb(split.Ram))} {pct}[/]");
     }
 
-    /// <summary>The selected model's details: at most five lines under the models table, each cut to the width.</summary>
+    /// <summary>The selected model's details: at most six lines under the models table, each cut to the width.</summary>
     private static void RenderModelDetail(IAnsiConsole console, ModelDetail detail, List<(string Label, string Text)> lines, int width)
     {
         var labelWidth = Math.Max(6, lines.Max(l => l.Label.Length));
@@ -701,10 +781,11 @@ public partial class PsMonitorUI
             var text = l.Text.Length > room ? l.Text[..(room - 1)] + "…" : l.Text;
             var escaped = Markup.Escape(text);
             if (text.Contains("SPILLED")) escaped = escaped.Replace("SPILLED", "[red bold]SPILLED[/]");
+            if (text.Contains("didn't fit")) escaped = escaped.Replace("didn't fit", "[yellow bold]didn't fit[/]");
             return $"[aqua]{Markup.Escape(l.Label.PadRight(labelWidth))}[/] {escaped}";
         }));
         console.Write(new Panel(new Markup(body))
-            .Header($"[black on aqua] {Markup.Escape(detail.Name)} [/][dim]──(Up/Down=Model, Esc=Close)[/]")
+            .Header($"[black on aqua] {Markup.Escape(detail.Name)} [/][dim]──(Up/Down=Model, U=Unload, Esc=Close)[/]")
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.Aqua)
             .Expand());

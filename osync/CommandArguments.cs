@@ -150,6 +150,9 @@ namespace osync
     {
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d"), ArgPosition(1)]
         public string Destination { get; set; } = string.Empty;
+
+        [ArgDescription("Second server whose loaded models are listed too, e.g. a plain Ollama next to xOllama (a second -d works too)"), ArgShortcut("-d2"), ArgShortcut("--secondary")]
+        public string Secondary { get; set; } = string.Empty;
     }
 
     [ArgExceptionBehavior(ArgExceptionPolicy.DontHandleExceptions)]
@@ -157,6 +160,9 @@ namespace osync
     {
         [ArgDescription("Destination server URL (default: local)"), ArgShortcut("-d")]
         public string Destination { get; set; } = string.Empty;
+
+        [ArgDescription("Second server whose loaded models are shown too, e.g. a plain Ollama next to xOllama (a second -d works too)"), ArgShortcut("-d2"), ArgShortcut("--secondary")]
+        public string Secondary { get; set; } = string.Empty;
 
         [ArgDescription("Refresh interval (default: 5s). Supports: 5, 5s, 30s, 1m, 5m, 1h30m"), ArgShortcut("-L"), ArgPosition(1)]
         public string Loop { get; set; } = "5s";
